@@ -12,43 +12,48 @@
  * 1. **A finding is a closed vocabulary member, never free text.** Every
  *    finding carries a `detail` string for a human, but the FINDING itself —
  *    the thing a decision is taken on and the only thing that reaches an
- *    unauthenticated artifact — is one of SEVEN names, listed in
- *    `HQ_INTEGRITY_FINDINGS`. (This paragraph said "six" through the round that
- *    added the seventh; corrected at round seven, Low 1, by counting the array
- *    rather than the memory of it.)
+ *    unauthenticated artifact — is one of seven names.
  *
- * 2. **Blocking is a short, argued list.** FOUR findings engage safe mode, and
- *    they are `SAFE_MODE_BLOCKING_FINDINGS`: the engine says the file is
- *    corrupt, an append-only guard that the schema declares is missing, a
- *    declared append-only ledger holds less than HQ committed it held, or the
- *    evidence hash chain does not verify. Each means HQ's own record cannot be
- *    trusted. A referential-integrity violation and a degraded durability
- *    posture are REPORTED and do not engage safe mode — they are real defects,
- *    but neither says the standing record is false, and treating them as
- *    corruption would make safe mode a thing operators route around instead of
- *    a thing they act on. (This paragraph said "three" and listed three, through
- *    the round that added the fourth; corrected at round seven, Low 1.)
+ * 2. **Blocking is a short, argued list.** Only four findings engage safe
+ *    mode: `database_integrity_check_failed` (the engine says the file is
+ *    corrupt), `append_only_guard_missing` (a guard the schema declares was
+ *    absent from the file, or a declared ledger contradicts HQ's own durable
+ *    checkpoint), `append_only_ledger_truncated` (a declared ledger holds
+ *    fewer rows than the engine's own high-water mark says it reached) and
+ *    `evidence_chain_broken` (the hash chain does not verify, or the log
+ *    contradicts a commitment recorded outside it). Each means HQ's own record
+ *    cannot be trusted. A referential-integrity violation and a degraded
+ *    durability posture are REPORTED and do not engage safe mode — they are
+ *    real defects, but neither says the standing record is false, and treating
+ *    them as corruption would make safe mode a thing operators route around
+ *    instead of a thing they act on.
+ *
+ *    Both counts above are pinned to the constants they describe by
+ *    `integrity-statement-truth.test.ts`, because this docblock said "six" and
+ *    "three" for the whole of Wave 5 while `HQ_INTEGRITY_FINDINGS` grew to
+ *    seven and `SAFE_MODE_BLOCKING_FINDINGS` to four beneath it.
  *
  * 3. **Cost is stated, not hidden — and it went UP at round seven.**
  *    `structuralIntegrity` is the cheap half and is what a boot can afford on
- *    every construction, but the sentence here used to price it at "one
- *    `MAX(rowid)` seek per declared ledger and one `COUNT(*)`", which was never
- *    what it did and is further from what it does now. MEASURED at this head, on
- *    a file carrying commitments: 46 prepared statements per pass — two
- *    `sqlite_master` reads, the durability pragmas, one `PRAGMA
- *    application_id`, one `sqlite_sequence` scan, three `json_each` aggregates
- *    over the small commitment ledger, one `COUNT(*)`/`MAX(rowid)` pair over it,
- *    three standalone `MAX(rowid)` seeks, one indexed chain-commitment join, and
- *    a `COUNT(*)` + `MAX(rowid)` pair over EACH of the 33 declared ledgers. That
- *    last group is the new cost and it is NOT constant in the size of a ledger:
- *    a `COUNT(*)` is O(rows) where the seek is not. It is paid deliberately,
- *    because the seek cannot see a row removed from the middle of a ledger and
- *    the count can (round seven, High 2). Wall clock on a real file at this
- *    head: 0.87 ms per structural pass, averaged over 50. `fullIntegrity` adds
- *    `integrity_check`, `foreign_key_check` and a whole-log evidence-chain
- *    verification, which are O(database) and O(log), and it is therefore an
- *    explicit act. Which one produced a verdict is carried ON the verdict, so
- *    nobody can mistake a cheap pass for a full one.
+ *    every construction. The round-eight correction rewrote this paragraph to
+ *    say "one `MAX(rowid)` seek per declared ledger, and one `COUNT(*)` plus one
+ *    indexed lookup over HQ's own small commitment ledger, none of which is
+ *    proportional to the size of a ledger", and the concurrent round-seven lane
+ *    made the last clause false in the same wave: closing High 2 costs a
+ *    `COUNT(*)` per declared ledger, and a `COUNT(*)` IS proportional to the
+ *    rows a ledger holds. MEASURED at the merged head, on a file carrying
+ *    commitments: 46 prepared statements per pass — two `sqlite_master` reads,
+ *    the durability pragmas, one `PRAGMA application_id`, one `sqlite_sequence`
+ *    scan, three `json_each` aggregates over the small commitment ledger, one
+ *    `COUNT(*)`/`MAX(rowid)` pair over it, three standalone `MAX(rowid)` seeks,
+ *    one indexed chain-commitment join, and a `COUNT(*)` + `MAX(rowid)` pair over
+ *    EACH of the 33 declared ledgers. Wall clock on a real file: 0.87 ms per
+ *    structural pass, averaged over 50. That cost is paid deliberately, because
+ *    a `MAX(rowid)` seek cannot see a row removed from the MIDDLE of a ledger and
+ *    a count can. `fullIntegrity` adds `integrity_check`, `foreign_key_check` and
+ *    a whole-log evidence-chain verification, which are O(database) and O(log),
+ *    and it is therefore an explicit act. Which one produced a verdict is
+ *    carried ON the verdict, so nobody can mistake a cheap pass for a full one.
  */
 
 import fs from 'node:fs';
@@ -666,11 +671,41 @@ export const SAFE_MODE_STATEMENT =
   'header can still put the file back to unwitnessed; HQ holds no key over its own file and says so ' +
   'rather than claiming a boundary it does not have.';
 
+/**
+ * What each assessment depth actually costs and actually finds — the sentence
+ * `hqReliabilityPosture` serves to the Founder as `depthStatement`.
+ *
+ * It said "reads the schema catalogue and the durability pragmas ONLY" for the
+ * whole of Wave 5, and that stopped being true four correction rounds before
+ * anybody re-read it (round eight, Medium 1). The cheap pass now also reads the
+ * bounded marks HQ keeps about its own append-only records, and reports
+ * `append_only_ledger_truncated` and `evidence_chain_broken` on its own. The
+ * direction of the error was fail-SAFE — HQ detected more than it said — which
+ * is exactly why nothing caught it, and is not a reason to leave it standing.
+ *
+ * The last sentence is a machine-checkable list, not decoration:
+ * `integrity-statement-truth.test.ts` induces every member of
+ * `HQ_INTEGRITY_FINDINGS` against a real file, runs BOTH depths over each, and
+ * compares the executed full-exclusive set to the names parsed out of this
+ * string. The prose therefore cannot drift from the behaviour again without
+ * failing a test, which is the only reason it is safe to state it this
+ * precisely.
+ */
 export const INTEGRITY_DEPTH_STATEMENT =
-  'A structural assessment reads the schema catalogue and the durability pragmas only — cheap enough to run ' +
-  'at every construction. A full assessment additionally runs PRAGMA integrity_check, PRAGMA ' +
-  'foreign_key_check and a whole-log evidence-chain verification, which are proportional to the database and ' +
-  'to the log and are therefore an explicit act. A structural pass is never reported as a full one.';
+  'A structural assessment reads the schema catalogue, the durability pragmas, and the marks HQ ' +
+  'keeps about its own append-only records — for each declared ledger one MAX(rowid) seek and one ' +
+  'COUNT(*), plus an indexed lookup over HQ’s own small commitment ledger. The COUNT(*) IS ' +
+  'proportional to the rows a ledger holds, unlike the seek beside it, and that cost is paid ' +
+  'deliberately: a seek cannot see a row removed from the MIDDLE of a ledger and a count can. Measured ' +
+  'on a real file it is under a millisecond, which is what keeps it affordable at every construction. ' +
+  'It is therefore not a ' +
+  'catalogue read alone: a declared ledger that has been emptied, and an evidence log that contradicts a ' +
+  'commitment HQ recorded outside it, are both found and both blocking at this depth. A full assessment ' +
+  'additionally runs PRAGMA integrity_check, PRAGMA foreign_key_check and a whole-log evidence-chain ' +
+  'verification, which are proportional to the database and to the log and are therefore an explicit act; ' +
+  'only a full assessment can report the chain as verified, and a structural pass is never reported as a ' +
+  'full one. Findings only a full assessment can raise: database_integrity_check_failed, ' +
+  'foreign_key_violations.';
 
 /* ------------------------------------------------------------------ */
 /* The checks                                                          */

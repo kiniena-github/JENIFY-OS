@@ -42,8 +42,21 @@
  * ## And the evasion direction is not opened
  *
  * The last group proves the scan still refuses what it was hardened to refuse.
- * The full-plane sweep lives in `live-redaction.test.ts`; this is the sample
- * that would notice a loosening made in the name of this Low.
+ *
+ * The whole-plane sweep lives in `redaction-invisible-classes.test.ts`, in the
+ * `the whole Unicode plane, swept against the guard` block: every one of the
+ * 1,112,064 non-surrogate code points is pushed through `assertBrowserSafe`
+ * inside `sk-…`, and no member of the zero-ink categories may survive. This
+ * file is the SAMPLE that would notice a loosening made in the name of this
+ * Low.
+ *
+ * That sentence used to read "the full-plane sweep lives in
+ * `live-redaction.test.ts`", and it was false: that file's largest sweep is a
+ * 65-code-point C0/C1 block, and no whole-plane sweep against the guard existed
+ * anywhere in the package. It is corrected here because it is the sentence a
+ * reviewer reads to decide the sweep is complete and stop looking, and it is
+ * why `\p{Co}` PRIVATE USE stayed open for seven rounds (Wave 5 correction
+ * round nine, Medium 2).
  */
 
 import { describe, expect, it } from 'vitest';

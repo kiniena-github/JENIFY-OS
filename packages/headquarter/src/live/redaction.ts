@@ -189,6 +189,27 @@ export class BrowserSafetyError extends Error {
  *    Ordinary whitespace is still deliberately not folded — see the `\p{Zs}`
  *    paragraph below.
  *
+ * `\p{Co}` PRIVATE USE is here for the SAME one-line argument that put
+ * `\p{Cn}` here, and it was open for seven rounds while its twin was closed
+ * (Wave 5 correction round nine, High 1). A private-use code point has no
+ * assigned glyph — what a reader sees is whatever font happens to be loaded,
+ * and in the general case nothing at all — so it carries no meaning a reader
+ * could act on, and prose does not contain it.
+ *
+ * The review executed it end to end on the round-eight head:
+ * `createTask({title: 'sk-<U+E000>ABCDEFGHIJKLMNOP0123456789'})` was ACCEPTED
+ * where the plain form was refused `invalid_input`, `liveSnapshotFromOperations`
+ * and `assertBrowserSafe` both PASSED, and the written unauthenticated
+ * `hq-snapshot.json` carried the whole key with the hidden code point intact
+ * and invisible; U+F8FF and U+100000 behaved identically. Reproduced at THIS
+ * guard before the fix: all six credential shapes passed `assertBrowserSafe`
+ * for U+E000, U+F8FF, U+100000 and U+FFFFD, and every one of the 137,468
+ * private-use code points survived a `sk-…` sweep.
+ *
+ * 137,468 is the whole class: 6,400 in the BMP (U+E000-U+F8FF) plus the two
+ * supplementary private-use planes. It appeared in no residual list, no comment
+ * and no test.
+ *
  * `\p{Zs}` -- the ordinary SPACE separators -- is deliberately NOT here, and
  * that is an argued boundary rather than an omission. A space is VISIBLE: it
  * changes what a reader sees, so it hides nothing. Erasing it would join
@@ -197,7 +218,7 @@ export class BrowserSafetyError extends Error {
  * matched on the raw string anyway.
  */
 const ERASED_CODE_POINTS =
-  /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\p{Zl}\p{Zp}\p{Mn}\p{Me}\p{Cn}͏⠀]/gu;
+  /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\p{Zl}\p{Zp}\p{Mn}\p{Me}\p{Cn}\p{Co}͏⠀]/gu;
 
 /**
  * Combining marks, removed from a DECOMPOSED copy before anything else runs.
@@ -214,7 +235,10 @@ const ERASED_CODE_POINTS =
  * credential character present, and a reader strips the mark — `sk-Á…` is read,
  * copied and pasted as `sk-A…`. `\p{Cn}` is the same argument one step further:
  * an unassigned code point has no glyph, so it carries no meaning a reader
- * could act on, and prose does not contain it.
+ * could act on, and prose does not contain it. `\p{Co}` PRIVATE USE was left
+ * open by that same round on no stated argument at all, and is closed in the
+ * erase set above (round nine, High 1) — it is not a combining mark, so it
+ * needs no entry in THIS set.
  *
  * **Why this is a SEPARATE step rather than three more entries in the erase
  * set.** The erase runs LAST, after `NFKC` — and `NFKC` COMPOSES a base letter

@@ -378,11 +378,25 @@ that no longer has the disposition it claims fails it too.
 
 | Depth | What runs | When |
 |---|---|---|
-| `structural` | the schema catalogue (three `sqlite_master` reads) and the durability pragmas | **every construction of the facade** — cheap enough to afford there |
+| `structural` | the schema catalogue (three `sqlite_master` reads), the durability pragmas, one `MAX(rowid)` seek per declared ledger, and one `COUNT(*)` plus one indexed lookup over `hq_integrity_checkpoints` | **every construction of the facade** — none of it is proportional to the data, so it is cheap enough to afford there |
 | `full` | everything structural, plus `PRAGMA integrity_check`, `PRAGMA foreign_key_check` and a whole-log evidence-chain verification | only `assessHqIntegrity`, a Founder act — these are O(database) and O(log) |
 
 The depth is carried ON the verdict and on the published snapshot, so a cheap
 pass can never be mistaken for a full one.
+
+**This row said "the schema catalogue and the durability pragmas" alone, and
+was stale by four correction rounds (round eight, Medium 1).** The commitment
+and high-water-mark reads were added to the cheap pass by rounds five and six
+and the row was never re-read, so the page under-stated what a boot detects —
+fail-safe in direction, and exactly the drift this wave keeps finding. Measured
+at this head by inducing all seven findings against a real file and running both
+depths over each: `structural` raises five of them —
+`append_only_guard_missing`, `append_only_ledger_truncated`,
+`evidence_chain_broken`, `durability_below_requirement` and
+`reliability_schema_absent` — and only `database_integrity_check_failed` and
+`foreign_key_violations` need the full pass. That partition is now derived by
+execution in `integrity-statement-truth.test.ts` and compared to the sentence
+HQ serves the Founder, so the two cannot separate again.
 
 **The boot-time observation is taken BEFORE the schema ensures, and that is
 load-bearing.** Every `ensure*Schema` is `CREATE TRIGGER IF NOT EXISTS`, so a
@@ -941,9 +955,16 @@ timing-only concurrency tests. What was built:
 - **Safe mode is assessed at construction and on demand, not continuously.** A
   corruption that appears while HQ is running is caught at the next boot or the
   next explicit assessment, not at the moment it happens.
-- **The structural check cannot see everything.** It reads the schema catalogue
-  and the pragmas; a corrupt page, a broken chain and a referential violation
-  are only found by the full assessment.
+- **The structural check cannot see everything.** It reads the schema
+  catalogue, the pragmas, and the bounded marks HQ keeps about its own
+  append-only records; a corrupt page and a referential violation are the two
+  findings only the full assessment raises. **This bullet also said "a broken
+  chain", and that has been wrong since round five (round eight, Medium 1):**
+  the cheap pass reads HQ's durable commitment, so a log that has been shortened
+  or rebuilt is blocking at the BOOT as well as at the assessment. What the
+  structural pass still cannot do is verify the chain link by link — a tampered
+  entry that no commitment covers needs the full pass, and only a full
+  assessment ever reports the chain as verified.
 - **A missing append-only guard is detected, and the tamper window is not
   bounded.** HQ reports that a guard was absent when the file was found; it
   cannot say for how long, or what was written meanwhile. That is why the
@@ -2127,7 +2148,14 @@ survived it.
   in five languages plus every legitimate string the shipped suite pins still
   pass, and the fold is a SCAN COPY, so what is stored and served is
   byte-unchanged. `\p{Zs}` is still not folded, on the argument that has not
-  changed: a space is visible, so it hides nothing.
+  changed: a space is visible, so it hides nothing. **Corrected at round nine
+  (High 1): this bullet's list of what round seven left open was FALSE.**
+  `\p{Co}` PRIVATE USE — 137,468 code points, taking the identical argument to
+  the `\p{Cn}` this bullet describes as closed — was open, and appeared in no
+  residual list, no comment and no test. It is in the erase set from round
+  nine, and after that fix `\p{Zs}` and the anchoring residual in the bullet
+  below are the whole open list, derived from a whole-plane sweep rather than
+  written down.
 - **A prefix that runs straight into a credential shape with no separator at all
   (`KEYsk-…`) is still not matched.** `(?<![A-Za-z0-9])` deliberately does not
   fire inside a letter run, because `task-oriented-approach` literally contains
@@ -2784,7 +2812,7 @@ same question the surviving answer is named at the code.
 | **MEDIUM NEW-5** — 26 exported ALL-CAPS constants were still unfrozen, and frozen `Set`s were mutable in content | The shipped pinning test enumerates `package.json#exports`, so it cannot see a module no entry point re-exports; the unfrozen count regrew to 26 distinct bindings over 225, across 131 `src/` modules. Separately, `deepFreeze`'s "It freezes ALL THE WAY DOWN" was NOT true of a `Set` or a `Map`: entries are not own properties, so `QUEUED_UNREACHABLE_STATUSES` — which `service.ts` decides a queued task's reachability on — accepted `.delete()` and `.add()`, and `QUERY_STOPWORDS` accepted `.clear()`. | **The other lane froze the same 26 independently** (its round-six pass), and that half of the finding is closed at `b986cff`. What this lane adds is the census that would have CAUGHT the regrowth — `frozen-constants-census.test.ts` enumerates `src/` itself rather than the entry points — and the collection fix: a frozen `Set`/`Map` now has its entries recursed into and its mutators replaced with own, non-configurable properties that THROW, with reading untouched. The `freeze.ts` sentence is corrected rather than restated. Decision-bearing, stated either way: `PROJECT_ALLOWED_TRANSITIONS` is the gate behind `canTransitionProject` and `.active.length = 0` flips it true → false, which is NARROWING — a local denial of service on a Founder act, not an authority widening. The other 24 are `ui/spatial/*` geometry and presentation maps, `providers/codex/*` vocabularies and the review schema, `providers/claude/*` evidence kinds and the repo-slug pattern, and `control-console.ts`'s fetch allow-list; none is an authority gate. |
 | **MEDIUM NEW-6** — `provablyAvoidable` flipped retroactively and two published numbers contradicted each other | `decisionIsProvablyAvoidable` recomputed the floor from the CURRENT canonical risk class while `rowToDecision` served the STORED `floor_tier`. Executed: a Founder registry upsert flipped `provablyAvoidable` 1 → 0 and left the served record reporting `floorTier: deterministic_local` beside `requiredReviewTier: critical_review` — which cannot both be true, since the review requirement is one of the terms the floor's `max` is taken over. Undisclosed. | ONE computation answers both. `deriveDecisionRecord` recomputes the floor and SERVES it; `decisionIsProvablyAvoidable` reads that result rather than recomputing, so the two cannot diverge again. The stored value is carried as `floorTierAsRecorded`. The flip is kept — canonical truth really did move — but no longer silent: `riskClassChangedSinceIssue` per record, counted on `analytics.provablyAvoidable.riskClassChangedSinceIssue`, and stated in `AVOIDABLE_SPEND_STATEMENT`. |
 | **LOW NEW-7** — a source file the repository's own text tooling could not read | `test/connectors.github.test.ts` carried a raw U+0007 at byte 4903 and a raw U+202E beside it, so `git diff` rendered it `Bin 9424 -> 9429 bytes` — the exact hazard the NUL two characters earlier had been escaped to avoid. | Both escaped; that change now renders as one line out, one line in. **The other lane escaped the same two characters independently** (its round-six Low 6). What this lane adds is the derived assertion that replaces the hand check — `source-text-hygiene.test.ts` over every `.ts` file in `src/` and `test/` — and what that assertion then FOUND: four more raw U+001F separators in `src/application/product-command.ts`, `src/application/intelligence-command.ts` and `src/live/auth.ts`, each sitting under a Wave 5 Medium 10 comment claiming the separator had been written so the file "stays greppable". The comment described a fix that was never applied. All four are escapes now, same runtime value. |
-| **Two undisclosed sweep residuals** — `\p{Mn}`, `\p{Me}` and `\p{Cn}` carried a credential shape past the guard | The zero-ink sweep named five properties and argued `\p{Zs}` out on the merits, but non-spacing marks (1,796 code points), enclosing marks (13) and unassigned code points (810,961) were in neither the set nor any residual list. U+0301 and U+0378 are the two the review named. | CLOSED, not disclosed. A combining mark leaves every credential character intact and a reader strips the mark, so it is exactly this class. Marks are removed from an `NFKD`-decomposed copy BEFORE the pipeline — `NFKC` composes base + mark into a precomposed `Lu` letter, so a late erase misses it — and all three categories join the erase set as well. Measured after the fix: 1,809 marks swept, 0 survivors; 815 sampled unassigned code points, 0 survivors; no new refusal on accented prose in five languages or on any legitimate string the shipped suite pins. The fold is a SCAN COPY, so stored and served text is byte-unchanged. `\p{Zs}` still not folded, and `Xsk-…`/`9sk-…` still reach a written `hq-snapshot.json` — both pinned as disclosed rather than described. |
+| **Two undisclosed sweep residuals** — `\p{Mn}`, `\p{Me}` and `\p{Cn}` carried a credential shape past the guard | The zero-ink sweep named five properties and argued `\p{Zs}` out on the merits, but non-spacing marks (1,796 code points), enclosing marks (13) and unassigned code points (810,961) were in neither the set nor any residual list. U+0301 and U+0378 are the two the review named. | CLOSED, not disclosed. A combining mark leaves every credential character intact and a reader strips the mark, so it is exactly this class. Marks are removed from an `NFKD`-decomposed copy BEFORE the pipeline — `NFKC` composes base + mark into a precomposed `Lu` letter, so a late erase misses it — and all three categories join the erase set as well. Measured after the fix: 1,809 marks swept, 0 survivors; 815 sampled unassigned code points, 0 survivors; no new refusal on accented prose in five languages or on any legitimate string the shipped suite pins. The fold is a SCAN COPY, so stored and served text is byte-unchanged. `\p{Zs}` still not folded, and `Xsk-…`/`9sk-…` still reach a written `hq-snapshot.json` — both pinned as disclosed rather than described. **Corrected at round nine (High 1): that closing sentence was incomplete — `\p{Co}` PRIVATE USE (137,468 code points) was also open, on no stated argument at all, and is closed at round nine.** |
 
 ### What the second seventh-round lane does NOT claim
 
@@ -2913,16 +2941,193 @@ price.
 
 **Verification at the head this section describes** (the whole matrix, all
 green, exit 0, every number measured rather than carried forward):
-`npm run test:hq` **181 files / 3309 tests**; `npm test` (root) **37 files / 569
+`npm run test:hq` **181 files / 3310 tests** at the head that section was written, and **182 files / 3319 tests** at the merge with the concurrent lane's rounds eight and nine; `npm test` (root) **37 files / 569
 passed + 3 pre-existing skips**; `packages/hq-host` **23 files / 222 tests**;
 `apps/hq-server` **2 files / 20 tests**; four typechecks clean
 (`headquarter`, `hq-host`, `hq-server`, root build); `npm run build:site`
 10 Headquarter pages + `hq-snapshot.json`; `npm run build` all workspaces, web
-initial JS **215.66 kB / 69.22 kB gzip** — unchanged. Against `ae4bf90` the
-suite gained 3 files and 21 tests and lost none: no test file was deleted or
+initial JS **215.66 kB / 69.22 kB gzip** — unchanged. Against `ae4bf90` this lane gained 3 files and 22 tests and lost none, and the
+merge with rounds eight and nine gained one more file and nine more tests: no test file was deleted or
 renamed, and no test file holds fewer `it(` than it did. The diff against the
 accepted base `f1ce71c` touches `packages/server`, `packages/web`,
 `packages/shared`, `packages/config-mesob`, `packages/hq-host`, `apps/`,
 `package.json` and `package-lock.json` not at all; no `.skip`/`.only`/`.todo`/
 `xit`/`xdescribe` was added anywhere, and no `as any`, `@ts-expect-error` or
 `eslint-disable` appears in any added line.
+
+## The EIGHTH correction round: three statements the wave's own corrections outran
+
+A fresh read-only hostile review of the round-seven merged head returned **0
+Critical / 0 High / 1 Medium / 2 Low**, and recorded that every
+security-relevant claim it tested held under execution. All three findings are
+documentation honesty, with zero runtime effect: no gate, guard, ledger or
+route behaves differently than claimed. This round changes no behaviour. Every
+statement below was already true of the code and false in the prose describing
+it — the sixth consecutive round in which a disclosure, rather than a defect,
+was the finding.
+
+| Finding | What was wrong | What was done |
+|---|---|---|
+| **MEDIUM 1** — the depth sentence served to the Founder was false of the code it describes | `INTEGRITY_DEPTH_STATEMENT` — published as `depthStatement` on `hqReliabilityPosture`, i.e. read by the Founder verbatim — said a structural assessment "reads the schema catalogue and the durability pragmas **only**", and that a broken chain is found "only by the full assessment". Rounds five and six had given the cheap pass a `MAX(rowid)` seek per declared ledger, a `COUNT(*)` and an indexed lookup over `hq_integrity_checkpoints`, and it reports `append_only_ledger_truncated` and `evidence_chain_broken` itself. The module header's own point 3 was updated to say so; the shipped string, the depth table and the residual bullet were not. The Low 1 row of round six even records the cost wording being corrected in ONE place ("rather than keeping the old 'runs no table scan'") while this string kept it. Direction was under-claim — HQ detects more than it says, which is fail-safe and is exactly why nothing caught it. | The statement, the depth table and the residual bullet are corrected together, and the claim is now **derived rather than written**. `integrity-statement-truth.test.ts` induces all seven findings against a real file-backed database, runs BOTH depths over each induced state, and compares the executed full-exclusive set to the names parsed out of the shipped sentence. Measured at this head: `structural` raises `append_only_guard_missing`, `append_only_ledger_truncated`, `evidence_chain_broken`, `durability_below_requirement` and `reliability_schema_absent`; `full` raises all seven; only `database_integrity_check_failed` and `foreign_key_violations` need the full pass. The battery is required to reach the WHOLE vocabulary, so a new finding no scenario induces fails the test rather than silently escaping the partition. |
+| **LOW 1** — the canonical safe-mode module's header contradicted its own constants | `integrity.ts` said a finding "is one of **six** names" fifteen lines above `HQ_INTEGRITY_FINDINGS`, which holds **seven** and whose own docstring says "Seven names"; and that "**Only three findings** engage safe mode", enumerating three, while `SAFE_MODE_BLOCKING_FINDINGS` holds **four** and its docstring says "The four findings". `append_only_ledger_truncated`, added by round six, was missing from the enumeration. Round six's sweep for exactly this stale sentence reached the phase doc and a test comment but not the module that DEFINES both constants. | Both counts corrected, all four blocking findings named by identifier, and the counts **pinned to the constants**: the same test parses the two numbers back out of the header and compares them to `HQ_INTEGRITY_FINDINGS.length` and `SAFE_MODE_BLOCKING_FINDINGS.length`, requires every blocking finding to be named in the paragraph, and requires every non-blocking finding NOT to be. Adding an eighth finding or a fifth blocking one now fails a test instead of quietly falsifying the prose. This is the pattern `INBOX_ORDERING_STATEMENT` has had since Phase 10; the integrity module simply never got it. |
+| **LOW 2** — a superseded residual left unmarked in PHASE_14's NOT-fixed list | `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md` still told the reader that a cost entry's `mission_id`/`project_id` "still hold one value each" and that the columns can be read "but never as the measurement". Round six (High 3) added `mission_ids` and round seven (High NEW-4) added `project_ids`, and `#entriesForScope` measures from them; the H2 row in the same section already said so. Every other superseded statement in these docs carries an inline correction marker; this one did not. | Marked in the house style, with the narrower residual that does still hold stated in its place: the singular columns remain and carry the FIRST of the set for display. Behaviour was already pinned as route (d) in `intelligence-attribution.test.ts`. |
+
+### What was swept, and what the sweep found
+
+Because this is the sixth round in which a stale sentence was the finding, the
+whole wave was swept for the same class rather than only the three sites
+reported: every shipped statement carrying a literal count, an
+only/always/never/every claim, or a named mechanism was checked against the
+code. Checked and TRUE at this head, each measured rather than read:
+`INBOX_ORDERING_STATEMENT`'s nine attention kinds against `ATTENTION_KINDS`
+(already pinned); `COST_LEDGER_STATEMENT`'s four provenances against
+`COST_PROVENANCES`; `BACKUP_RECORD_STATEMENT`'s three sidecar suffixes against
+`SQLITE_SIDECAR_SUFFIXES` and its "an lstat, a realpath and three sidecar
+lstats" against the call sites; `INTELLIGENCE_LATENCY_STATEMENT`'s "discriminates
+between NO tiers" against `imposedFloor: null`; "All seventeen HQ destinations"
+against `HQ_ROOMS` (17); "the sum of the six canonical buckets" against the six
+summed terms; "the two decisions this model has … there is no third" against
+`'approved' | 'denied'`; "at most one hour ahead and thirty days behind" against
+`MAX_COST_OCCURRED_AT_FUTURE_MS` and `MAX_COST_OCCURRED_AT_PAST_MS`; PHASE_14's
+"**46 call sites at this head**" (measured: 46) and "(29 at this head)"
+(measured: 29); and the five other descriptions of the structural pass in this
+document, which were already consistent with the corrected statement. No further
+stale statement was found.
+
+**Residual, stated rather than fixed:** three of those statements enumerate a
+frozen constant in prose without being pinned to it —
+`COST_LEDGER_STATEMENT`/`COST_PROVENANCES`,
+`BACKUP_RECORD_STATEMENT`/`SQLITE_SIDECAR_SUFFIXES`, and
+`INTELLIGENCE_LATENCY_STATEMENT`/the latency floor. All three are correct today
+and none is load-bearing for a gate, so they are disclosed rather than changed
+in a round scoped to three findings. The cheapest path when one is next touched
+is one assertion apiece, of the shape `INBOX_ORDERING_STATEMENT` already
+carries.
+
+**Verification at the round-eight head** (the whole matrix, all green, exit 0):
+`npm run test:hq` **179 files / 3292 tests** (round-seven head was 178 / 3288;
+the whole delta is the one new file and its four tests); `npm test` (root)
+**37 files / 569 passed + 3 pre-existing skips**; hq-host **23 / 222**;
+hq-server **2 / 20**; typechecks clean for `@factoryos/headquarter`,
+`@factoryos/hq-host` and `@factoryos/hq-server`; `npm run build:site` 10 pages +
+`hq-snapshot.json`; `npm run build` all workspaces, web initial JS
+**215.66 kB / 69.22 kB gzip** (unchanged). The diff against the accepted base
+`f1ce71c` touches `packages/server`, `packages/web`, `packages/shared`,
+`packages/config-mesob`, `package.json` and `package-lock.json` not at all, and
+no test file was deleted or renamed. Zero new dependencies.
+
+**The new tests were verified to FAIL against the round-seven head** rather than
+merely to pass here: `ae4bf90` was extracted to a scratch tree, the new file
+overlaid on it alone, and all **4 of 4 failed** — the depth statement's derived
+list absent (`expected null to be truthy`), the retired "durability pragmas
+only" wording still present, `expected 6 to be 7`, and `expected 3 to be 4`.
+The eight-scenario battery itself RAN clean against that head, which is the
+point: the behaviour was already correct and only the sentences describing it
+were not.
+
+## The NINTH correction round: a credential class closed for its twin and not for itself, and the sentence that hid it
+
+A fresh read-only hostile review of the round-eight head (`ae4bf908`) returned
+**0 Critical / 1 High / 1 Medium / 1 Low**, all reproduced by execution, and
+recorded that every other security-relevant claim it tested held. The branch had
+fast-forwarded to `3bdb2d1` under the review; the corrections are on that head.
+
+| Finding | What was wrong | What was done |
+|---|---|---|
+| **HIGH 1** — `\p{Co}` PRIVATE USE carried a credential past the guard onto the unauthenticated artifact, disclosed nowhere | Executed end to end on the round-eight head: `createTask({title: 'sk-<U+E000>ABCDEFGHIJKLMNOP0123456789'})` was ACCEPTED where the plain form is refused `invalid_input`, `liveSnapshotFromOperations` and `assertBrowserSafe` both PASSED, and the written `hq-snapshot.json` carried `"title": "sk-ABCDEFGHIJKLMNOP0123456789"` with the hidden code point intact and invisible; U+F8FF and U+100000 behaved identically. That end-to-end run is the REVIEW's measurement. Reproduced independently at this lane before the fix, and the number this round measured itself: on `3bdb2d1`, all six credential shapes (`sk-`, `ghp_`, `github_pat_`, `AIza`, a PEM header, `Bearer `) passed `assertBrowserSafe` for U+E000, U+F8FF, U+100000 and U+FFFFD, and a sweep of the whole category found **137,468 of 137,468 private-use code points surviving** — 0 after the fix. The class is 137,468 code points and it was in no residual list, no comment and no test. Round seven had closed `\p{Cn}` on the argument that an unassigned code point has no glyph and does not occur in prose — the argument applies verbatim to `\p{Co}`, so one twin was closed and the other left open. | `\p{Co}` joins `ERASED_CODE_POINTS` beside `\p{Cn}`, with the same argument recorded at the code. Pinned two ways in `redaction-invisible-classes.test.ts`: all **137,468** private-use code points swept against the guard (0 survivors, and the count asserted so a narrowed sweep is visible), and the three the review executed refused in all six credential shapes. False positives measured, not assumed: the five accented-prose languages and every legitimate string the shipped suite pins still pass, and CJK, Arabic and emoji prose were added to that list. One measured price is disclosed below. |
+| **MEDIUM 2** — a shipped sentence claimed a full-plane sweep that existed nowhere | `credential-scan-cost.test.ts` said "the full-plane sweep lives in `live-redaction.test.ts`". That file's largest sweep is a 65-code-point C0/C1 block; the only `0..0x10ffff` loops in the package are in `redaction-invisible-classes.test.ts` and they COLLECT members of a named category rather than testing the plane against the guard, with the `\p{Cn}` case sampling every 997th point. This is the sentence a reviewer reads to decide the sweep is complete and stop looking, and it is why HIGH 1 survived seven rounds. | The sentence is made TRUE rather than merely corrected. A real whole-plane sweep was added: every one of the **1,112,064** non-surrogate code points is pushed through `assertBrowserSafe` inside `sk-…`, and no member of the zero-ink categories — named independently of the guard, so dropping one from `ERASED_CODE_POINTS` fails here — may survive. Measured at this head: 1,112,064 visited, **155,327 survivors, 0 of them zero-ink, 17 of them `\p{Zs}`**. The survivor count is asserted non-zero so a guard that refused everything could not pass vacuously, and the `\p{Zs}` count is pinned exactly, so the one deliberately open class cannot change size without the disclosure moving with it. Runtime ~11 s. |
+| **LOW 3** — two published numbers on one served decision record could still contradict, via a forged column | Round seven made one computation answer both the served `floorTier` and the avoidability flag, but fed that computation `characteristics` carrying only the CANONICAL risk class, while the record publishes `maxRequiredReviewTier(stored, canonical)` — the max, deliberately, so a forged NULL cannot drop the requirement. A raw `required_review_tier` ABOVE the canonical class therefore still produced the pair the source comment says cannot both be true: `floorTier: deterministic_local` beside `requiredReviewTier: critical_review`. Needs a raw DB write and is fail-closed (`satisfiesReviewRequirement: false`, and the decision drops out of `provablyAvoidable`), so nothing rested on it; what was wrong is what was PUBLISHED. | The served floor is the `max` over the review tier the record actually SERVES, not over the canonical one alone. Pinned by a hostile raw APPEND — the write the append-only triggers permit, so no guard is dropped — of a `read_only` decision carrying a forged `critical_review`: the served floor now reads `critical_review`, `floorTierAsRecorded` still reads `deterministic_local` so the forgery stays visible, and the fail-closed behaviour is unchanged. The legitimate path is untouched: an unrecognized stored floor is left exactly as it is rather than raised to a recognized tier the row never earned. |
+
+### What this round does NOT claim, and the price it measured
+
+- The anchoring residual is unchanged and still open: `Xsk-…` and `9sk-…` reach
+  a written `hq-snapshot.json`, because `(?<![A-Za-z0-9_])` deliberately does
+  not fire inside a letter run — `task-oriented-approach` literally contains
+  `sk-oriented-approach`. Architecture, not anchoring, is the guarantee.
+- `\p{Zs}` is still not folded, on the argument that has not changed.
+- **The measured price of closing `\p{Co}`, stated rather than hidden:** a
+  private-use code point sitting exactly where a word character would otherwise
+  anchor the prefix — `ta<U+E000>sk-oriented-approach` — is refused. That
+  refusal is NOT caused by this round: `assertBrowserSafe` tests every pattern
+  against the raw string as well as the folded copy, and in the raw string the
+  character before `sk-` is a private-use code point rather than the `k` that
+  makes the plain word legitimate. It is pinned as a `toThrow` beside the plain
+  word's `not.toThrow`, so the boundary is recorded rather than discovered
+  again. No accented, CJK, Arabic, Greek, Cyrillic or emoji prose is affected.
+- LOW 3 is a coherence fix on a published pair, not a new defence. The forgery
+  it concerns was already fail-closed and still needs raw database write.
+- The whole-plane sweep asserts that no member of the NAMED zero-ink categories
+  survives. JS cannot measure ink, so naming the categories is the practical
+  proxy for "a reader cannot see it", and that is stated at the test rather
+  than implied.
+
+**Verification at the round-nine head** (the whole matrix, all green, exit 0):
+`npm run test:hq` **179 files / 3297 tests** (round-eight head was 179 / 3292;
+the whole delta is five new tests in two existing files); `npm test` (root)
+**37 files / 569 passed + 3 pre-existing skips**; hq-host **23 / 222**;
+hq-server **2 / 20**; typechecks clean for `@factoryos/headquarter`,
+`@factoryos/hq-host` and `@factoryos/hq-server`; `npm run build:site` 10 pages +
+`hq-snapshot.json`; `npm run build` all workspaces, web initial JS
+**215.66 kB / 69.22 kB gzip** (unchanged). The diff against the accepted base
+`f1ce71c` touches `packages/server`, `packages/web`, `packages/shared`,
+`packages/config-mesob`, `packages/hq-host`, `apps`, `package.json` and
+`package-lock.json` not at all, and no test file was deleted or renamed. Zero
+new dependencies.
+
+**Each fix was verified to FAIL pre-fix** rather than merely to pass here: the
+source file was reverted to its `3bdb2d1` content from a scratch copy held
+outside the worktree, the new tests run against it, and the file restored. The
+measured pre-fix failures are recorded with each finding above.
+
+## The merge of round seven's third lane with rounds eight and nine
+
+`origin` moved from `ae4bf90` to `6ce93df` while the third round-seven lane
+worked. Merged, never rebased; no commit of theirs is discarded and no assertion
+of theirs is weakened. Three files conflicted, and two of the three conflicts
+were the two lanes fixing the SAME defect:
+
+- **The module header's counts.** Both lanes found "one of six names" (seven)
+  and "only three findings engage safe mode" (four) — this lane as Low 1, theirs
+  as round eight. THEIRS survives on the merits: it names the four blocking
+  findings individually AND pins both counts to the constants they describe with
+  a derived assertion (`integrity-statement-truth.test.ts`), where this lane
+  only corrected the prose. A count in a docstring that nothing checks is what
+  made the error possible in the first place.
+- **The cost paragraph.** Round eight rewrote it to say the structural pass
+  makes "one `MAX(rowid)` seek per declared ledger, and one `COUNT(*)` plus one
+  indexed lookup over HQ's own small commitment ledger — none of which is
+  proportional to the size of a ledger". That was true of THEIR head and false
+  of the merged one within the same wave: closing High 2 costs a `COUNT(*)` per
+  declared ledger, and a `COUNT(*)` is proportional to the rows a ledger holds.
+  This lane's measured version survives, with round eight's correction named as
+  the thing it supersedes and why.
+- **`INTEGRITY_DEPTH_STATEMENT`, which ships to the Founder verbatim.** Not a
+  marked conflict — it auto-merged — and it carried the same now-false "none of
+  those is proportional to the data" clause. Corrected at the merge, keeping the
+  mechanisms round eight's own test requires it to name.
+- **The two phase pages' new sections.** Both lanes appended; both are kept, in
+  round order.
+- **Phase 14's superseded residual.** Both lanes found it (this lane's Low 6,
+  theirs' round-eight Low 2). Theirs survives whole — it cites the predicate and
+  states the narrower residual that does still hold — with one clause folded in
+  from this lane: round FOUR is where the sentence first stopped being true.
+
+**One seam no conflict marker showed, and it was a real test failure.** Round
+eight's `integrity-statement-truth.test.ts` corrupts a fixed page —
+`pageCount - 2` — to produce `database_integrity_check_failed`, which is a bet
+on the file's layout. This lane added a column to the commitment ledger and a
+row count per declared ledger, the layout moved under the bet, and the scribble
+landed where the durability pragma itself could not read past: the scenario
+failed with `database disk image is malformed` thrown out of
+`readDurabilityPosture` rather than asserting anything. The scenario now chooses
+its page by OUTCOME — it looks for a page whose corruption the catalogue read and
+the pragmas survive, and fails loudly if the file carries none — which is what
+it always meant and is no longer a bet.
+
+Verification at the merged head, all green, exit 0: `npm run test:hq`
+**182 files / 3319 tests**; root `npm test` 37 / 569 + 3 pre-existing skips;
+`packages/hq-host` 23 / 222; `apps/hq-server` 2 / 20; four typechecks clean;
+`build:site` 10 pages + `hq-snapshot.json`; `npm run build` web initial JS
+215.66 kB / 69.22 kB gzip, unchanged. Measured against both parents rather than
+assumed: this lane's head 181 / 3310, theirs 179 / 3297. The merge is above
+both, and no test file holds fewer `it(` than it did on either side.

@@ -86,6 +86,43 @@ describe('a combining mark does not carry a credential past the guard', () => {
     expect(survivors).toEqual([]);
   });
 
+  it('refuses every PRIVATE USE code point, swept rather than sampled', () => {
+    // Wave 5 correction round nine, High 1. `\p{Co}` — 137,468 code points —
+    // was in no residual list, no comment and no test while `\p{Cn}`, which
+    // takes the identical argument (no assigned glyph, so nothing a reader can
+    // act on, and prose does not contain it), had been closed a round earlier.
+    // Executed on the round-eight head, `sk-<U+E000>ABCDEFGHIJKLMNOP0123456789`
+    // was accepted by `createTask`, passed `assertBrowserSafe`, and reached a
+    // written unauthenticated `hq-snapshot.json` with the key intact.
+    const privateUse = codePointsInCategory(/\p{Co}/u);
+    // A count, so a narrowing of the sweep is visible rather than quietly
+    // passing over an empty set: 6,400 in the BMP plus two full supplementary
+    // planes.
+    expect(privateUse.length).toBe(137_468);
+    const survivors: string[] = [];
+    for (const code of privateUse) {
+      const hidden = String.fromCodePoint(code);
+      try {
+        assertBrowserSafe({ note: `sk-${hidden}AAAAAAAAAAAAAAAAAAAA` });
+        survivors.push(label(code));
+      } catch (error) {
+        if (!(error instanceof BrowserSafetyError)) throw error;
+      }
+    }
+    expect(survivors).toEqual([]);
+  });
+
+  it('refuses the three private-use code points the review executed, in every shape', () => {
+    for (const code of [0xe000, 0xf8ff, 0x100000]) {
+      for (const shape of SHAPES) {
+        expect(
+          () => assertBrowserSafe({ note: shape(String.fromCodePoint(code)) }),
+          `${label(code)} in ${shape('')}`,
+        ).toThrow(BrowserSafetyError);
+      }
+    }
+  });
+
   it('refuses an UNASSIGNED code point used the same way', () => {
     // A representative traversal rather than all 810,961: every unassigned code
     // point takes the same `\p{Cn}` branch, and sweeping the whole plane set
@@ -122,6 +159,12 @@ describe('and refuses nothing a Founder would legitimately write', () => {
       'Ask-driven workflow',
       'ΤΟΚΕΝ',
       'Секрет',
+      // Re-checked when `\p{Co}` was added to the erase set (round nine): the
+      // widening must not start refusing ordinary text in any script, and none
+      // of these carries a private-use code point at all.
+      '盐厂的生产报告已经完成',
+      'تم إكمال مراجعة التقرير',
+      'Shipment ready ✅ — pallets counted 📦',
     ];
     for (const value of legitimate) {
       expect(() => assertBrowserSafe({ note: value }), value).not.toThrow();
@@ -149,4 +192,97 @@ describe('and refuses nothing a Founder would legitimately write', () => {
     expect(() => assertBrowserSafe({ note: 'Xsk-AAAAAAAAAAAAAAAAAAAA' })).not.toThrow();
     expect(() => assertBrowserSafe({ note: '9sk-AAAAAAAAAAAAAAAAAAAA' })).not.toThrow();
   });
+
+  it('does not refuse ordinary prose merely because a private-use glyph sits in it', () => {
+    // Erasing `\p{Co}` REMOVES characters from the scan copy; it cannot add a
+    // letter, so it cannot build a prefix out of prose that did not carry one.
+    // A private-use glyph in a sentence is still a sentence.
+    expect(() => assertBrowserSafe({ note: 'The \u{E000} glyph comes from a private font' })).not.toThrow();
+    expect(() => assertBrowserSafe({ note: 'Report \u{F8FF} filed for the Mesob pilot' })).not.toThrow();
+    // Measured rather than asserted, and disclosed rather than hidden: a
+    // private-use code point sitting exactly where a WORD character would
+    // otherwise anchor the prefix — `ta\u{E000}sk-oriented-approach` — IS
+    // refused. That refusal predates this round and owes nothing to the erase
+    // set: `assertBrowserSafe` tests every pattern against the RAW string as
+    // well as the folded copy, and in the raw string the character before
+    // `sk-` is a private-use code point rather than the `k` that makes
+    // `task-oriented-approach` legitimate. The plain word is unaffected.
+    expect(() => assertBrowserSafe({ note: 'ta\u{E000}sk-oriented-approach' })).toThrow(
+      BrowserSafetyError,
+    );
+    expect(() => assertBrowserSafe({ note: 'task-oriented-approach' })).not.toThrow();
+  });
+});
+
+/**
+ * The WHOLE-PLANE sweep, run against the guard rather than against a category.
+ *
+ * Wave 5 correction round nine, Medium 2. `credential-scan-cost.test.ts` shipped
+ * the sentence "the full-plane sweep lives in `live-redaction.test.ts`" — and no
+ * such sweep existed anywhere: that file's largest is a 65-code-point C0/C1
+ * block, and the two `0..0x10ffff` loops in this file COLLECT members of a named
+ * category rather than testing the plane against the guard. That sentence is
+ * what a reviewer reads to decide the sweep is complete and stop looking, and it
+ * is the reason `\p{Co}` survived seven rounds. It is corrected to name this
+ * block, and this block makes it true.
+ *
+ * Every code point in Unicode, minus the surrogate halves, which are not
+ * characters and cannot be built one at a time. No sampling and no stride.
+ *
+ * WHAT IT ASSERTS, and why that is not circular. The interesting property is
+ * "no character that a reader cannot see carries a credential past the guard".
+ * JS cannot measure ink, so the test names the zero-ink categories INDEPENDENTLY
+ * of the guard and asserts that not one member of them survives. Removing a
+ * class from `ERASED_CODE_POINTS` therefore fails here even though nobody
+ * thought to write a test for that class — which is precisely what did not
+ * happen for `\p{Co}`.
+ *
+ * The survivors are counted rather than ignored, so a guard that started
+ * refusing everything could not pass this vacuously, and the one deliberately
+ * open invisible-ish class (`\p{Zs}`, argued in `redaction.ts` and disclosed on
+ * both phase pages) is pinned at its exact size rather than waved at.
+ */
+describe('the whole Unicode plane, swept against the guard', () => {
+  /**
+   * The zero-ink categories, named here and NOT read from the guard, so this
+   * file disagrees with `redaction.ts` the moment one is dropped there.
+   */
+  const ZERO_INK =
+    /[\p{Cc}\p{Cf}\p{Cn}\p{Co}\p{Mn}\p{Me}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u;
+
+  it('lets no zero-ink code point in the entire plane carry a credential through', () => {
+    let visited = 0;
+    let survived = 0;
+    const zeroInkSurvivors: string[] = [];
+    const spaceSurvivors: string[] = [];
+    for (let code = 0; code <= 0x10ffff; code += 1) {
+      if (code >= 0xd800 && code <= 0xdfff) continue;
+      visited += 1;
+      const hidden = String.fromCodePoint(code);
+      try {
+        assertBrowserSafe({ note: `sk-${hidden}AAAAAAAAAAAAAAAAAAAA` });
+      } catch (error) {
+        if (!(error instanceof BrowserSafetyError)) throw error;
+        continue;
+      }
+      survived += 1;
+      if (ZERO_INK.test(hidden)) zeroInkSurvivors.push(label(code));
+      if (/\p{Zs}/u.test(hidden)) spaceSurvivors.push(label(code));
+    }
+
+    // The plane, exactly: 0x110000 code points less the 2,048 surrogate halves.
+    // A version-independent number, so a sweep that silently narrowed shows up.
+    expect(visited).toBe(1_112_064);
+    // The finding, and every class closed before it.
+    expect(zeroInkSurvivors).toEqual([]);
+    // Non-vacuity: a guard that refused everything would pass the line above.
+    // The survivors are ordinary VISIBLE characters — punctuation, symbols and
+    // the letters and digits the anchoring heuristic deliberately admits.
+    expect(survived).toBeGreaterThan(100_000);
+    // The one open invisible-ish class, at its exact size. `\p{Zs}` is argued
+    // out of the erase set on the merits and disclosed on both phase pages; if
+    // that ever changes, this number changes with it and the disclosure has to
+    // move too.
+    expect(spaceSurvivors).toHaveLength(17);
+  }, 120_000);
 });

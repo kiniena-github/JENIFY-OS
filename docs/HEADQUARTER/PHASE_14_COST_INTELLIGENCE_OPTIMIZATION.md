@@ -1306,26 +1306,36 @@ canonical attribution instead — a deliberate behaviour change, not a compatibl
 one.
 
 **Added by the third correction round**, and each stated where it belongs as
-well as here. The first item is kept in the tense it was written in, because
-three later rounds superseded it and a reader arriving here needs to know that
-(corrected at round seven, Low 6, where it was still standing in the PRESENT
-tense): round three said a cost entry's stored `mission_id` and `project_id`
-hold one value each and are recorded ATTRIBUTION only, with every ceiling
-measured from `hq_mission_plan_items` instead. That is no longer how a ceiling
-is measured. Round four made the stored attribution one half of a UNION and
-therefore load-bearing; round six replaced the one-of-N columns with
-`mission_ids`/`project_ids`; round seven added a third term derived from the
-append-only mission event log. The columns are a term in the measurement now,
-not a summary beside it — see High H2 and HIGH NEW-4. What remains true of round
-three is the rest of its list: spend recorded against a provider the task is not
-canonically bound to is kept in the deployment total and measures no PROVIDER
-ceiling, which means an unbound lane's provider ceiling cannot be filled at all
-rather than being fillable by anyone; the provider fold is a CASE fold and
-nothing else, so two providers whose ids differ only by case would collide, which
-the canonical uppercase-distinct set makes impossible today and a future set
-would have to preserve; and the credential scan remains SHAPE-based — folding
-away invisible characters widens what it catches and does not make it a
-data-loss-prevention filter.
+well as here: ~~a cost entry's stored `mission_id` and `project_id` still hold
+one value each and are recorded ATTRIBUTION only — every ceiling is measured from
+`hq_mission_plan_items` instead, so the columns can be read as a summary but
+never as the measurement~~ — **superseded twice, and left unmarked until round
+eight (Low 2).** Both halves of that sentence stopped being true in this wave and
+the H2 row below in this same section already says so. Round FOUR is where it
+first stopped being true — that is the round that made the stored attribution one
+half of a union and therefore load-bearing, and the concurrent round-seven lane
+reached this same finding from that end. Round six (High 3) then added
+`mission_ids`, and round seven (High NEW-4) added `project_ids`: a cost entry
+now records the WHOLE set it was recorded under, not one of N. And
+`#entriesForScope` measures from those columns — `canonicalOf(entry.taskId)
+.missionIds.includes(scope.scopeId) || entry.missionIds.includes(scope.scopeId)`
+— so the recorded columns are a measurement term, which is precisely what makes
+the ceiling survive `assignMissionToProject` severing the canonical link
+(`blocked / observed 5000` where the canonical read alone returns
+`within_ceiling / observed 0`). The residual that still holds is narrower and
+is stated in the H2 row: the singular `mission_id`/`project_id` columns remain,
+carrying the FIRST of the set for display, and a reader who measures from those
+rather than from the plural ones gets one of N.
+
+The rest of that list still holds as written: spend recorded against a provider
+the task is not canonically bound to is kept in the deployment total and
+measures no PROVIDER ceiling, which means an unbound lane's provider ceiling
+cannot be filled at all rather than being fillable by anyone; the provider fold
+is a CASE fold and nothing else, so two providers whose ids differ only by case
+would collide, which the canonical uppercase-distinct set makes impossible today
+and a future set would have to preserve; and the credential scan remains
+SHAPE-based — folding away invisible characters widens what it catches and does
+not make it a data-loss-prevention filter.
 
 
 ## The FOURTH correction round: what three independent hostile reviews reproduced
@@ -1447,10 +1457,18 @@ cross-reference:
   three categories join the erase set; the fold is a SCAN COPY, so accented text
   a Founder writes is stored and served byte-unchanged. Measured after the fix:
   0 survivors over 1,809 marks and 815 sampled unassigned code points, and no
-  new refusal on accented prose in five languages. What is still open and
-  disclosed on both pages: a word character running straight into the prefix
-  (`Xsk-…`, `9sk-…`) reaches a written `hq-snapshot.json`, and `\p{Zs}` is
-  deliberately not folded.
+  new refusal on accented prose in five languages. **Corrected at round nine
+  (High 1): the "what is still open" clause that stood here was FALSE.** It
+  named only the anchoring residual and `\p{Zs}`, and `\p{Co}` PRIVATE USE —
+  137,468 code points, taking the identical argument to the `\p{Cn}` this round
+  closed — was open, in no residual list, no comment and no test. It is closed
+  at round nine. What is still open and disclosed on both pages, after that
+  fix: a word character running straight into the prefix (`Xsk-…`, `9sk-…`)
+  reaches a written `hq-snapshot.json`, and `\p{Zs}` is deliberately not
+  folded. Those two are now the whole list, and the claim is DERIVED rather
+  than written: the whole-plane sweep in
+  `redaction-invisible-classes.test.ts` pushes all 1,112,064 non-surrogate code
+  points through the guard and fails if any zero-ink one survives.
 
 **Verification at the round-five merged head** (the whole matrix, all green,
 exit 0): `npm run test:hq` 166 files / 3192 tests; `npm test` (root) 37 files /
@@ -1603,16 +1621,89 @@ What this lane changed here:
 
 **Verification at the head this section describes** (the whole matrix, all
 green, exit 0, every number measured rather than carried forward):
-`npm run test:hq` **181 files / 3309 tests**; `npm test` (root) **37 files / 569
+`npm run test:hq` **181 files / 3310 tests** at the head that section was written, and **182 files / 3319 tests** at the merge with the concurrent lane's rounds eight and nine; `npm test` (root) **37 files / 569
 passed + 3 pre-existing skips**; `packages/hq-host` **23 files / 222 tests**;
 `apps/hq-server` **2 files / 20 tests**; four typechecks clean
 (`headquarter`, `hq-host`, `hq-server`, root build); `npm run build:site`
 10 Headquarter pages + `hq-snapshot.json`; `npm run build` all workspaces, web
-initial JS **215.66 kB / 69.22 kB gzip** — unchanged. Against `ae4bf90` the
-suite gained 3 files and 21 tests and lost none: no test file was deleted or
+initial JS **215.66 kB / 69.22 kB gzip** — unchanged. Against `ae4bf90` this lane gained 3 files and 22 tests and lost none, and the
+merge with rounds eight and nine gained one more file and nine more tests: no test file was deleted or
 renamed, and no test file holds fewer `it(` than it did. The diff against the
 accepted base `f1ce71c` touches `packages/server`, `packages/web`,
 `packages/shared`, `packages/config-mesob`, `packages/hq-host`, `apps/`,
 `package.json` and `package-lock.json` not at all; no `.skip`/`.only`/`.todo`/
 `xit`/`xdescribe` was added anywhere, and no `as any`, `@ts-expect-error` or
 `eslint-disable` appears in any added line.
+
+## The EIGHTH correction round (this page's part)
+
+One of the round's three findings lands here: **Low 2**, the superseded
+residual above that still told the reader a cost entry's `mission_id` and
+`project_id` "still hold one value each" and are "never the measurement". Both
+clauses stopped being true when round six added `mission_ids` (High 3) and round
+seven added `project_ids` (High NEW-4), and the H2 row in the same section
+already said so. It is marked in the house style where it stands, with the
+narrower residual that does still hold stated in its place. No behaviour
+changed on this page's surfaces; the attribution behaviour was already pinned as
+route (d) in `intelligence-attribution.test.ts`.
+
+The round's other two findings are recorded on
+`PHASE_13_ADVANCED_RELIABILITY.md`, together with the sweep of every shipped
+statement in this wave carrying a literal count, an only/always/never/every
+claim or a named mechanism. Two of this page's live counts were re-measured in
+that sweep and both hold at this head: `assertNoCredentialShape`'s "**46 call
+sites at this head**" (measured: 46 across `src/`, excluding the definition) and
+`credential-scan-coverage.test.ts`'s "(29 at this head)" facade members that
+call `missionText` (measured: 29).
+
+**Verification at the round-eight head** (the whole matrix, all green, exit 0):
+`npm run test:hq` 179 files / 3292 tests; `npm test` (root) 37 files / 569
+passed + 3 pre-existing skips; hq-host 23 / 222; hq-server 2 / 20; typechecks
+clean for `@factoryos/headquarter`, `@factoryos/hq-host` and
+`@factoryos/hq-server`; `npm run build:site` 10 pages + `hq-snapshot.json`;
+`npm run build` all workspaces, web initial JS 215.66 kB / 69.22 kB gzip,
+unchanged.
+
+### The NINTH correction round: Phase 14's half
+
+A fresh read-only hostile review of the round-eight head returned **0 Critical /
+1 High / 1 Medium / 1 Low**, all reproduced by execution. Two of the three touch
+this page's surfaces.
+
+**HIGH 1 — `\p{Co}` PRIVATE USE carried a credential shape past the credential
+scan.** It reaches every write on this phase's surfaces, because
+`recordIntelligenceDecision`'s labels and `recordCostEntry`'s notes go through
+the same `assertNoCredentialShape`, and it reached the unauthenticated
+`hq-snapshot.json` through `assertBrowserSafe`. 137,468 code points, in no
+residual list, no comment and no test, while `\p{Cn}` — which takes the
+identical argument — had been closed a round earlier. Closed at the code, and
+pinned by a sweep of all 137,468 with the count asserted. The "what is still
+open" sentence on this page, corrected above, was false because of it.
+
+**LOW 3 — the served `floorTier` and the served `requiredReviewTier` on one
+decision record could still contradict each other.** This is the narrower
+survivor of round seven's MEDIUM NEW-6, on this page's own surface: the floor
+recomputation was fed the CANONICAL review requirement while the record
+publishes the MAX of the canonical and the stored column, so a forged
+`required_review_tier` above the canonical class produced `floorTier:
+deterministic_local` beside `requiredReviewTier: critical_review`. The served
+floor is now the max over the review tier the record actually SERVES.
+`floorTierAsRecorded` still carries the row's own value, so the forgery stays
+visible, and the fail-closed behaviour the reviewer measured
+(`satisfiesReviewRequirement: false`, the decision out of `provablyAvoidable`)
+is unchanged — as is the legitimate raise/lower path, which round seven pinned
+and this round leaves alone.
+
+The round's MEDIUM is recorded on `PHASE_13_ADVANCED_RELIABILITY.md`: a shipped
+test comment claimed a full-plane sweep that existed nowhere, which is why
+HIGH 1 survived seven rounds. It is now true — 1,112,064 non-surrogate code
+points swept against the guard, 155,327 survivors, 0 of them zero-ink, 17 of
+them `\p{Zs}`.
+
+**Verification at the round-nine head** (the whole matrix, all green, exit 0):
+`npm run test:hq` 179 files / 3297 tests; `npm test` (root) 37 files / 569
+passed + 3 pre-existing skips; hq-host 23 / 222; hq-server 2 / 20; typechecks
+clean for `@factoryos/headquarter`, `@factoryos/hq-host` and
+`@factoryos/hq-server`; `npm run build:site` 10 pages + `hq-snapshot.json`;
+`npm run build` all workspaces, web initial JS 215.66 kB / 69.22 kB gzip,
+unchanged.
