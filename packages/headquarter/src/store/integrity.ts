@@ -34,10 +34,23 @@
  *    seven and `SAFE_MODE_BLOCKING_FINDINGS` to four beneath it.
  *
  * 3. **Cost is stated, not hidden.** `structuralIntegrity` is the cheap half —
- *    the `sqlite_master` reads, four pragmas, one `MAX(rowid)` seek per
- *    declared ledger, and one `COUNT(*)` plus one indexed lookup over HQ's own
- *    small commitment ledger, none of which is proportional to the size of a
- *    ledger — and is what a boot can afford on every construction. `fullIntegrity` adds `integrity_check`,
+ *    the `sqlite_master` reads, four pragmas, two `MAX(rowid)` seeks for each
+ *    ledger HQ has committed a mark for, and three reads of HQ's own
+ *    commitment ledger: a `COUNT(*)` served by a covering index, one indexed
+ *    lookup joined to `op_evidence` by rowid, and one full SCAN of that ledger
+ *    which expands every row's marks through `json_each` and groups them in a
+ *    temporary B-tree. None of it is proportional to the size of an
+ *    OPERATIONAL ledger — and is what a boot can afford on every construction.
+ *    **The clause above used to say "one `MAX(rowid)` seek per declared ledger
+ *    … one `COUNT(*)` plus one indexed lookup", and understated its own
+ *    structural pass in three ways** (round ten, Low 1): the seeks are two per
+ *    COMMITTED ledger rather than one per DECLARED one, the third read is a
+ *    scan with a temp B-tree rather than a lookup, and the commitment ledger is
+ *    not fixed in size — it grows a row per clean boot and per clean
+ *    assessment, so that one term grows with HQ's own history. Measured with
+ *    `EXPLAIN QUERY PLAN` and by counting the statements a pass executes, and
+ *    pinned that way in `integrity-statement-truth.test.ts` rather than
+ *    estimated. `fullIntegrity` adds `integrity_check`,
  *    `foreign_key_check` and a whole-log evidence-chain verification, which
  *    are O(database) and O(log), and it is therefore an explicit act. Which
  *    one produced a verdict is carried ON the verdict, so nobody can mistake a
@@ -666,10 +679,15 @@ export const SAFE_MODE_STATEMENT =
  * precisely.
  */
 export const INTEGRITY_DEPTH_STATEMENT =
-  'A structural assessment reads the schema catalogue, the durability pragmas, and the bounded marks HQ ' +
-  'keeps about its own append-only records — one MAX(rowid) seek per declared ledger, and one COUNT(*) ' +
-  'plus one indexed lookup over HQ’s own small commitment ledger. None of those is proportional to the ' +
-  'data, which is what keeps it cheap enough to run at every construction. It is therefore not a ' +
+  'A structural assessment reads the schema catalogue, the durability pragmas, and the marks HQ ' +
+  'keeps about its own append-only records — two MAX(rowid) seeks for each ledger HQ has committed a ' +
+  'mark for, and three reads of HQ’s own commitment ledger: a COUNT(*) served by a covering index, one ' +
+  'indexed lookup joined to the evidence log by rowid, and one full SCAN of that ledger which expands ' +
+  'every row’s marks through json_each and groups them in a temporary B-tree. None of it is ' +
+  'proportional to the operational data, which is what keeps it cheap enough to run at every ' +
+  'construction; the commitment ledger it scans is HQ’s own and is not fixed in size — it grows a row ' +
+  'per clean boot and per clean assessment, so that one term grows with HQ’s own history. It is ' +
+  'therefore not a ' +
   'catalogue read alone: a declared ledger that has been emptied, and an evidence log that contradicts a ' +
   'commitment HQ recorded outside it, are both found and both blocking at this depth. A full assessment ' +
   'additionally runs PRAGMA integrity_check, PRAGMA foreign_key_check and a whole-log evidence-chain ' +

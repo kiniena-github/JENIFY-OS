@@ -252,10 +252,17 @@ BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
 
 -- Plan items are not append-only as a table (supersede and link legitimately
 -- UPDATE their own columns), but three of their facts are write-once and the
--- engine holds all three: a row's identity can never be replaced out from
--- under its mission, a linked task id can never be re-pointed, and -- since
--- Wave 5 Medium 3 -- a row can never be DELETED. The link path sets task_id
--- only WHERE task_id IS NULL, so it never trips the relink guard.
+-- engine holds all three against every writer that has not first removed the
+-- guard: a row's identity is not replaced out from under its mission, a linked
+-- task id is not re-pointed, and -- since Wave 5 Medium 3 -- a row is not
+-- DELETED. The link path sets task_id only WHERE task_id IS NULL, so it never
+-- trips the relink guard.
+--
+-- "can never be" is what those three clauses said until round ten, Medium 1,
+-- and a trigger does not support an absolute: it is a row in sqlite_master
+-- that a writer holding the file can DROP, act under, and re-create, which is
+-- the count-preserving in-place rewrite class in Phase 13's residual list.
+-- What the engine holds is every route this repository has.
 --
 -- no_erase is not symmetry for its own sake. hq_mission_plan_items.task_id
 -- is the ONLY link from a task to its mission, and Phase 14 derives a task's
