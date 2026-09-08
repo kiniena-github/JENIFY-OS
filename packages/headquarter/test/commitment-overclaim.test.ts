@@ -552,3 +552,405 @@ describe('a commitment whose JSON does not have one value per key is refused', (
     }
   });
 });
+
+/**
+ * Wave 5, correction round thirteen, HIGH 1 — one permitted `INSERT`
+ * permanently and silently DISABLED the mid-ledger-deletion detector.
+ *
+ * `committedLedgerGaps` built a JSON path by CONCATENATION —
+ * `json_extract(c.ledger_marks, '$.' || j.key)` — out of `j.key`, which comes
+ * from `ledger_rows`, a column a raw writer controls. SQLite raises a hard
+ * `bad JSON path: '$.'` for an EMPTY key, the reader's `try/catch` swallowed it
+ * and returned `{}`, and every gap baseline for all 33 declared ledgers was
+ * gone — permanently, because the ledger is append-only and the poison row can
+ * never be removed.
+ *
+ * Neither existing clause fired on it: `json_each('{"":0}')` gives
+ * `COUNT(*) = 1` and `COUNT(DISTINCT key) = 1`, so the ambiguity clause is
+ * silent, and no declared table is named, so no value bound is either. Executed
+ * against `237fc76` on a file built by this package's own fixture, control and
+ * attack identical but for that one `INSERT`, against a mid-ledger delete of
+ * `hq_reliability_verdicts` rowid 2 — the ledger that holds the safe-mode latch:
+ *
+ * ```
+ * CONTROL: p2..p6 boot=true["append_only_guard_missing"] assess=true release=refused
+ * ATTACK : p2 boot=true assess=false[] release=ADMITTED ; p3..p6 boot=false[] assess=false[] release=ADMITTED
+ * ```
+ *
+ * That defeats exactly the detector round seven's High 2 exists to provide, in
+ * the FALSE-REASSURANCE direction, at ONE `INSERT` the schema deliberately
+ * permits — strictly cheaper than the three statements this module quotes for
+ * every other tamper.
+ *
+ * This block pins the CLASS rather than the instance, in both halves of the
+ * repair: the guard now admits only the shape HQ's single writer emits
+ * (`COMMITMENT_SHAPE_CLAUSES`), and the reader builds no JSON path out of a row
+ * and no longer fails OPEN when the engine refuses it.
+ */
+describe('a commitment whose SHAPE is not the one HQ writes is refused', () => {
+  /** Append one checkpoint with both JSON columns written as RAW TEXT. */
+  function appendShaped(
+    raw: HqDatabase,
+    marks: unknown,
+    rows: unknown,
+    chainLength: unknown = 0,
+  ): { accepted: boolean; message: string } {
+    try {
+      raw
+        .prepare(
+          `INSERT INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE}
+             (id, recorded_at, chain_length, tip_hash, ledger_marks, ledger_rows, process_id, recorded_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          `forged-${Math.random().toString(36).slice(2)}`,
+          new Date().toISOString(),
+          chainLength,
+          '',
+          marks,
+          rows,
+          'attacker',
+          'attacker',
+        );
+      return { accepted: true, message: '' };
+    } catch (error) {
+      return { accepted: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** Do one write with a ledger's own engine guards temporarily removed. */
+  function throughTheGuards(raw: HqDatabase, table: string, write: (raw: HqDatabase) => void): void {
+    const triggers = raw
+      .prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?`)
+      .all(table) as { name: string; sql: string }[];
+    expect(triggers.length).toBeGreaterThan(0);
+    for (const trigger of triggers) raw.exec(`DROP TRIGGER ${trigger.name}`);
+    write(raw);
+    for (const trigger of triggers) raw.exec(trigger.sql);
+  }
+
+  /** Remove the row at the MIDDLE of `hq_reliability_verdicts`, leaving the tail. */
+  function deleteMidLedgerRow(fx: FileFixture): void {
+    const raw = fx.raw();
+    const rowids = (
+      raw.prepare(`SELECT rowid AS rid FROM hq_reliability_verdicts ORDER BY rowid`).all() as {
+        rid: number;
+      }[]
+    ).map((row) => row.rid);
+    expect(rowids.length).toBeGreaterThanOrEqual(3);
+    throughTheGuards(raw, 'hq_reliability_verdicts', (db) =>
+      db.prepare(`DELETE FROM hq_reliability_verdicts WHERE rowid = ?`).run(rowids[1]),
+    );
+    raw.close();
+  }
+
+  /** Blocking at both depths, in further processes, with the guarded act refused. */
+  function expectStillDetected(fx: FileFixture, tags: readonly string[]): void {
+    for (const tag of tags) {
+      const process = fx.reopen(tag);
+      const boot = process.ops.hqReliabilityPosture().integrity;
+      const assessed = process.ops.assessHqIntegrity({ requestedBy: 'founder' });
+      expect(assessed.ok).toBe(true);
+      if (!assessed.ok) throw new Error('unreachable');
+      expect(assessed.data.safeMode, `${tag} assessment`).toBe(true);
+      expect(findings(assessed.data.observations), `${tag} assessment`).toContain(
+        'append_only_guard_missing',
+      );
+      expect(boot.safeMode || assessed.data.safeMode, `${tag} depth`).toBe(true);
+      expect(process.ops.releaseKillSwitch('global', 'founder').ok, `${tag} release`).toBe(false);
+      process.db.close();
+    }
+  }
+
+  it('refuses the empty-key poison, and the mid-ledger-deletion detector still fires', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+
+      const raw = fx.raw();
+      const last = newest(raw);
+      // The one statement that used to buy the whole detector, unchanged.
+      const poison = appendShaped(
+        raw,
+        last.ledger_marks,
+        JSON.stringify({ ...JSON.parse(last.ledger_rows), '': 0 }),
+        last.chain_length,
+      );
+      expect(poison.accepted, 'an empty JSON key must not reach the commitment ledger').toBe(false);
+      expect(poison.message).toMatch(/may not commit beyond the record/);
+      raw.close();
+
+      // And the detector it used to disable is intact: the mid-ledger delete is
+      // reported at every process afterwards, exactly as in the control.
+      deleteMidLedgerRow(fx);
+      const seen = fx.raw();
+      expect(regressedImmutableLedgers(seen)).toContain('hq_reliability_verdicts');
+      seen.close();
+      expectStillDetected(fx, ['empty-key-one', 'empty-key-two', 'empty-key-three']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('keeps the gap baseline even when such a row is already in the file, which is the READER half', () => {
+    // The guard bounds what LANDS. A row written at a build without these
+    // clauses is still there afterwards, so the reader is fixed too: it builds
+    // no JSON path out of a key a row carries, and therefore cannot be made to
+    // raise. Planted here through the three-statement path, which is the only
+    // way such a row can now exist at all.
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+
+      const raw = fx.raw();
+      const last = newest(raw);
+      const guard = (
+        raw
+          .prepare(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?`)
+          .get(OVERCLAIM_GUARD) as { sql: string }
+      ).sql;
+      raw.exec(`DROP TRIGGER ${OVERCLAIM_GUARD}`);
+      expect(
+        appendShaped(
+          raw,
+          last.ledger_marks,
+          JSON.stringify({ ...JSON.parse(last.ledger_rows), '': 0 }),
+          last.chain_length,
+        ).accepted,
+      ).toBe(true);
+      raw.exec(guard);
+      raw.close();
+
+      deleteMidLedgerRow(fx);
+      const seen = fx.raw();
+      // Against the previous head this list is EMPTY: the reader threw on the
+      // planted key, the catch returned no baseline at all, and the deletion
+      // was invisible for ever.
+      expect(regressedImmutableLedgers(seen)).toContain('hq_reliability_verdicts');
+      seen.close();
+      expectStillDetected(fx, ['planted-one', 'planted-two']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('admits exactly the shape HQ writes, and refuses every other one, by executing each', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      const raw = fx.raw();
+      const declared = ENGINE_IMMUTABLE_TABLES[0]!.table;
+
+      const refused: [string, unknown, unknown][] = [
+        ['the empty key', '{"":0}', '{}'],
+        ['the empty key on the row-count half', '{}', '{"":0}'],
+        ['an undeclared table name', '{"not_a_ledger_of_hqs":1}', '{}'],
+        ['a top-level array', '[1,2]', '{}'],
+        ['an empty top-level array', '[]', '{}'],
+        ['a JSON scalar', 'null', '{}'],
+        ['a JSON number', '5', '{}'],
+        ['malformed JSON', 'not json at all', '{}'],
+        ['a BLOB that parses as JSON', Buffer.from('{}', 'utf8'), '{}'],
+        ['an INTEGER in the JSON column', 5, '{}'],
+        ['a nested object as a value', `{"${declared}":{"a":1}}`, '{}'],
+        ['an array as a value', `{"${declared}":[1]}`, '{}'],
+        ['a real as a value', `{"${declared}":1.5}`, '{}'],
+        ['a text as a value', `{"${declared}":"1"}`, '{}'],
+        ['a boolean as a value', `{"${declared}":true}`, '{}'],
+        ['a null as a value', `{"${declared}":null}`, '{}'],
+        ['a NEGATIVE value', `{"${declared}":-1}`, '{}'],
+        ['a negative row count', '{}', `{"${declared}":-1}`],
+      ];
+      for (const [label, marks, rows] of refused) {
+        const outcome = appendShaped(raw, marks, rows);
+        expect(outcome.accepted, `${label} must be refused`).toBe(false);
+        expect(outcome.message, `${label} must be refused by HQ's own guard`).toMatch(
+          /may not commit beyond the record/,
+        );
+      }
+
+      // `chain_length` is the third column the same readers disagree over.
+      for (const [label, value] of [
+        ['a REAL chain length', 0.5],
+        ['a TEXT chain length', 'nine'],
+        ['a NEGATIVE chain length', -1],
+      ] as const) {
+        const outcome = appendShaped(raw, '{}', '{}', value);
+        expect(outcome.accepted, `${label} must be refused`).toBe(false);
+      }
+
+      // And the shapes that must keep landing, because refusing them would stop
+      // the commitment ledger advancing at all.
+      expect(appendShaped(raw, '{}', '{}').accepted, 'an empty commitment must still land').toBe(
+        true,
+      );
+      const genuine = newest(raw);
+      expect(
+        appendShaped(raw, genuine.ledger_marks, genuine.ledger_rows, genuine.chain_length).accepted,
+        "a re-statement of HQ's own newest commitment must still land",
+      ).toBe(true);
+      raw.close();
+
+      // Nothing above manufactured a finding, in either direction.
+      expectNoFinding(fx, ['shape-battery']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('refuses malformed JSON with HQ’s own message rather than the engine’s exception', () => {
+    // Ordering is NOT what makes this hold, and assuming it was would have been
+    // a false disclosure. Writing `json_valid = 0` first and leaning on `OR`
+    // short-circuiting was tried and executed: on SQLite 3.53.2 a `WHEN` clause
+    // whose terms carry subqueries evaluates them anyway, and this very input
+    // came back as `malformed JSON`. Every expression over these columns is
+    // total instead, so the MESSAGE is asserted here — not merely that the row
+    // did not land, which would pass either way.
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      const raw = fx.raw();
+      const outcome = appendShaped(raw, '{"op_evidence": ', '{}');
+      expect(outcome.accepted).toBe(false);
+      expect(outcome.message).toMatch(/may not commit beyond the record/);
+      expect(outcome.message).not.toMatch(/malformed JSON/);
+      expect(outcome.message).not.toMatch(/JSON path/);
+      raw.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('still lets HQ commit, boot after boot, with the new clauses standing', () => {
+    // The half that must never move. A guard that also refused HQ's own
+    // checkpoints would stop the commitment ledger advancing, which is worse
+    // than the attack it closes.
+    const fx = fileFixture();
+    try {
+      const rows = (): number =>
+        (
+          fx.db.prepare(`SELECT COUNT(*) AS n FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`).get() as {
+            n: number;
+          }
+        ).n;
+      const before = rows();
+      warm(fx, 3);
+      expect(rows(), 'HQ must still be able to commit').toBeGreaterThan(before);
+      // Every landed commitment is inside the admitted space, checked against
+      // the same rule the guard applies rather than against the guard itself.
+      const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
+      const landed = fx.db
+        .prepare(`SELECT chain_length, ledger_marks, ledger_rows FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`)
+        .all() as { chain_length: unknown; ledger_marks: string; ledger_rows: string }[];
+      expect(landed.length).toBeGreaterThan(0);
+      for (const row of landed) {
+        expect(Number.isInteger(row.chain_length)).toBe(true);
+        expect(Number(row.chain_length)).toBeGreaterThanOrEqual(0);
+        for (const column of [row.ledger_marks, row.ledger_rows]) {
+          const parsed = JSON.parse(column) as Record<string, unknown>;
+          expect(Array.isArray(parsed)).toBe(false);
+          for (const [key, value] of Object.entries(parsed)) {
+            expect(declared.has(key), `${key} must be a declared ledger`).toBe(true);
+            expect(Number.isInteger(value)).toBe(true);
+            expect(value as number).toBeGreaterThanOrEqual(0);
+          }
+        }
+      }
+      fx.db.close();
+      expectNoFinding(fx, ['still-committing-one', 'still-committing-two']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('fails CLOSED when the engine cannot read a commitment column it can compile against', () => {
+    // The `catch` that made the defeat permanent rather than noisy. The two
+    // BENIGN reasons it was written for are compile-time errors (`no such
+    // table`, `no such column`) and still yield no baseline; anything raised
+    // while the statement RUNS now yields the STRICTEST baseline instead of
+    // none, so a ledger that has been holed is reported rather than excused.
+    //
+    // The failure is INJECTED rather than induced from data, and this test
+    // claims no more than that: after `COMMITMENT_SHAPE_CLAUSES` and the
+    // `CASE`-wrapped `json_each`, no content a raw writer can put in these
+    // columns makes the statement raise. What is asserted here is the
+    // FALLBACK's behaviour, which is defence against an engine-level failure
+    // (a corrupt page, an I/O error) that no test can arrange deterministically.
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      deleteMidLedgerRow(fx);
+      // The GAP arm has to be the only one still holding, or this test would
+      // pass on the row-count arm and prove nothing about the fallback. Two
+      // further processes each APPEND a verdict row, which puts the count back
+      // above what HQ committed — measured here rather than assumed: identity
+      // goes 3 rows/top 3 to 2/3 at the delete and on to 6 rows/top 7, against a
+      // commitment of 3/3. Only `top - rows > committed gap` still fires.
+      for (const tag of ['heal-one', 'heal-two']) {
+        const healing = fx.reopen(tag);
+        healing.ops.assessHqIntegrity({ requestedBy: 'founder' });
+        healing.db.close();
+      }
+      const healed = fx.raw();
+      const identity = declaredLedgerIdentities(healed).hq_reliability_verdicts!;
+      const committed = JSON.parse(newest(healed).ledger_rows) as Record<string, number>;
+      expect(identity.rows).toBeGreaterThan(committed.hq_reliability_verdicts!);
+      expect(identity.top - identity.rows).toBeGreaterThan(0);
+      healed.close();
+
+      const raw = fx.raw();
+      const handle = raw as unknown as { prepare: (sql: string) => Record<string, unknown> };
+      const realPrepare = handle.prepare.bind(handle);
+      handle.prepare = (sql: string) => {
+        const statement = realPrepare(sql);
+        if (sql.includes(HQ_INTEGRITY_CHECKPOINT_TABLE) && sql.includes('AS gap')) {
+          statement.all = () => {
+            throw new Error('injected: the engine cannot read what this column holds');
+          };
+        }
+        return statement;
+      };
+      // Against the previous head this is `[]` — the gap read failed, the catch
+      // returned no baseline, and the holed ledger was excused.
+      expect(regressedImmutableLedgers(raw)).toContain('hq_reliability_verdicts');
+      handle.prepare = realPrepare;
+      raw.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('never reports a HEALTHY file when that fallback fires, which is the direction it must not fabricate in', () => {
+    // The fallback commits every declared ledger to a gap of zero, which is what
+    // a healthy one really has. So it can only report a ledger that NOW has a
+    // hole, and reports nothing on a store nothing has touched — the same rule
+    // this module applies to every other detector: fail closed, never fabricate.
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      const raw = fx.raw();
+      const handle = raw as unknown as { prepare: (sql: string) => Record<string, unknown> };
+      const realPrepare = handle.prepare.bind(handle);
+      handle.prepare = (sql: string) => {
+        const statement = realPrepare(sql);
+        if (sql.includes(HQ_INTEGRITY_CHECKPOINT_TABLE) && sql.includes('AS gap')) {
+          statement.all = () => {
+            throw new Error('injected: the engine cannot read what this column holds');
+          };
+        }
+        return statement;
+      };
+      expect(regressedImmutableLedgers(raw)).toEqual([]);
+      handle.prepare = realPrepare;
+      raw.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+});

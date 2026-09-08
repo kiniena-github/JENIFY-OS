@@ -41,6 +41,7 @@ import { expectOk } from './application.fixture.js';
 import { verifyHqBackupFile } from '../src/store/integrity.js';
 import { openHqDatabase } from '../src/store/db.js';
 import { HeadquarterOperations } from '../src/application/service.js';
+import { assessHqBackupCandidate } from '../src/application/reliability-command.js';
 
 /**
  * Erase a committed row from an append-only ledger the way the census is meant
@@ -72,7 +73,7 @@ describe('a backup that would latch safe mode is refused rather than verified', 
       fx.db.close();
 
       // The control: untouched, the backup verifies.
-      const honest = verifyHqBackupFile(backupPath);
+      const honest = verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate });
       expect(honest.verified).toBe(true);
       expect(honest.refusals).toEqual([]);
       expect(honest.blockingFindings).toEqual([]);
@@ -81,7 +82,7 @@ describe('a backup that would latch safe mode is refused rather than verified', 
       // The tamper, applied to the BACKUP.
       eraseCommittedRow(backupPath, 'op_evidence');
 
-      const verified = verifyHqBackupFile(backupPath);
+      const verified = verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate });
       expect(verified.verified).toBe(false);
       expect(verified.refusals).toContain('would_latch_safe_mode');
       expect(verified.blockingFindings!.length).toBeGreaterThan(0);
@@ -181,7 +182,7 @@ describe('a backup that would latch safe mode is refused rather than verified', 
       await fx.db.backup(backupPath);
       eraseCommittedRow(backupPath, 'op_evidence');
       const before = createHash('sha256').update(fs.readFileSync(backupPath)).digest('hex');
-      const verdict = verifyHqBackupFile(backupPath);
+      const verdict = verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate });
       expect(verdict.verified).toBe(false);
       const after = createHash('sha256').update(fs.readFileSync(backupPath)).digest('hex');
       // A verification that repaired what it was checking would launder the

@@ -48,7 +48,10 @@ import {
   verifyHqBackupFile,
 } from '../src/store/integrity.js';
 import { ensureEvidenceGuards, verifyEvidenceChain } from '../src/operator/evidence.js';
-import { reliabilitySchemaPresent } from '../src/application/reliability-command.js';
+import {
+  assessHqBackupCandidate,
+  reliabilitySchemaPresent,
+} from '../src/application/reliability-command.js';
 import { HeadquarterOperations } from '../src/application/service.js';
 import { HeadquarterStore } from '../src/store/headquarter.js';
 import { CapabilityRegistry } from '../src/operator/capabilities.js';
@@ -1246,7 +1249,7 @@ describe('backup verification, against real bytes on disk', () => {
     try {
       const backupPath = path.join(fx.dir, 'hq-backup.sqlite');
       await fx.db.backup(backupPath);
-      const verification = verifyHqBackupFile(backupPath);
+      const verification = verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate });
       expect(verification.verified).toBe(true);
       expect(verification.refusals).toEqual([]);
       expect(verification.integrityVerdict).toBe('ok');
@@ -1364,7 +1367,7 @@ describe('backup verification, against real bytes on disk', () => {
       const handle = fs.openSync(backupPath, 'r+');
       fs.writeSync(handle, Buffer.alloc(pageSize, 0x41), 0, pageSize, (rootPage - 1) * pageSize);
       fs.closeSync(handle);
-      const verification = verifyHqBackupFile(backupPath);
+      const verification = verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate });
       expect(verification.verified).toBe(false);
       // WHICH refusal, by name (Wave 5 review, Low finding 8). This test used
       // to assert `verified: false` and the facade's error CODE only, which
@@ -1390,7 +1393,7 @@ describe('backup verification, against real bytes on disk', () => {
     const fx = fileFixture();
     try {
       const before = fs.readFileSync(fx.dbPath);
-      const verification = verifyHqBackupFile(fx.dbPath);
+      const verification = verifyHqBackupFile(fx.dbPath, { assessCandidate: assessHqBackupCandidate });
       // The LIVE database is WAL-mode and carries a `-wal`, and SQLite resolves
       // that together with the main file while the digest covers only the main
       // file. Verifying it used to return `verified: true` — a record whose
@@ -1413,7 +1416,7 @@ describe('backup verification, against real bytes on disk', () => {
     try {
       const backupPath = path.join(fx.dir, 'hq-backup.sqlite');
       await fx.db.backup(backupPath);
-      const first = verifyHqBackupFile(backupPath);
+      const first = verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate });
       expect(first.verified).toBe(true);
       // The whole reason the checks run against a scratch COPY: opening the
       // candidate with SQLite creates `<path>-wal` and `<path>-shm` and leaves
@@ -1423,7 +1426,7 @@ describe('backup verification, against real bytes on disk', () => {
       for (const suffix of ['-wal', '-shm', '-journal']) {
         expect(fs.existsSync(`${backupPath}${suffix}`), suffix).toBe(false);
       }
-      const second = verifyHqBackupFile(backupPath);
+      const second = verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate });
       expect(second.verified).toBe(true);
       expect(second.digest).toBe(first.digest);
       expect(second.schemaTables).toBe(first.schemaTables);
@@ -1440,10 +1443,10 @@ describe('backup verification, against real bytes on disk', () => {
       // the pristine file's digest and a table count read out of the sidecar.
       const backupPath = path.join(fx.dir, 'exploit.sqlite');
       await fx.db.backup(backupPath);
-      const cleanDigest = verifyHqBackupFile(backupPath).digest;
+      const cleanDigest = verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate }).digest;
       expect(cleanDigest).toHaveLength(64);
       fs.writeFileSync(`${backupPath}-wal`, Buffer.alloc(4096, 0x00));
-      const withSidecar = verifyHqBackupFile(backupPath);
+      const withSidecar = verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate });
       expect(withSidecar.verified).toBe(false);
       expect(withSidecar.refusals).toEqual(['sidecar_journal_present']);
       // Nothing about the file was reported at all — not a digest that would
@@ -1466,8 +1469,8 @@ describe('backup verification, against real bytes on disk', () => {
       // `path.join` normalizes, so build the unnormalized text directly.
       const raw = `${fx.dir}/./headquarter.sqlite`;
       expect(path.isAbsolute(raw)).toBe(true);
-      expect(verifyHqBackupFile(raw).refusals).toEqual(['path_not_normalized']);
-      expect(verifyHqBackupFile(`${fx.dir}/sub/../headquarter.sqlite`).refusals).toEqual([
+      expect(verifyHqBackupFile(raw, { assessCandidate: assessHqBackupCandidate }).refusals).toEqual(['path_not_normalized']);
+      expect(verifyHqBackupFile(`${fx.dir}/sub/../headquarter.sqlite`, { assessCandidate: assessHqBackupCandidate }).refusals).toEqual([
         'path_not_normalized',
       ]);
       // And the normalized form of the same text is a different question,
@@ -1519,7 +1522,7 @@ describe('backup verification, against real bytes on disk', () => {
       expect(fs.existsSync(`${candidate}-wal`)).toBe(true);
       expect(fs.statSync(`${candidate}-wal`).size).toBeGreaterThan(0);
 
-      const refused = verifyHqBackupFile(candidate);
+      const refused = verifyHqBackupFile(candidate, { assessCandidate: assessHqBackupCandidate });
       expect(refused.verified).toBe(false);
       expect(refused.refusals).toEqual(['sidecar_journal_present']);
       // No digest is published for a file HQ will not stand behind.
@@ -1529,7 +1532,7 @@ describe('backup verification, against real bytes on disk', () => {
       // what was checked.
       db.pragma('wal_checkpoint(TRUNCATE)');
       db.close();
-      const accepted = verifyHqBackupFile(candidate);
+      const accepted = verifyHqBackupFile(candidate, { assessCandidate: assessHqBackupCandidate });
       expect(accepted.verified).toBe(true);
       expect(accepted.digest).toBe(
         createHash('sha256').update(fs.readFileSync(candidate)).digest('hex'),
@@ -1558,7 +1561,7 @@ describe('backup verification, against real bytes on disk', () => {
       expect(fs.existsSync(`${alias}-wal`)).toBe(false);
       expect(fs.existsSync(`${fx.dbPath}-wal`)).toBe(true);
 
-      const verification = verifyHqBackupFile(alias);
+      const verification = verifyHqBackupFile(alias, { assessCandidate: assessHqBackupCandidate });
       expect(verification.verified).toBe(false);
       expect(verification.refusals).toEqual(['file_has_multiple_links']);
       // Nothing is published about a file HQ will not stand behind.
@@ -1584,17 +1587,17 @@ describe('backup verification, against real bytes on disk', () => {
       const backupPath = path.join(fx.dir, 'hq-backup.sqlite');
       await fx.db.backup(backupPath);
       // The backup alone verifies.
-      expect(verifyHqBackupFile(backupPath).verified).toBe(true);
+      expect(verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate }).verified).toBe(true);
       // A second name for the same bytes does not: a snapshot that another name
       // can still be written through is not a snapshot.
       const alias = path.join(fx.dir, 'second-name.sqlite');
       fs.linkSync(backupPath, alias);
-      expect(verifyHqBackupFile(alias).refusals).toEqual(['file_has_multiple_links']);
-      expect(verifyHqBackupFile(backupPath).refusals).toEqual(['file_has_multiple_links']);
+      expect(verifyHqBackupFile(alias, { assessCandidate: assessHqBackupCandidate }).refusals).toEqual(['file_has_multiple_links']);
+      expect(verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate }).refusals).toEqual(['file_has_multiple_links']);
       // Removing the extra name restores the property, so the refusal is about
       // the file's real shape and not about its name.
       fs.unlinkSync(alias);
-      expect(verifyHqBackupFile(backupPath).verified).toBe(true);
+      expect(verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate }).verified).toBe(true);
     } finally {
       fx.cleanup();
     }
@@ -1615,14 +1618,14 @@ describe('backup verification, against real bytes on disk', () => {
       fs.mkdirSync(vault);
       const backupPath = path.join(vault, 'hq-backup.sqlite');
       await fx.db.backup(backupPath);
-      const direct = verifyHqBackupFile(backupPath);
+      const direct = verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate });
       expect(direct.verified).toBe(true);
       expect(direct.resolvedPath).toBe(backupPath);
 
       const link = path.join(real, 'vault-link');
       fs.symlinkSync(vault, link);
       const aliasPath = path.join(link, 'hq-backup.sqlite');
-      const throughLink = verifyHqBackupFile(aliasPath);
+      const throughLink = verifyHqBackupFile(aliasPath, { assessCandidate: assessHqBackupCandidate });
       expect(throughLink.verified).toBe(true);
       // The divergence is stated, not swallowed.
       expect(throughLink.resolvedPath).not.toBe(aliasPath);
@@ -1652,26 +1655,26 @@ describe('backup verification, against real bytes on disk', () => {
       const run = openedRun(fx, 'recorded before the backup');
       const backupPath = path.join(fx.dir, 'hq-backup.sqlite');
       await fx.db.backup(backupPath);
-      expect(verifyHqBackupFile(backupPath).verified).toBe(true);
+      expect(verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate }).verified).toBe(true);
 
       // A restore is a file copy plus a verification; both halves are proven
       // here rather than assumed, because a backup nobody has opened is not a
       // recovery point.
       const restoredPath = path.join(fx.dir, 'restored.sqlite');
       fs.copyFileSync(backupPath, restoredPath);
-      expect(verifyHqBackupFile(restoredPath).verified).toBe(true);
+      expect(verifyHqBackupFile(restoredPath, { assessCandidate: assessHqBackupCandidate }).verified).toBe(true);
       // The restored copy is a byte-for-byte copy, and its own digest says so.
       // Asserted BEFORE the file is opened live: opening a WAL-mode database
       // for writing creates a `-wal` beside it, and a candidate carrying a
       // journal sidecar is refused rather than verified (Wave 5 review, High
       // finding 3) — an open database is not a recovery point.
-      expect(verifyHqBackupFile(restoredPath).digest).toBe(verifyHqBackupFile(backupPath).digest);
+      expect(verifyHqBackupFile(restoredPath, { assessCandidate: assessHqBackupCandidate }).digest).toBe(verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate }).digest);
 
       const restored = openHqDatabase(restoredPath);
       const ops = new HeadquarterOperations(restored, { processIdentity: 'restored-process' });
       expect(ops.getRun(run.id)!.label).toBe('recorded before the backup');
       expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
-      expect(verifyHqBackupFile(restoredPath).refusals).toEqual(['sidecar_journal_present']);
+      expect(verifyHqBackupFile(restoredPath, { assessCandidate: assessHqBackupCandidate }).refusals).toEqual(['sidecar_journal_present']);
       restored.close();
     } finally {
       fx.cleanup();
@@ -2007,11 +2010,11 @@ describe('the two nearly-true facts about a file HQ has been in', () => {
     const dbPath = fx.dbPath;
     try {
       // While HQ holds it open, the sidecar refusal answers.
-      expect(verifyHqBackupFile(dbPath).refusals).toEqual(['sidecar_journal_present']);
+      expect(verifyHqBackupFile(dbPath, { assessCandidate: assessHqBackupCandidate }).refusals).toEqual(['sidecar_journal_present']);
       // A genuine backup is still accepted, and is a DIFFERENT file.
       const backupPath = path.join(fx.dir, 'genuine.sqlite');
       await fx.db.backup(backupPath);
-      expect(verifyHqBackupFile(backupPath).verified).toBe(true);
+      expect(verifyHqBackupFile(backupPath, { assessCandidate: assessHqBackupCandidate }).verified).toBe(true);
       expectOk(fx.ops.recordVerifiedBackup({ backupPath, requestedBy: 'founder' }));
 
       // The live path is refused through the facade even while it is open,
@@ -2024,17 +2027,17 @@ describe('the two nearly-true facts about a file HQ has been in', () => {
       // Closed: no sidecars remain, and the bare verification really does pass.
       // That is the fact the previous wording denied, so it is asserted rather
       // than glossed.
-      expect(verifyHqBackupFile(dbPath).verified).toBe(true);
+      expect(verifyHqBackupFile(dbPath, { assessCandidate: assessHqBackupCandidate }).verified).toBe(true);
       // With the live handle named, it is refused — and through an alias for
       // the same file, because both sides are resolved.
       const reopened = openHqDatabase(dbPath);
       const ops = new HeadquarterOperations(reopened);
-      expect(verifyHqBackupFile(dbPath, { liveDatabasePath: dbPath }).refusals).toEqual([
+      expect(verifyHqBackupFile(dbPath, { liveDatabasePath: dbPath, assessCandidate: assessHqBackupCandidate }).refusals).toEqual([
         'candidate_is_the_live_database',
       ]);
       const aliased = path.join(fx.dir, '.', path.basename(dbPath));
       expect(
-        verifyHqBackupFile(path.normalize(aliased), { liveDatabasePath: dbPath }).refusals,
+        verifyHqBackupFile(path.normalize(aliased), { liveDatabasePath: dbPath, assessCandidate: assessHqBackupCandidate }).refusals,
       ).toEqual(['candidate_is_the_live_database']);
       const refused = ops.recordVerifiedBackup({ backupPath: dbPath, requestedBy: 'founder' });
       expect(refused.ok).toBe(false);
@@ -2090,17 +2093,52 @@ describe('the two nearly-true facts about a file HQ has been in', () => {
 
 /**
  * Wave 5, correction round twelve — Low 3: the page's own count of the backup
- * guard's refusals was two short, and its count of the exercised ones was two
- * short of that.
+ * guard's refusals was short, and its count of the exercised ones was short of
+ * that.
  *
- * `BACKUP_REFUSAL_REASONS` holds fifteen; the paragraph said thirteen, and
- * omitted `file_has_multiple_links` and `candidate_is_the_live_database` from
- * the list it wrote out — both added by this wave, neither picked up by the
- * prose. Twelve are exercised, not ten. Nothing compared either number to
+ * The paragraph said thirteen and omitted `file_has_multiple_links` and
+ * `candidate_is_the_live_database` from the list it wrote out — both added by
+ * this wave, neither picked up by the prose. Nothing compared either number to
  * anything, which is the same reason the cost clause went wrong three times.
- * Both are compared here.
+ * Both are compared here, against `BACKUP_REFUSAL_REASONS` itself rather than
+ * against a figure typed into this file: the constant reached seventeen at the
+ * merge with the concurrent round-eleven lane, which added
+ * `candidate_census_unavailable`, and this test caught the drift with no edit —
+ * which is exactly what it was written to do.
+ *
+ * **This paragraph nevertheless went stale itself, twice, in exactly the way it
+ * was written to stop** (Wave 5 correction round thirteen, Low 1). It said the
+ * constant held fifteen with twelve exercised; the round-ten merge had already
+ * taken it to sixteen with thirteen, and the round-eleven merge above took it to
+ * seventeen. The tests derive their assertions from the constant, so nothing was
+ * ever unpinned — only the prose describing them was false, which is the same
+ * artifact-versus-behaviour gap the whole file exists to close. So the two
+ * numbers this paragraph states are no longer free-standing claims either: the
+ * third test below parses them back out of this very docblock and compares them
+ * to the constant and to the sweep. As measured at this head, the constant holds
+ * SEVENTEEN and FOURTEEN are exercised — and that second number is a third
+ * value in as many merges, which is precisely why it is asserted rather than
+ * written down: the pin caught the drift at the merge, with no edit.
  */
 const HERE_FOR_PHASE_13 = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Test files whose job is to COUNT refusals rather than to induce them.
+ *
+ * The docblock below explains why comments are stripped: a reason written
+ * ABOUT is not a reason exercised. The merge of the two correction lanes turned
+ * up the same hazard one level in, in code rather than in prose. The other
+ * lane's `backup-refusal-vocabulary.test.ts` asserts the identity of the
+ * UNEXERCISED set, which it can only do by writing those three names out as
+ * quoted literals — and a sweep that counted them reported all seventeen as
+ * exercised, including `file_too_large`, which would need a two-gigabyte file
+ * that no test in this package writes. Excluding the censuses keeps both lanes'
+ * sweeps measuring the one real property, and both lanes' assertions pass
+ * against it.
+ */
+const REFUSAL_CENSUS_FILES: readonly string[] = Object.freeze([
+  'backup-refusal-vocabulary.test.ts',
+]);
 
 describe('the page’s count of the backup guard’s refusals is the constant’s count', () => {
   const PHASE_13_PAGE = path.join(
@@ -2137,6 +2175,9 @@ describe('the page’s count of the backup guard’s refusals is the constant’
     const found = new Set<string>();
     for (const entry of fs.readdirSync(dir)) {
       if (!entry.endsWith('.test.ts')) continue;
+      // See `REFUSAL_CENSUS_FILES`: a file that names a reason in order to
+      // assert about it has not exercised it.
+      if (REFUSAL_CENSUS_FILES.includes(entry)) continue;
       const text = fs
         .readFileSync(path.join(dir, entry), 'utf8')
         .replace(/\/\*[\s\S]*?\*\//g, ' ')
@@ -2199,5 +2240,38 @@ describe('the page’s count of the backup guard’s refusals is the constant’
       expect(page, `the page must say ${reason} is not exercised`).toContain(`\`${reason}\``);
       expect(page).toMatch(new RegExp(`${reason}[\\s\\S]{0,400}?NOT exercised|NOT exercised[\\s\\S]{0,400}?${reason}|${reason}[\\s\\S]{0,400}?not exercised`));
     }
+  });
+
+  /**
+   * Round thirteen, Low 1 — the same rule turned on THIS FILE'S OWN prose.
+   *
+   * The two tests above pin the PAGE against the constant, and they held: the
+   * page says sixteen and thirteen and both are right. What nothing pinned was
+   * the docblock above them, which still said fifteen and twelve after the merge
+   * that added `would_latch_safe_mode`. No assertion was ever weakened by it —
+   * they all derive from the constant — but a false sentence in a test file is
+   * the same artifact as a false sentence in a served string, and this wave has
+   * now shipped ten defects that were defects in a disclosure.
+   *
+   * So the docblock's two numbers are parsed back out of this file and compared
+   * to the constant and to the sweep, exactly as the page's are.
+   */
+  it('states its own two counts in the docblock, and both are the measured ones', () => {
+    const source = fs.readFileSync(path.join(HERE_FOR_PHASE_13, 'reliability-durability.test.ts'), 'utf8');
+    const anchor = source.indexOf('const HERE_FOR_PHASE_13');
+    expect(anchor, 'the anchor this docblock sits above must exist').toBeGreaterThan(0);
+    const opened = source.lastIndexOf('/**', anchor);
+    expect(opened, 'that anchor must carry a docblock').toBeGreaterThan(0);
+    const prose = source
+      .slice(opened, anchor)
+      .split('\n')
+      .map((line) => line.replace(/^\s*\/?\*+\/?\s?/, ''))
+      .join(' ')
+      .replace(/\s+/g, ' ');
+
+    const stated = /constant holds (\w+) and (\w+) are exercised/i.exec(prose);
+    expect(stated, 'the docblock must state how many the constant holds and how many are driven').toBeTruthy();
+    expect(NUMBER_WORDS[stated![1]!.toLowerCase()]).toBe(BACKUP_REFUSAL_REASONS.length);
+    expect(NUMBER_WORDS[stated![2]!.toLowerCase()]).toBe(exercised().length);
   });
 });

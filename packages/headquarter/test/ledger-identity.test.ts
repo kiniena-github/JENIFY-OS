@@ -50,6 +50,14 @@ import {
   registerMissionCommandCapability,
 } from '../src/application/mission-command.js';
 import { RELIABILITY_COMMAND_CAPABILITY } from '../src/application/reliability-command.js';
+import {
+  MISSION_ORCHESTRATE_CAPABILITY,
+  registerMissionOrchestrateCapability,
+} from '../src/application/orchestrator-command.js';
+import {
+  MEMORY_COMMAND_CAPABILITY,
+  registerMemoryCommandCapability,
+} from '../src/application/memory-command.js';
 
 function findings(observations: readonly { finding: string }[]): string[] {
   return observations.map((observation) => observation.finding);
@@ -122,21 +130,58 @@ function expectPermanentlyBlocking(fx: FileFixture, tags: readonly string[], led
   }
 }
 
+/**
+ * A file with rows in ALL FIVE of the non-AUTOINCREMENT declared ledgers.
+ *
+ * Round seven asserted the five-ledger MEMBERSHIP and then executed the
+ * erasure attack against two of them (Wave 5 correction round eleven, Low 5).
+ * The other three were protected by a list rather than by a behaviour, which
+ * is the same substitution — an enumeration standing in for the thing it names
+ * — that this whole file exists because of. So the fixture seeds all five and
+ * the attack runs against each.
+ */
 function fixtureWithMissionWork(): FileFixture {
   const fx = fileFixture();
   registerMissionCommandCapability(fx.db);
+  registerMissionOrchestrateCapability(fx.db);
+  registerMemoryCommandCapability(fx.db);
   fx.principals.register({
     id: 'founder',
     displayName: 'Founder',
-    originateCapabilities: [MISSION_COMMAND_CAPABILITY.id, RELIABILITY_COMMAND_CAPABILITY.id],
+    originateCapabilities: [
+      MISSION_COMMAND_CAPABILITY.id,
+      MISSION_ORCHESTRATE_CAPABILITY.id,
+      MEMORY_COMMAND_CAPABILITY.id,
+      RELIABILITY_COMMAND_CAPABILITY.id,
+    ],
     approvalAuthority: true,
     active: true,
   });
+  const mission = fx.ops.commandMission({
+    title: 'Work whose plan is about to be erased',
+    objective: 'Hold a project ceiling through a plan item',
+    planItems: ['One', 'Two', 'Three'],
+    requestedBy: 'founder',
+  });
+  expect(mission.ok).toBe(true);
+  if (!mission.ok) throw new Error('unreachable');
+  // `hq_orchestration_runs` only gets a row from an APPLY, and `hq_memory`
+  // only from a recorded memory — both are seeded so the wipe has something to
+  // remove rather than passing vacuously.
   expect(
-    fx.ops.commandMission({
-      title: 'Work whose plan is about to be erased',
-      objective: 'Hold a project ceiling through a plan item',
-      planItems: ['One', 'Two', 'Three'],
+    fx.ops.orchestrateMission({
+      missionId: mission.data.mission.id,
+      mode: 'apply',
+      requestedBy: 'founder',
+    }).ok,
+  ).toBe(true);
+  expect(
+    fx.ops.recordMemory({
+      kind: 'founder_note',
+      title: 'A note the wipe is about to remove',
+      body: 'The salt line ran at nominal rate for the whole shift.',
+      project: 'mesob',
+      missionId: mission.data.mission.id,
       requestedBy: 'founder',
     }).ok,
   ).toBe(true);
@@ -242,6 +287,41 @@ describe('the declared ledgers are enumerated from the DECLARATION, never from s
       expectPermanentlyBlocking(fx, ['missions-one', 'missions-two'], 'hq_missions');
     } finally {
       fx.cleanup();
+    }
+  });
+
+  it('runs the erasure attack against EVERY one of the five, not just the two', () => {
+    // Wave 5 correction round eleven, Low 5. The membership assertion above
+    // named five ledgers; only `hq_mission_plan_items` and `hq_missions` were
+    // ever attacked. The remaining three — `hq_memory`, `hq_mission_intents`,
+    // `hq_orchestration_runs` — were covered by a list, and a list is not a
+    // behaviour. Each gets its own file, because the wipe is destructive and a
+    // shared one would let the first attack decide the rest.
+    for (const ledger of [
+      'hq_memory',
+      'hq_mission_intents',
+      'hq_orchestration_runs',
+    ] as const) {
+      const fx = fixtureWithMissionWork();
+      try {
+        warm(fx);
+        fx.db.close();
+        const raw = fx.raw();
+        // Not vacuous: the ledger really did hold rows before the wipe.
+        expect(declaredLedgerIdentities(raw)[ledger]?.rows, `${ledger} was empty`).toBeGreaterThan(0);
+        throughTheGuards(raw, ledger, (db) => db.exec(`DELETE FROM ${ledger}`));
+        expect(declaredLedgerIdentities(raw)[ledger], `${ledger} still holds rows`).toBeUndefined();
+        // The two checks that have nothing to say about these five: the table
+        // is present, its guards are back, and it never had an engine
+        // high-water mark to contradict.
+        expect(truncatedImmutableLedgers(raw), `${ledger} truncated`).toEqual([]);
+        expect(regressedImmutableLedgers(raw), `${ledger} regressed`).toEqual([ledger]);
+        raw.close();
+
+        expectPermanentlyBlocking(fx, [`${ledger}-one`, `${ledger}-two`], ledger);
+      } finally {
+        fx.cleanup();
+      }
     }
   });
 

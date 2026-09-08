@@ -69,7 +69,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
@@ -188,11 +188,40 @@ function withGuardLifted(dbPath: string, guard: string, damage: (raw: Database.D
   raw.close();
 }
 
-/** A file-backed HQ store that has completed a warm boot, so a commitment exists. */
-function warmedFile(): { dir: string; dbPath: string; cleanup: () => void } {
+/**
+ * The one warm store every scenario below starts from, built once.
+ *
+ * `warmedFile()` has thirteen call sites in this file and EIGHT of them are
+ * inside a single test, because each depth scenario has to damage its own
+ * database — a truncated ledger and a broken evidence chain cannot share one
+ * file. What those eight do NOT need is eight independent CONSTRUCTIONS of the
+ * identical undamaged store, and that is what they were paying for.
+ *
+ * The cost is not CPU. `openHqDatabase` sets `synchronous = FULL` on purpose —
+ * this file's own battery asserts `durability_below_requirement` when it is
+ * anything less — so every commit in a build is an fsync. Measured with
+ * `strace -f -c -e trace=fsync` at this head: 271 fsyncs for one warm build,
+ * and 2184 for the eight-scenario test. That is the highest fsync count of any
+ * test in the package, roughly eight times the ~250-275 the rest of the suite
+ * sits at.
+ *
+ * On this machine an fsync costs ~0.135 ms and the test runs in ~1.1 s, so the
+ * cost was invisible. A test's timeout is WALL time, though, and on slower
+ * storage the same 2184 fsyncs dominate it: at 2 ms per fsync the test takes
+ * 6.5 s and at 9 ms it takes 22 s, against vitest's 5000 ms default. That is
+ * what failed in CI, on a test no commit in this wave had touched.
+ *
+ * So the undamaged store is built ONCE, verified once, and COPIED per call. A
+ * cleanly closed HQ database is a single file with no WAL or shared-memory
+ * residue (verified below), so each scenario receives a byte-for-byte copy of
+ * the one store that was checked — strictly more deterministic than thirteen
+ * separate builds, not less, and it re-derives nothing.
+ */
+let warmTemplate: { dir: string; dbPath: string } | null = null;
+
+function warmTemplatePath(): string {
+  if (warmTemplate) return warmTemplate.dbPath;
   const fx = fileFixture();
-  const dbPath = fx.dbPath;
-  const dir = fx.dir;
   expectOk(
     fx.ops.startRunAttempt({
       runId: expectOk(
@@ -209,14 +238,48 @@ function warmedFile(): { dir: string; dbPath: string; cleanup: () => void } {
     }),
   );
   fx.db.close();
-  const warm = openHqDatabase(dbPath);
+  const warm = openHqDatabase(fx.dbPath);
   new HeadquarterOperations(warm);
   const committed = (
     warm.prepare(`SELECT COUNT(*) AS n FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`).get() as { n: number }
   ).n;
   expect(committed).toBeGreaterThan(0);
   warm.close();
-  return { dir, dbPath, cleanup: () => fx.cleanup() };
+
+  // The property that makes copying equivalent to rebuilding, asserted rather
+  // than assumed: after a clean close the store is ONE file. If a future change
+  // leaves a `-wal` or `-shm` beside it, copying the main file alone would hand
+  // out a store missing its most recent commits, and this fails instead.
+  expect(fs.readdirSync(path.dirname(fx.dbPath))).toEqual([path.basename(fx.dbPath)]);
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-warm-template-'));
+  const dbPath = path.join(dir, path.basename(fx.dbPath));
+  fs.copyFileSync(fx.dbPath, dbPath);
+  fx.cleanup();
+  warmTemplate = { dir, dbPath };
+  return dbPath;
+}
+
+// Built in a hook rather than lazily inside whichever test happens to ask
+// first, so the one shared construction is charged to the shared setup and each
+// test's own budget covers only its own work. Vitest gives a hook 10 s and a
+// test 5 s, which is the right way round for a fixture every test reuses.
+beforeAll(() => {
+  warmTemplatePath();
+});
+
+afterAll(() => {
+  if (warmTemplate) fs.rmSync(warmTemplate.dir, { recursive: true, force: true });
+  warmTemplate = null;
+});
+
+/** A file-backed HQ store that has completed a warm boot, so a commitment exists. */
+function warmedFile(): { dir: string; dbPath: string; cleanup: () => void } {
+  const template = warmTemplatePath();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-warmed-'));
+  const dbPath = path.join(dir, path.basename(template));
+  fs.copyFileSync(template, dbPath);
+  return { dir, dbPath, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
 }
 
 /**
@@ -468,17 +531,50 @@ describe('the depth statement served to the Founder is derived from what the two
 });
 
 /**
- * Run one structural pass with `db.prepare` instrumented, and return every SQL
- * statement it actually EXECUTED — not every statement it prepared, because a
- * prepared statement that is never stepped costs nothing.
+ * Run one structural pass with every route to the engine instrumented, and
+ * return every SQL statement it actually EXECUTED — not every statement it
+ * prepared, because a prepared statement that is never stepped costs nothing.
+ *
+ * ## Round thirteen, Medium 1 — the instrument was BLIND to a term the
+ * sentence it checks names explicitly
+ *
+ * This wrapped `db.prepare` only, so it could not see a statement that never
+ * goes through a prepared handle. `readDurabilityPosture` runs four of them —
+ * `journal_mode`, `synchronous`, `foreign_keys` and `wal_autocheckpoint` —
+ * through better-sqlite3's `db.pragma()`, which compiles and steps its own
+ * statement internally. The depth statement names "the durability pragmas" in
+ * its very first clause and prices the fixed term at "11 catalogue, pragma and
+ * commitment-ledger reads", and those four were in neither the 11 nor the total:
+ * the real fixed term is 15 and the base is 48, the FOURTH undercount this
+ * clause has shipped and the fourth in the same direction.
+ *
+ * The parse-back rule that catches the other three could not catch this one,
+ * because the rule compares the prose to a MEASUREMENT and the measurement
+ * itself was missing the term. So the instrument is fixed first and the number
+ * second: `db.exec` is wrapped too (it executes SQL without a prepared handle
+ * at all — measured at 0 in a structural pass, which is a fact worth pinning
+ * rather than assuming), and `db.pragma` is wrapped and recorded as the
+ * `PRAGMA <name>` it runs. A future check that reaches the engine by any of the
+ * three routes is counted.
  */
-function statementsExecutedByOneStructuralPass(dbPath: string): { sql: string[]; close: () => void } {
+function statementsExecutedByOneStructuralPass(dbPath: string): {
+  sql: string[];
+  pragmas: string[];
+  execs: string[];
+  close: () => void;
+} {
   const db = openHqDatabase(dbPath);
   const executed: string[] = [];
+  const pragmas: string[] = [];
+  const execs: string[] = [];
   const handle = db as unknown as {
     prepare: (sql: string) => Record<string, unknown>;
+    exec: (sql: string) => unknown;
+    pragma: (source: string, options?: unknown) => unknown;
   };
   const realPrepare = handle.prepare.bind(handle);
+  const realExec = handle.exec.bind(handle);
+  const realPragma = handle.pragma.bind(handle);
   handle.prepare = (sql: string) => {
     const statement = realPrepare(sql);
     const normalized = sql.replace(/\s+/g, ' ').trim();
@@ -492,11 +588,28 @@ function statementsExecutedByOneStructuralPass(dbPath: string): { sql: string[];
     }
     return statement;
   };
+  handle.exec = (sql: string) => {
+    execs.push(sql.replace(/\s+/g, ' ').trim());
+    return realExec(sql);
+  };
+  handle.pragma = (source: string, options?: unknown) => {
+    pragmas.push(String(source).replace(/\s+/g, ' ').trim());
+    return realPragma(source, options);
+  };
   const outcome = structuralIntegrity(db, {});
   // A pass that found something would be measuring a different code path.
   expect([...findingsOf(outcome.observations)]).toEqual([]);
   handle.prepare = realPrepare;
-  return { sql: executed, close: () => db.close() };
+  handle.exec = realExec;
+  handle.pragma = realPragma;
+  return {
+    // Every route to the engine, in one list, because the sentence being checked
+    // prices STATEMENTS and does not care which API carried them.
+    sql: [...executed, ...pragmas.map((name) => `PRAGMA ${name}`), ...execs],
+    pragmas,
+    execs,
+    close: () => db.close(),
+  };
 }
 
 describe('the cost clause of the depth statement is derived from what a pass executes', () => {
@@ -731,11 +844,79 @@ describe('the cost clause of the depth statement is derived from what a pass exe
     const preCommitment = /measured at (\d+) statements and ZERO identity reads/.exec(constantProse);
     expect(preCommitment, 'the constant must state the pre-commitment branch').toBeTruthy();
     expect(Number(preCommitment![1])).toBe(before!.total);
-    // "overstate … by four times" is the only comparative it makes, and it is
-    // measured rather than rhetorical.
-    expect(constantProse).toMatch(/overstate the unestablished case by four\s*times/);
-    expect(before!.total * 4).toBeLessThanOrEqual(plain!.total);
-    expect(before!.total * 5).toBeGreaterThan(warm!.total);
+    // "overstate … by three times" is the only comparative it makes, and it is
+    // measured rather than rhetorical. It said FOUR until round thirteen's
+    // Medium 1: the pre-commitment branch reads the same four durability pragmas
+    // the committed-on branch does, so counting them raised the smaller number
+    // proportionally more and the ratio fell. Both bounds move with the
+    // comparative, so a stale word fails here.
+    expect(constantProse).toMatch(/overstate the unestablished case by three\s*times/);
+    expect(before!.total * 3).toBeLessThanOrEqual(plain!.total);
+    expect(before!.total * 4).toBeGreaterThan(warm!.total);
+  }, FILE_BACKED_BATTERY_TIMEOUT_MS);
+
+  /**
+   * Round thirteen, Medium 1 — the INSTRUMENT, checked before the number it
+   * produces.
+   *
+   * The three previous undercounts of this clause were caught by parsing the
+   * prose back out of the source and comparing it to a measurement. That rule
+   * cannot catch an undercount the MEASUREMENT shares, and it did not: the
+   * measurement wrapped `db.prepare`, `readDurabilityPosture` reads four pragmas
+   * through `db.pragma()`, and "the durability pragmas" the sentence names in
+   * its first clause were in neither the fixed term nor the total.
+   *
+   * So the instrument itself is asserted here. It is not enough that the numbers
+   * agree — they agreed for three rounds while being wrong together.
+   */
+  it('counts the durability pragmas, which do not go through a prepared statement', () => {
+    const file = warmedFile();
+    try {
+      const pass = statementsExecutedByOneStructuralPass(file.dbPath);
+      // The four the served sentence promises a pass reads, by name, taken off
+      // the `db.pragma` route rather than assumed to be somewhere in the total.
+      expect([...pass.pragmas].sort()).toEqual([
+        'foreign_keys',
+        'journal_mode',
+        'synchronous',
+        'wal_autocheckpoint',
+      ]);
+      // They are not prepared statements, which is exactly why they were missed:
+      // none of them appears in the prepared-statement stream.
+      const prepared = pass.sql.filter((sql) => !sql.startsWith('PRAGMA '));
+      for (const name of pass.pragmas) {
+        expect(prepared.some((sql) => sql.includes(name))).toBe(false);
+      }
+      // `db.exec` is the third route to the engine. A structural pass takes it
+      // zero times; that is pinned rather than assumed, so a future check that
+      // used it could not slip past the count either.
+      expect(pass.execs).toEqual([]);
+      // And the fixed term the sentence prices includes them: the total minus
+      // the two census terms is 15, of which 4 are these.
+      const identities = pass.sql.filter((sql) =>
+        /^SELECT COUNT\(\*\) AS held, COALESCE\(MAX\(rowid\), 0\) AS top FROM /.test(sql),
+      ).length;
+      const seeks = pass.sql.filter((sql) => /^SELECT MAX\(rowid\) AS top FROM /.test(sql)).length;
+      const fixed = pass.sql.length - identities - seeks;
+      expect(fixed).toBe(STRUCTURAL_STATEMENT_BASE - ENGINE_IMMUTABLE_TABLES.length);
+      expect(fixed - pass.pragmas.length).toBe(
+        STRUCTURAL_STATEMENT_BASE - ENGINE_IMMUTABLE_TABLES.length - 4,
+      );
+      pass.close();
+
+      // The served sentence names the term it used to omit, and may not carry
+      // the retired figure again.
+      expect(INTEGRITY_DEPTH_STATEMENT).toContain(
+        `${STRUCTURAL_STATEMENT_BASE - ENGINE_IMMUTABLE_TABLES.length} catalogue, pragma and ` +
+          `commitment-ledger reads that do not move`,
+      );
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(
+        /11 catalogue, pragma and commitment-ledger reads/,
+      );
+      expect(INTEGRITY_DEPTH_STATEMENT).toMatch(/durability pragmas themselves/);
+    } finally {
+      file.cleanup();
+    }
   }, FILE_BACKED_BATTERY_TIMEOUT_MS);
 
   it('reads the commitment ledger with a SCAN and a temporary B-tree, not one indexed lookup', () => {
@@ -860,7 +1041,12 @@ describe('the cost clause of the depth statement is derived from what a pass exe
       // independent claim.
       expect(identities.length).toBe(ENGINE_IMMUTABLE_TABLES.length);
       expect(seeks.length).toBe(4);
-      expect(fixedReads).toBe(11);
+      // 15, not 11, since round thirteen's Medium 1: the four durability
+      // pragmas go through `db.pragma()` and the instrument above now counts
+      // them. Deliberately a literal — this line is the independent claim the
+      // parse-back below is compared against, so deriving it would make the
+      // comparison circular.
+      expect(fixedReads).toBe(15);
       expect(total).toBe(identities.length + seeks.length + fixedReads);
       expect(STRUCTURAL_STATEMENT_BASE).toBe(identities.length + fixedReads);
 

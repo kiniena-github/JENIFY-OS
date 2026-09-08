@@ -71,12 +71,29 @@
  *    beside them, which is exactly how a re-measured constant drifted a third
  *    time while its own test kept passing.
  *
+ *    **And a FOURTH time, in the same direction again, because the INSTRUMENT
+ *    was blind to a term the sentence names in its own first clause** (Wave 5
+ *    correction round thirteen, Medium 1). The fixed term was measured by
+ *    wrapping `db.prepare`, and `readDurabilityPosture` reaches the engine four
+ *    more times through better-sqlite3's `db.pragma()` —
+ *    `journal_mode`, `synchronous`, `foreign_keys`, `wal_autocheckpoint` — which
+ *    compiles and steps its own statement and never touches a prepared handle.
+ *    Those four are "the durability pragmas" the served sentence promises a pass
+ *    reads, and they were in neither the eleven nor the total. The parse-back
+ *    rule that caught the previous three could not catch this one: it compares
+ *    the prose to a MEASUREMENT, and the measurement was missing the term. So
+ *    the instrument was fixed before the number was —
+ *    `statementsExecutedByOneStructuralPass` now counts `db.pragma` and
+ *    `db.exec` as well as prepared statements (`db.exec` measured at zero in a
+ *    structural pass, pinned rather than assumed) — and the fixed term is
+ *    FIFTEEN, not eleven.
+ *
  *    The correction is not a better constant, because a bare total cannot stay
  *    right: two of its three terms are CENSUSES rather than constants. The pass
  *    is one identity read per DECLARED ledger, one further standalone
- *    `MAX(rowid)` seek, and eleven catalogue, pragma and commitment-ledger
+ *    `MAX(rowid)` seek, and fifteen catalogue, pragma and commitment-ledger
  *    reads that do not move. Over the 33 ledgers this build declares, the two
- *    terms that do NOT move with the store's history are 33 + 11 = 44
+ *    terms that do NOT move with the store's history are 33 + 15 = 48
  *    statements.
  *
  *    **The seek term is NOT "one per ledger HQ has committed a mark for", which
@@ -93,8 +110,8 @@
  *
  *    So no total is written here as though it were the cost of a pass: the cost
  *    is `STRUCTURAL_STATEMENT_BASE` plus one seek per declared ledger with a
- *    positive `sqlite_sequence` row — on the warmed fixture 44 + 4 = 48
- *    statements, and on a file HQ has merely booted twice 44 + 2 = 46
+ *    positive `sqlite_sequence` row — on the warmed fixture 48 + 4 = 52
+ *    statements, and on a file HQ has merely booted twice 48 + 2 = 50
  *    statements, which is the whole reason a single total is the wrong thing to
  *    ship. That base is a pinned constant the
  *    Founder-facing sentence interpolates, and
@@ -867,27 +884,44 @@ export const SAFE_MODE_STATEMENT =
  * not depend on how many ledgers the engine carries a `sqlite_sequence` row for.
  *
  * **What it is made of, as a sum rather than as a figure.** It is the 33
- * identity reads over the declared ledgers plus the 11 catalogue, pragma and
- * commitment-ledger reads that do not move: 33 + 11 = 44 statements. Both terms
+ * identity reads over the declared ledgers plus the 15 catalogue, pragma and
+ * commitment-ledger reads that do not move: 33 + 15 = 48 statements. Both terms
  * are measured off one real pass and compared to this constant.
  *
+ * **Four of those fifteen do not go through a prepared statement at all**
+ * (Wave 5 correction round thirteen, Medium 1). `readDurabilityPosture` reads
+ * `journal_mode`, `synchronous`, `foreign_keys` and `wal_autocheckpoint` through
+ * better-sqlite3's `db.pragma()`, which compiles and steps its own statement.
+ * The fixed term was eleven here for three rounds because the instrument that
+ * measured it wrapped `db.prepare` and nothing else — so the four pragmas the
+ * served sentence names in its own first clause were invisible to the very
+ * measurement the sentence is checked against, and the parse-back rule could not
+ * catch an undercount the measurement shared. The instrument counts `db.pragma`
+ * and `db.exec` now (`db.exec` measured at zero in a structural pass), which is
+ * why this constant is 48 rather than 44 and why the two worked figures below
+ * moved by four each.
+ *
  * **Why a constant here rather than a number in the sentence.** The cost clause
- * has now shipped a wrong total three times in one wave, always understating,
+ * has now shipped a wrong total four times in one wave, always understating,
  * and each time the number was true of the file it was measured on and of no
  * other. A pass costs this base plus one standalone `MAX(rowid)` seek for each
  * declared ledger with a positive `sqlite_sequence` row, and that second term
  * moves with the store's own history. Measured the same way on two files that
  * differ in exactly that term: a file HQ has booted twice carries 2 such
- * ledgers and executes 46 statements; one carrying a run attempt carries 4 and
- * executes 48 statements.
+ * ledgers and executes 50 statements; one carrying a run attempt carries 4 and
+ * executes 52 statements.
  *
  * **It is the cost on a file HQ HAS COMMITTED ON, which is the only file the
  * expensive half runs over at all.** With no checkpoint there is nothing to
  * compare a ledger's identity against, so `regressedImmutableLedgers` returns
- * before it reads any of the 33 — measured at 11 statements and ZERO identity
+ * before it reads any of the 33 — measured at 15 statements and ZERO identity
  * reads on a freshly established file. Quoting the committed-on figure as if it
- * were the cost of every pass would overstate the unestablished case by four
- * times, so both branches are stated rather than the convenient one.
+ * were the cost of every pass would overstate the unestablished case by three
+ * times, so both branches are stated rather than the convenient one. That
+ * comparative moved with the instrument too: the pre-commitment branch gained
+ * the same four pragmas the committed-on one did, so the RATIO between them fell
+ * from four to a little over three, and it is restated at what it now measures
+ * rather than carried over.
  *
  * `integrity-statement-truth.test.ts` asserts the RULE — the executed statement
  * count equals this base plus the measured seek count, on both committed-on
@@ -895,10 +929,12 @@ export const SAFE_MODE_STATEMENT =
  * it PARSES every number above back out of this docblock and compares it to
  * that measurement, so neither the base nor any figure beside it can drift
  * without failing a test, and the Founder-facing sentence interpolates the
- * constant rather than restating it. The three previous corrections were all
- * possible because the pin never compared a number to anything.
+ * constant rather than restating it. The first three corrections were all
+ * possible because the pin never compared a number to anything; the fourth was
+ * possible because the comparison was made against a measurement that could not
+ * see the term.
  */
-export const STRUCTURAL_STATEMENT_BASE = 44;
+export const STRUCTURAL_STATEMENT_BASE = 48;
 
 export const INTEGRITY_DEPTH_STATEMENT =
   'A structural assessment reads the schema catalogue, the durability pragmas, and the marks HQ ' +
@@ -917,14 +953,16 @@ export const INTEGRITY_DEPTH_STATEMENT =
   'in size — it grows a row per clean boot and per clean assessment, so that term grows with HQ’s own ' +
   'history. The whole pass is therefore not a fixed number of statements, and no total is quoted here: ' +
   'it is one identity read per declared ledger, one further seek per declared ledger the engine carries ' +
-  'a positive sqlite_sequence row for, and 11 catalogue, pragma and commitment-ledger reads that do not ' +
-  'move. Over the 33 ledgers this build declares, that is ' +
+  'a positive sqlite_sequence row for, and 15 catalogue, pragma and commitment-ledger reads that do not ' +
+  'move — four of which are the durability pragmas themselves, which do not go through a prepared ' +
+  'statement and were left out of this figure for three rounds because the measurement behind it could ' +
+  'not see them. Over the 33 ledgers this build declares, that is ' +
   `${STRUCTURAL_STATEMENT_BASE} statements plus one for each of those seeks — stated as the rule ` +
   'rather than as one file’s total, because the seek term is not a constant and a total measured on ' +
   'one file has now been shipped wrong three times. It moves with HQ’s own census and not with the rows ' +
   'those ledgers hold, which is what keeps it affordable at every construction. Before the first ' +
   'commitment there is nothing to compare a ledger against, so the per-ledger identity reads do not run ' +
-  'at all and the pass is about a quarter of that. No duration is quoted, because a time measured on ' +
+  'at all and the pass is about a third of that. No duration is quoted, because a time measured on ' +
   'one machine is not a property of the code and no test can pin one. It is ' +
   'therefore not a ' +
   'catalogue read alone: a declared ledger that has been emptied, and an evidence log that contradicts a ' +
@@ -1653,20 +1691,31 @@ const COMMITMENT_JSON_COLUMNS: readonly ['ledger_marks', 'ledger_rows'] = Object
  * `committedLedgerGaps` takes each key/value out of `ledger_rows` with
  * `json_each` and looks the matching mark up in `ledger_marks` with
  * `json_extract`, in one expression, so no single choice of parse can align it.
- * Refusing the ambiguity instead makes all five readers agree by making the only
- * input they can differ on unreachable through the guard, and it costs two
- * subqueries per column rather than two per declared ledger — the clause list
- * stays O(1) in the census's size rather than growing with it.
+ * Refusing the ambiguity is one half of making all five readers agree; the other
+ * half is `COMMITMENT_SHAPE_CLAUSES` below, and this paragraph used to claim the
+ * duplicate key was "the ONLY input they can differ on", which was false when it
+ * was written (Wave 5 correction round thirteen, High 1). The EMPTY key was a
+ * second one: `committedGreatest` ignored it, `committedLedgerGaps` built the
+ * JSON path `'$.' || j.key` from it and the engine raised a hard `bad JSON path:
+ * '$.'`, and it was reachable through this very guard, because
+ * `json_each('{"":0}')` gives `COUNT(*) = 1` and `COUNT(DISTINCT key) = 1` and
+ * the clause below therefore does not fire. Executed against `237fc76` on a file
+ * built by this package's own fixture: `gaps before poison
+ * [hq_integrity_checkpoints 0, hq_reliability_verdicts 0, op_evidence 0]`, the
+ * `INSERT` ACCEPTED, `gaps after poison THROWS -> bad JSON path: '$.'`. The
+ * defect is closed by the shape clauses and by taking the concatenation out of
+ * `committedLedgerGaps` entirely; this clause is unchanged and is kept for the
+ * duplicate it was written for.
  *
  * **What it refuses, exactly.** A value whose `json_each` cardinality is not its
  * distinct-key count. That is duplicate keys (`{"a":1,"a":2}` — 2 against 1) and
  * a JSON scalar (`'null'`, `'5'` — 1 against 0, because `json_each` over a
  * scalar yields one row with a NULL key). `'{}'` is 0 against 0 and an ordinary
  * object is n against n, so no commitment HQ writes is affected: every one is
- * `JSON.stringify` of a `Record<string, number>`. Malformed JSON is unchanged —
- * `json_each` raises `malformed JSON` exactly as the `json_extract` clauses
- * beside it already did, so such an `INSERT` was refused before this clause and
- * is refused after it, for the same reason.
+ * `JSON.stringify` of a `Record<string, number>`. Malformed JSON reads as `'{}'`
+ * here — every expression over these columns is total since round thirteen (see
+ * `totalCommitmentJson`) — and is refused by `COMMITMENT_SHAPE_CLAUSES`'
+ * `json_valid` term rather than by an exception out of this one.
  *
  * **The residual, executed rather than reasoned about.** This is a `BEFORE
  * INSERT` guard, so it bounds what LANDS and not what a file already holds. A
@@ -1686,10 +1735,148 @@ const COMMITMENT_JSON_COLUMNS: readonly ['ledger_marks', 'ledger_rows'] = Object
 const AMBIGUOUS_COMMITMENT_CLAUSES: readonly string[] = Object.freeze(
   COMMITMENT_JSON_COLUMNS.map(
     (column) =>
-      `(SELECT COUNT(*) FROM json_each(NEW.${column})) <> ` +
-      `(SELECT COUNT(DISTINCT key) FROM json_each(NEW.${column}))`,
+      `(SELECT COUNT(*) FROM json_each(${totalCommitmentJson(column)})) <> ` +
+      `(SELECT COUNT(DISTINCT key) FROM json_each(${totalCommitmentJson(column)}))`,
   ),
 );
+
+/**
+ * One commitment column, as an expression that is TOTAL over everything the
+ * column can hold: unparseable content reads as an empty object.
+ *
+ * Every `json_*` function raises on malformed JSON, and a trigger's `WHEN`
+ * clause is not a place where an exception is a refusal — it is an exception,
+ * with the engine's message rather than HQ's. Wrapping each argument means no
+ * expression in the guard or in the readers can raise on any value a raw writer
+ * can put in these columns, so the refusal is always HQ's own and always the
+ * same one. `json_valid` never raises, and neither does `TYPEOF`, so the clauses
+ * built on those two need no wrapper.
+ */
+function totalCommitmentJson(column: string): string {
+  return `CASE WHEN json_valid(NEW.${column}) THEN NEW.${column} ELSE '{}' END`;
+}
+
+/** The 33 declared ledger names as SQL string literals, for the key whitelist below. */
+const DECLARED_LEDGER_NAME_LITERALS = ENGINE_IMMUTABLE_TABLES.map(
+  // Never interpolated from anything a row carries: `ENGINE_IMMUTABLE_TABLES` is
+  // a frozen literal in this module, and a name is doubled-quoted the way SQLite
+  // escapes a string literal so a name containing an apostrophe could not end it.
+  (entry) => `'${entry.table.replace(/'/g, "''")}'`,
+).join(', ');
+
+/**
+ * Refuse a commitment that is not the SHAPE HQ writes — the clause that closes
+ * the CLASS the duplicate key and the empty key were two instances of (Wave 5
+ * correction round thirteen, High 1).
+ *
+ * **The defect, executed before it was written.** `committedLedgerGaps` built a
+ * JSON path by CONCATENATION — `json_extract(c.ledger_marks, '$.' || j.key)` —
+ * from `j.key`, which comes out of `ledger_rows`, a column a raw writer
+ * controls. SQLite raises a hard `bad JSON path: '$.'` for an empty key, the
+ * reader's own `try/catch` swallowed it, and it returned `{}`: every gap
+ * baseline for all 33 declared ledgers gone, PERMANENTLY, because the ledger is
+ * append-only and the poison row can never be removed. `AMBIGUOUS_COMMITMENT_
+ * CLAUSES` does not fire on it (`json_each('{"":0}')` is 1 against 1) and no
+ * declared table is named, so no value bound fires either — the `INSERT` was
+ * ACCEPTED. That defeats exactly the mid-ledger-deletion detector round seven's
+ * High 2 exists to provide, in the FALSE-REASSURANCE direction, at ONE `INSERT`
+ * the schema deliberately permits, which is strictly cheaper than the
+ * three-statement price this module quotes for every other tamper. Measured end
+ * to end against `237fc76`, control and attack identical but for that one
+ * `INSERT`, against a mid-ledger delete of `hq_reliability_verdicts` rowid 2 —
+ * the ledger that holds the safe-mode latch:
+ *
+ * ```
+ * CONTROL: p2..p6 boot=true["append_only_guard_missing"] assess=true release=refused
+ * ATTACK : p2 boot=true assess=false[] release=ADMITTED ; p3..p6 boot=false[] assess=false[] release=ADMITTED
+ * ```
+ *
+ * **Why a whitelist rather than a patch for the empty key.** This is the SECOND
+ * round running in which a reader of these columns disagreed with the others on
+ * an input the guard admitted, so the repair is of the class: the guard now
+ * admits ONLY the shape HQ's single writer emits, and everything else is
+ * refused. That is this repository's fail-closed-on-unknown law applied to the
+ * one column an attacker can write through a permitted append, and it makes the
+ * reader audit finite — the admitted space is small enough to enumerate, which
+ * is what the two previous rounds could not do.
+ *
+ * **What it admits, exactly.** A `TEXT` value that is valid JSON, whose
+ * top-level type is `object`, each of whose keys is one of the 33 names in
+ * `ENGINE_IMMUTABLE_TABLES` and each of whose values is a JSON integer that is
+ * not negative. `'{}'` is admitted (no `json_each` row, so no `EXISTS` fires),
+ * and so is every commitment HQ itself writes: `recordIntegrityCheckpoint` is
+ * the ledger's only writer and emits `JSON.stringify` of a `Record<string,
+ * number>` whose keys come from `declaredLedgerIdentities` — always declared
+ * table names — and whose values are positive integers.
+ *
+ * **What it now refuses that it used to accept**, each verified against the
+ * engine rather than reasoned about: the empty key (`{"":0}` — not a declared
+ * name); any undeclared key, including one naming a table that was never HQ's;
+ * a top-level ARRAY (`json_each` gives it integer keys 0..n, and `0 NOT IN
+ * ('op_evidence', …)` is true in SQLite, so it fails the key clause); a JSON
+ * scalar (`json_type <> 'object'`); a BLOB that happens to parse as JSON, and an
+ * INTEGER written into the TEXT column (both `TYPEOF <> 'text'`); malformed JSON (`json_valid = 0`, which now refuses with
+ * HQ's own message where the engine used to raise `malformed JSON` out of the
+ * clauses beside it — refused before and refused now, and the reason is stated
+ * rather than implied); a nested object or array as a VALUE (`json_each.type` is
+ * `object`/`array`); a real, a text or a boolean value; and a NEGATIVE value,
+ * which was the one remaining way to commit a gap larger than the file has
+ * without over-claiming a mark. The clause list costs one `EXISTS` subquery per
+ * column plus three scalar tests, so it stays O(1) in the census's SUBQUERY
+ * count; only the whitelist's TEXT grows with the census, exactly as the value
+ * bounds beside it already do.
+ *
+ * **Ordering is NOT relied on, because it does not hold.** The obvious way to
+ * put `json_valid = 0` in front of the `json_type`, `json_each` and
+ * `json_extract` beside it is to write it first and lean on `OR`
+ * short-circuiting. That was written, executed, and REJECTED: on SQLite 3.53.2
+ * a `WHEN` clause whose terms include subqueries evaluates them regardless, and
+ * an `INSERT` carrying `'{"op_evidence": '` came back as the engine's
+ * `malformed JSON` rather than as HQ's refusal. Documenting the order as a
+ * guarantee would have been the eleventh disclosure defect of this wave, so
+ * every expression over these columns is made TOTAL instead
+ * (`totalCommitmentJson`): unparseable content reads as `'{}'` everywhere, the
+ * `json_valid = 0` clause is what refuses it, and the refusal always carries
+ * HQ's own message. `commitment-overclaim.test.ts` asserts that message on
+ * malformed JSON rather than merely asserting that the row did not land.
+ *
+ * **The residual is unchanged and is not widened.** This is a `BEFORE INSERT`
+ * guard: it bounds what LANDS, not what a file already holds. A row carrying an
+ * empty key, a duplicate key or a negative value, written by a raw writer at a
+ * build without these clauses, is still in the file afterwards — but the reader
+ * it defeated no longer builds a JSON path out of it and no longer fails open on
+ * an exception, so the permanence is closed at the READER as well. See
+ * `committedLedgerGaps`.
+ */
+const COMMITMENT_SHAPE_CLAUSES: readonly string[] = Object.freeze(
+  COMMITMENT_JSON_COLUMNS.flatMap((column) => [
+    `TYPEOF(NEW.${column}) <> 'text'`,
+    `json_valid(NEW.${column}) = 0`,
+    `json_type(${totalCommitmentJson(column)}) <> 'object'`,
+    `EXISTS (SELECT 1 FROM json_each(${totalCommitmentJson(column)}) j ` +
+      `WHERE j.key IS NULL OR j.key NOT IN (${DECLARED_LEDGER_NAME_LITERALS}) ` +
+      `OR j.type <> 'integer' OR CAST(j.value AS INTEGER) < 0)`,
+  ]),
+);
+
+/**
+ * Refuse a `chain_length` that is not the shape HQ writes.
+ *
+ * The same class as `COMMITMENT_SHAPE_CLAUSES`, on the third column the same
+ * readers disagree over. `committedChainLength` takes `MAX(chain_length)` and
+ * discards anything that is not a positive integer, while
+ * `contradictedChainCommitment` compares `c.chain_length > 0` and joins it to
+ * `op_evidence.seq` — so a REAL like `3.5` reaches one reader as "no
+ * commitment" and the other as a row it then discards for the same reason.
+ * Neither produced a finding either way, so this is a tightening rather than a
+ * closed hole, and it is stated as such: what it buys is that the admitted space
+ * for all three columns is now exactly what `recordIntegrityCheckpoint` writes,
+ * which is what makes the reader audit above finite. HQ writes `tip?.seq ?? 0`,
+ * and `evidenceChainTip` has already refused anything that is not an integer
+ * of at least 1.
+ */
+const CHAIN_LENGTH_SHAPE_CLAUSE =
+  `TYPEOF(NEW.chain_length) <> 'integer' OR NEW.chain_length < 0`;
 
 /**
  * The guard that refuses a commitment the file does not support AT THE MOMENT
@@ -1760,20 +1947,27 @@ const AMBIGUOUS_COMMITMENT_CLAUSES: readonly string[] = Object.freeze(
  */
 function overclaimGuardDdl(db: HqDatabase): string {
   const clauses = [
-    // FIRST, because every clause after it reads a commitment with
-    // `json_extract` and would otherwise be reading a different value than the
-    // readers do. See `AMBIGUOUS_COMMITMENT_CLAUSES`.
+    // First for readability, NOT for evaluation order — SQLite does not
+    // short-circuit a `WHEN` clause whose terms carry subqueries, which was
+    // measured rather than assumed. Every expression below is total over
+    // anything the column can hold instead; see `COMMITMENT_SHAPE_CLAUSES` and
+    // `totalCommitmentJson`.
+    ...COMMITMENT_SHAPE_CLAUSES,
+    CHAIN_LENGTH_SHAPE_CLAUSE,
+    // Then the ambiguity, which is about a value the shape clauses admit: a
+    // DECLARED key carried twice, with two legal integer values. See
+    // `AMBIGUOUS_COMMITMENT_CLAUSES`.
     ...AMBIGUOUS_COMMITMENT_CLAUSES,
-    `NEW.chain_length > COALESCE(CAST(json_extract(NEW.ledger_marks, '$.op_evidence') AS INTEGER), 0)`,
+    `NEW.chain_length > COALESCE(CAST(json_extract(${totalCommitmentJson('ledger_marks')}, '$.op_evidence') AS INTEGER), 0)`,
   ];
   for (const entry of ENGINE_IMMUTABLE_TABLES) {
     if (!tableIsPresent(db, entry.table)) continue;
     // The table name is never interpolated from anything a row carries: this
     // iterates `ENGINE_IMMUTABLE_TABLES`, a frozen literal in this module.
     clauses.push(
-      `COALESCE(CAST(json_extract(NEW.ledger_marks, '$.${entry.table}') AS INTEGER), 0) > ` +
+      `COALESCE(CAST(json_extract(${totalCommitmentJson('ledger_marks')}, '$.${entry.table}') AS INTEGER), 0) > ` +
         `COALESCE((SELECT MAX(rowid) FROM "${entry.table}"), 0)`,
-      `COALESCE(CAST(json_extract(NEW.ledger_rows, '$.${entry.table}') AS INTEGER), 0) > ` +
+      `COALESCE(CAST(json_extract(${totalCommitmentJson('ledger_rows')}, '$.${entry.table}') AS INTEGER), 0) > ` +
         `(SELECT COUNT(*) FROM "${entry.table}")`,
     );
   }
@@ -2182,11 +2376,21 @@ function committedChainLength(db: HqDatabase): number {
  *
  * Aggregated in the ENGINE over `json_each` rather than by parsing every row in
  * JavaScript, so the cost of a long-lived checkpoint ledger stays a single
- * indexed scan of a small table. `json_valid` guards the extract for the same
- * reason `verdictIsCorroborated` guards its own: these are columns a raw writer
- * can put anything in, and an unparseable row must be inert here rather than an
- * exception. Keys outside the declared set are ignored, so a forged row cannot
- * name a table that was never HQ's and make the census shout about it.
+ * indexed scan of a small table. Keys outside the declared set are ignored, so a
+ * forged row cannot name a table that was never HQ's and make the census shout
+ * about it.
+ *
+ * **`json_valid` is applied to the `json_each` ARGUMENT and no longer to a
+ * `WHERE` clause beside it** (Wave 5 correction round thirteen, High 1). A
+ * table-valued function in the `FROM` clause is evaluated per row of the table
+ * it is correlated with, and whether a `WHERE` predicate is pushed down ahead of
+ * it is a decision of the query planner rather than a guarantee of the language.
+ * SQLite 3.53.2 does push it down — measured, a malformed row does NOT raise out
+ * of the previous spelling — but the whole point of this round's High 1 is that
+ * this reader must not raise on any content a raw writer can put in the column,
+ * and "the optimizer happens to save it" is not that property. The `CASE`
+ * substitutes an empty object for an unparseable column, so the statement is
+ * total over every value the column can hold.
  *
  * The MAXIMUM, exactly as before — a commitment that over-claims is refused
  * where it is WRITTEN now (`overclaimGuardDdl`), so nothing this reader believes
@@ -2198,9 +2402,10 @@ function committedChainLength(db: HqDatabase): number {
  * against the greatest — and the guard bounded the first while this read the
  * greatest. It is not resolved by changing which one this reader uses: a value
  * carrying a key twice is now refused where it is written
- * (`AMBIGUOUS_COMMITMENT_CLAUSES`), so the two spellings cannot be handed an
- * input they answer differently, and `committedLedgerGaps` — which uses BOTH in
- * one expression — is covered by the same refusal rather than by a third rule.
+ * (`AMBIGUOUS_COMMITMENT_CLAUSES`). `committedLedgerGaps` used BOTH spellings in
+ * one expression and was said to be "covered by the same refusal rather than by
+ * a third rule"; that was true of the duplicate and false of the EMPTY key, so
+ * it no longer uses `json_extract` at all — see its own docblock.
  */
 function committedGreatest(db: HqDatabase, column: 'ledger_marks' | 'ledger_rows'): Map<string, number> {
   const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
@@ -2209,8 +2414,8 @@ function committedGreatest(db: HqDatabase, column: 'ledger_marks' | 'ledger_rows
     const rows = db
       .prepare(
         `SELECT j.key AS name, MAX(CAST(j.value AS INTEGER)) AS value
-           FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE} c, json_each(c.${column}) j
-          WHERE json_valid(c.${column})
+           FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE} c,
+                json_each(CASE WHEN json_valid(c.${column}) THEN c.${column} ELSE '{}' END) j
           GROUP BY j.key`,
       )
       .all() as { name: unknown; value: unknown }[];
@@ -2292,20 +2497,100 @@ function committedGreatest(db: HqDatabase, column: 'ledger_marks' | 'ledger_rows
  *  - `ledger-identity.test.ts` keeps the executed sampling: real refused,
  *    deduplicated and rolled-back writes through the facade, with the gap
  *    asserted empty afterwards and across `VACUUM` and a byte copy.
+ *
+ * ## Round thirteen, High 1 — this reader was DEFEATED, permanently, at one
+ * permitted `INSERT`, and it took the whole census with it
+ *
+ * The statement above used to build the mark's JSON path by CONCATENATION —
+ * `json_extract(c.ledger_marks, '$.' || j.key)` — from `j.key`, which comes out
+ * of `ledger_rows`. One `INSERT` whose `ledger_rows` carried an EMPTY key made
+ * SQLite raise a hard `bad JSON path: '$.'`, the `catch` below swallowed it, and
+ * this function returned `{}` — every gap baseline for all 33 declared ledgers
+ * gone, and gone FOR EVER, because the ledger is append-only and the poison row
+ * can never be removed. Neither the ambiguity clause nor any value bound fired
+ * on it. The end-to-end measurement, and why one `INSERT` was strictly cheaper
+ * than the three statements this module quotes for every other tamper, is in
+ * `COMMITMENT_SHAPE_CLAUSES`.
+ *
+ * Three things changed, and each is a different half of the same law:
+ *
+ *  - **No JSON path is built from anything a row carries.** The mark is joined
+ *    to the row count through a second `json_each` on `key`, so a hostile key
+ *    cannot produce a malformed path — there is no path. `LEFT JOIN` rather than
+ *    an inner one, deliberately: a key present in `ledger_rows` and absent from
+ *    `ledger_marks` used to make `json_extract` return NULL, `MAX` ignore it and
+ *    this function record a gap of 0 for that ledger, and the `LEFT JOIN`
+ *    reproduces that exactly rather than dropping the ledger from the baseline,
+ *    which would have been a silent weakening. It cannot arise from HQ's own
+ *    writer in any case: `recordIntegrityCheckpoint` records a row count only
+ *    where the identity's `rows > 0`, and a ledger holding rows always has a
+ *    greatest rowid of at least 1.
+ *  - **`json_valid` moved into the `json_each` ARGUMENT**, for the reason given
+ *    on `committedGreatest`: a `WHERE` predicate beside a table-valued function
+ *    is a planner decision, not a guarantee, and this reader must be total over
+ *    every value the column can hold.
+ *  - **The `catch` no longer fails OPEN.** It used to turn any engine error into
+ *    "no baseline, so no finding", which is what made the defeat silent and
+ *    permanent rather than noisy. The two BENIGN reasons it was written for — no
+ *    checkpoint ledger, and no `ledger_rows` column on a file from an older
+ *    build — are both `prepare`-time errors in this engine (`no such table`,
+ *    `no such column`, raised when the statement is COMPILED), so they are
+ *    caught separately and still yield no baseline, which is correct: a file HQ
+ *    has never committed on has nothing to be measured against. Any error raised
+ *    while the statement RUNS is a different thing entirely — the ledger and the
+ *    column are both there and the engine cannot read what they hold — and it is
+ *    now failed CLOSED, by returning the STRICTEST baseline instead of none: a
+ *    committed gap of zero for every declared ledger.
+ *
+ * **Why zero is the right strict baseline, and what it costs.** Zero is what a
+ * declared ledger's gap actually is on a healthy file — HQ only appends, so
+ * rowids run 1..N with no holes, which `ledger-rowid-contiguity.test.ts`
+ * establishes against the engine for all 33 rather than by sampling. So the
+ * fallback reports exactly those ledgers that NOW have a hole, and reports
+ * nothing on a file that has none: it cannot fabricate a finding out of a
+ * healthy store, and its precondition is in any case a commitment column the
+ * engine cannot read, which no genuine file has. What it gives up is the one
+ * case the committed baseline exists for: a ledger whose rowids legitimately had
+ * a hole BEFORE HQ first committed on it would be reported while the commitments
+ * are unreadable. That is disclosed here rather than traded away silently, and
+ * it is the fail-closed side of the trade the law requires.
+ *
+ * **`committedGreatest` keeps its own empty-Map fallback**, and that is not the
+ * same decision made twice differently. There is no strict baseline for a MARK —
+ * inventing one would be fabricating a commitment HQ never made, in the
+ * false-alarm direction the module forbids — whereas zero really is every
+ * healthy ledger's gap. The two readers are called from the same place
+ * (`regressedImmutableLedgers`) over the same table, so an engine failure that
+ * silences one silences the other, and the strict gap baseline fires for both.
  */
 function committedLedgerGaps(db: HqDatabase): Record<string, number> {
   const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
   const gaps: Record<string, number> = {};
+  // Structurally typed rather than `ReturnType<HqDatabase['prepare']>`: the
+  // driver's `prepare` is overloaded on its bind parameters, and this statement
+  // takes none. All this function needs of it is that it can be stepped.
+  let statement: { all: () => unknown[] };
   try {
-    const rows = db
-      .prepare(
-        `SELECT j.key AS name,
-                MAX(CAST(json_extract(c.ledger_marks, '$.' || j.key) AS INTEGER) - CAST(j.value AS INTEGER)) AS gap
-           FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE} c, json_each(c.ledger_rows) j
-          WHERE json_valid(c.ledger_rows) AND json_valid(c.ledger_marks)
-          GROUP BY j.key`,
-      )
-      .all() as { name: unknown; gap: unknown }[];
+    statement = db.prepare(
+      // No `'$.' || j.key`: a JSON path is never built out of a key a row
+      // carries. See the docblock — that concatenation was round thirteen's
+      // High 1, and it defeated this detector permanently at one `INSERT`.
+      `SELECT j.key AS name,
+              MAX(CAST(m.value AS INTEGER) - CAST(j.value AS INTEGER)) AS gap
+         FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE} c
+         JOIN json_each(CASE WHEN json_valid(c.ledger_rows) THEN c.ledger_rows ELSE '{}' END) j
+         LEFT JOIN json_each(CASE WHEN json_valid(c.ledger_marks) THEN c.ledger_marks ELSE '{}' END) m
+           ON m.key = j.key
+        GROUP BY j.key`,
+    );
+  } catch {
+    // COMPILE-time: no checkpoint ledger, or no `ledger_rows` column on this
+    // file's version of it. A file HQ has never committed on has no baseline,
+    // and that is the honest answer rather than a fail-open one.
+    return gaps;
+  }
+  try {
+    const rows = statement.all() as { name: unknown; gap: unknown }[];
     for (const row of rows) {
       const name = String(row.name);
       if (!declared.has(name)) continue;
@@ -2313,8 +2598,12 @@ function committedLedgerGaps(db: HqDatabase): Record<string, number> {
       if (Number.isInteger(value) && value >= 0) gaps[name] = value;
     }
   } catch {
-    // No checkpoint ledger, no `ledger_rows` column on this file's version of
-    // it, or an engine that cannot read it: no baseline, so no finding.
+    // RUN-time: the ledger and the column are both present and the engine
+    // cannot read what they hold. Fail CLOSED on the strictest baseline every
+    // healthy declared ledger satisfies, rather than on no baseline at all.
+    const strict: Record<string, number> = {};
+    for (const entry of ENGINE_IMMUTABLE_TABLES) strict[entry.table] = 0;
+    return strict;
   }
   return gaps;
 }
@@ -3547,8 +3836,51 @@ export const BACKUP_REFUSAL_REASONS = Object.freeze([
    * nothing to say about a ledger that was emptied with its guards temporarily
    * dropped, which is well-formed by construction. A file that would latch safe
    * mode is not a recovery point, so it is refused here rather than verified.
+   *
+   * **Round ten closed only the half this module can compute alone, and the
+   * sentence above was false for the other half** (Wave 5 correction round
+   * eleven, High 1). `structuralIntegrity(db)` was called with NO options, so
+   * `options.recordedVerdict` was `undefined` and `carryRecordedVerdict` never
+   * saw the durable blocking verdict the CANDIDATE carries in its own
+   * `hq_reliability_verdicts` — the exact latch a live construction re-raises.
+   * Executed: a file whose boot had recorded
+   * `safe_mode=1 ["append_only_guard_missing"]`, and whose guard HQ's own
+   * ensure pass had since re-created, gave
+   * `structuralIntegrity(no opts).safeMode = false` and verified
+   * `{ verified: true, refusals: [], integrityVerdict: 'ok' }`, while the same
+   * bytes opened live gave `safeMode: true`. A second vector had the same
+   * root: a structural pass never verifies the evidence log's LINKS, so a
+   * backup whose `op_evidence` payload was rewritten in place at a seq behind
+   * the last checkpoint commitment also verified `ok` — executed, seq 1 of 3
+   * rewritten, `contradictedChainCommitment` unmoved because the committed tip
+   * is at seq 3.
+   *
+   * Both inputs live above `store/` — the verdict ledger is written by
+   * `application/`, and the whole-log verifier by `operator/` — so they arrive
+   * through `assessCandidate`, the same injection shape `fullIntegrity` uses
+   * for `verifyEvidenceChain` and for the same reason. An assessment that did
+   * not run is not one that passed: see `candidate_census_unavailable`.
    */
   'would_latch_safe_mode',
+  /**
+   * The candidate opened, but HQ could not run its OWN full assessment over
+   * the copy, so nothing here may claim that it passed one.
+   *
+   * `assessCandidate` is REQUIRED by the type and treated as required at
+   * runtime too, because this module is public package API a JavaScript caller
+   * can reach with no options at all (Wave 5 correction round eleven, High 1).
+   * The two facts it carries — the standing verdict the candidate records
+   * about itself, and whether its whole evidence log still verifies — cannot
+   * be computed inside `store/`: one belongs to `application/`, the other to
+   * `operator/`, and duplicating either computation here is exactly the drift
+   * `operator/evidence.ts` refuses ("one computation, not two").
+   *
+   * So an omitted, non-callable or throwing assessor is a REFUSAL and never a
+   * silent pass. This is the same fail-closed rule `fullIntegrity` applies to
+   * a missing `verifyEvidenceChain`, applied at the surface that publishes a
+   * verdict a Founder may certify permanently.
+   */
+  'candidate_census_unavailable',
 ] as const);
 export type BackupRefusalReason = (typeof BACKUP_REFUSAL_REASONS)[number];
 
@@ -3572,6 +3904,42 @@ const SQLITE_SIDECAR_SUFFIXES = Object.freeze(['-wal', '-shm', '-journal'] as co
  */
 const HQ_MARKER_TABLE = 'hq_events';
 
+/**
+ * What HQ's OWN full assessment says about the opened COPY of a candidate.
+ *
+ * Supplied by the caller rather than computed here, because the two facts that
+ * make it complete live above `store/` (Wave 5 correction round eleven, High
+ * 1):
+ *
+ *  - the standing verdict the candidate records ABOUT ITSELF, read from
+ *    `hq_reliability_verdicts` — an `application/` ledger, and the read is not
+ *    "the last row" but the corroborated walk `standingIntegrityVerdict`
+ *    performs, whose corroboration needs the evidence log's own hash formula;
+ *  - whether the whole evidence log verifies, which is `operator/`'s
+ *    `verifyEvidenceChain`.
+ *
+ * `application/reliability-command.ts#assessHqBackupCandidate` is the shipped
+ * implementation and the only one HQ itself passes. It reads; it must never
+ * write, migrate or repair, because the handle it is given is a read-only one
+ * over a scratch copy and a verification that repaired what it was checking
+ * would launder the tamper it exists to find.
+ */
+export interface HqBackupCandidateCensus {
+  /**
+   * Would opening these bytes live engage safe mode? Categorically, even when
+   * not one finding name behind it could be read back through the closed
+   * vocabulary — the fail-closed half `carryRecordedVerdict` returns.
+   */
+  safeMode: boolean;
+  /** The blocking findings behind it, by name. Never counted, always named. */
+  blockingFindings: readonly HqIntegrityFinding[];
+  /** True only when the WHOLE evidence log was walked and stood. */
+  chainVerified: boolean;
+}
+
+/** See `HqBackupCandidateCensus`. Required, and required at runtime too. */
+export type HqBackupCandidateAssessor = (db: HqDatabase) => HqBackupCandidateCensus;
+
 export interface BackupVerification {
   verified: boolean;
   refusals: BackupRefusalReason[];
@@ -3583,11 +3951,26 @@ export interface BackupVerification {
   /**
    * What HQ can say about the file's soundness, in one line.
    *
-   * `ok` means BOTH that `PRAGMA integrity_check` returned ok AND that HQ's own
-   * append-only census found nothing blocking in the copy. It used to mean only
-   * the first, while reading as the second — see `would_latch_safe_mode`.
+   * `ok` means ALL of: `PRAGMA integrity_check` returned ok; HQ's own
+   * append-only census found nothing blocking in the copy; the standing
+   * verdict the copy records about ITSELF is not a blocking one; and the whole
+   * evidence log was walked and stood. It used to mean only the first, while
+   * reading as the second — see `would_latch_safe_mode`. Anything else names
+   * which of them did not hold.
    */
   integrityVerdict: string | null;
+  /**
+   * Whether the copy's WHOLE evidence log was walked and verified.
+   *
+   * Reported rather than merely folded into `verified`, because "the chain
+   * stands" and "nothing blocking was found" are different claims and a
+   * recovery point is exactly where the difference matters. It is never `true`
+   * unless `assessCandidate` walked the log; a file refused before it could be
+   * opened reports `false`, which is "not verified in this check" and never
+   * "verified and broken" — the same reading `HqIntegrityReport.chainVerified`
+   * carries.
+   */
+  chainVerified: boolean;
   /**
    * The BLOCKING findings HQ's own census raised against the opened copy, by
    * name, or `[]` when it raised none and `null` when the census never ran
@@ -3738,7 +4121,20 @@ export function verifyHqBackupFile(
      * omits it. See `candidate_is_the_live_database`.
      */
     liveDatabasePath?: string | null;
-  } = {},
+    /**
+     * HQ's OWN full assessment of the opened COPY — REQUIRED, and treated as
+     * required at runtime, because a JavaScript caller can reach this function
+     * with no options at all and an assessment that did not run is not one
+     * that passed (Wave 5 correction round eleven, High 1).
+     *
+     * Injected rather than imported for the reason `fullIntegrity` injects
+     * `verifyEvidenceChain`: this module is a leaf of `store/`, and the two
+     * facts a complete answer needs are owned by `application/` (the verdict
+     * ledger) and `operator/` (the whole-log chain walk). Pass
+     * `assessHqBackupCandidate`; see `HqBackupCandidateCensus`.
+     */
+    assessCandidate: HqBackupCandidateAssessor;
+  },
 ): BackupVerification {
   const empty: BackupVerification = {
     verified: false,
@@ -3747,9 +4143,19 @@ export function verifyHqBackupFile(
     sizeBytes: null,
     schemaTables: null,
     integrityVerdict: null,
+    chainVerified: false,
     blockingFindings: null,
     resolvedPath: null,
   };
+  // Typed as required; read defensively anyway, because this is public package
+  // API a JavaScript caller can reach with no second argument at all. A
+  // TypeError thrown out of a verification would be neither a pass nor a
+  // refusal — and a caller who omits the assessor gets
+  // `candidate_census_unavailable` further down rather than an exception.
+  const given: {
+    liveDatabasePath?: string | null;
+    assessCandidate?: HqBackupCandidateAssessor;
+  } = (options ?? {}) as never;
   const target = typeof candidate === 'string' ? candidate.trim() : '';
   if (!target || !path.isAbsolute(target)) {
     return { ...empty, refusals: ['path_not_absolute'] };
@@ -3785,10 +4191,10 @@ export function verifyHqBackupFile(
   // The LIVE database, refused on identity rather than on shape. Resolved on
   // both sides, so an alias, a symlinked ancestor or a differently-spelled
   // absolute path names the same file here (Wave 5 correction round six, Low 3).
-  if (typeof options.liveDatabasePath === 'string' && options.liveDatabasePath !== '') {
+  if (typeof given.liveDatabasePath === 'string' && given.liveDatabasePath !== '') {
     let live: string | null = null;
     try {
-      live = fs.realpathSync(options.liveDatabasePath);
+      live = fs.realpathSync(given.liveDatabasePath);
     } catch {
       // An in-memory handle, or a path this process can no longer resolve:
       // there is no live FILE to collide with, so this check contributes
@@ -3960,19 +4366,68 @@ export function verifyHqBackupFile(
       // own marks, an elided commitment ledger and a contradicted chain
       // commitment. It does not catch a ledger the file never had.
       let blockingFindings: HqIntegrityFinding[] = [];
+      let wouldLatch = false;
       try {
         const census = structuralIntegrity(db);
         blockingFindings = census.observations
           .filter((observation) => observation.blocking)
           .map((observation) => observation.finding);
+        wouldLatch = census.safeMode;
       } catch {
         // A census that could not run is not a census that passed. The file
         // opened and answered `integrity_check`, so this is a shape this
         // module did not expect rather than a broken B-tree — either way it is
         // not a verified recovery point.
         blockingFindings = ['append_only_guard_missing'];
+        wouldLatch = true;
       }
-      if (blockingFindings.length > 0) refusals.push('would_latch_safe_mode');
+
+      // The half this module cannot compute alone (Wave 5 correction round
+      // eleven, High 1). The structural pass above is called with NO options
+      // on purpose — it is the FLOOR, computed from the copy itself and owing
+      // nothing to a caller — and it is exactly what left two holes: it never
+      // sees the standing verdict the candidate records about itself (that
+      // arrives as `recordedVerdict`, from an `application/` ledger), and it
+      // never walks the evidence log's links (that is `operator/`'s
+      // `verifyEvidenceChain`). Both are unioned in here rather than replacing
+      // the floor, so the injected assessor can only ever ADD refusals.
+      //
+      // Asked only of a file that IS an HQ database. A candidate with no
+      // marker table is already categorically refused `not_an_hq_database`,
+      // and asking somebody else's SQLite file for HQ's evidence log would add
+      // a second, misleading reason to a refusal that is already complete —
+      // it would say the file's audit chain is broken when the file has no
+      // audit chain to break. Nothing is admitted by the skip: the refusal
+      // stands either way.
+      let chainVerified = false;
+      const isHqDatabase = tables.has(HQ_MARKER_TABLE);
+      // `censusSettled` is "this question has an answer", which a non-HQ file
+      // satisfies by not being asked it.
+      let censusSettled = false;
+      try {
+        const assessed = isHqDatabase ? given.assessCandidate!(db) : null;
+        censusSettled = true;
+        chainVerified = assessed?.chainVerified === true;
+        wouldLatch = wouldLatch || assessed?.safeMode === true;
+        const merged = new Set<HqIntegrityFinding>(blockingFindings);
+        for (const finding of assessed?.blockingFindings ?? []) {
+          // Read through the closed vocabulary, never asserted into it: this
+          // list reaches the unauthenticated artifact's key set and a Founder
+          // refusal message, so a name from a future version is dropped rather
+          // than published. The ENGAGEMENT it came with is carried anyway, in
+          // `wouldLatch` — the same fail-closed split `carryRecordedVerdict`
+          // makes.
+          if (isHqIntegrityFinding(finding)) merged.add(finding);
+        }
+        blockingFindings = [...merged];
+      } catch {
+        // Omitted, not callable, or it threw. Never a pass — see
+        // `candidate_census_unavailable`.
+        censusSettled = false;
+        chainVerified = false;
+      }
+      if (!censusSettled) refusals.push('candidate_census_unavailable');
+      if (wouldLatch || blockingFindings.length > 0) refusals.push('would_latch_safe_mode');
 
       return {
         verified: refusals.length === 0,
@@ -3982,12 +4437,24 @@ export function verifyHqBackupFile(
         schemaTables: tables.size,
         // The published verdict says what was actually established. `ok` used
         // to be printed over a file HQ's own census would have refused to run
-        // on; now `ok` means both checks passed and anything else names which
-        // one did not.
-        integrityVerdict: (blockingFindings.length === 0
-          ? integrityVerdict
-          : `${integrityVerdict}; HQ append-only census: ${[...new Set(blockingFindings)].sort().join(', ')}`
-        ).slice(0, 400),
+        // on; now `ok` means every check passed and anything else names which
+        // one did not — including the case where HQ's own assessment could not
+        // run at all, which is a different sentence from "it ran and found
+        // nothing".
+        integrityVerdict: [
+          integrityVerdict,
+          blockingFindings.length > 0
+            ? `HQ append-only census: ${[...new Set(blockingFindings)].sort().join(', ')}`
+            : null,
+          wouldLatch && blockingFindings.length === 0
+            ? 'HQ append-only census: this file records a standing safe-mode verdict'
+            : null,
+          censusSettled ? null : "HQ's own assessment of this file could not run",
+        ]
+          .filter((part): part is string => part !== null)
+          .join('; ')
+          .slice(0, 400),
+        chainVerified,
         blockingFindings,
         resolvedPath: resolved,
       };
