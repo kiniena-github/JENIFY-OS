@@ -1233,9 +1233,12 @@ function refusal(result: { ok: boolean; error?: { code: string; message?: string
  * where a hang is the real signal. Only the harness deadline changes here;
  * every assertion is untouched.
  *
- * The sentence above used to say "all 3425 tests in this package" (Wave 5
- * correction round thirteen, Low 3). The real count was 3442 by the time it
- * shipped, and this same wave had just retired the hand counts from
+ * The sentence above used to state a whole-suite test count (Wave 5 correction
+ * round thirteen, Low 3). It was already stale by the time it shipped — the
+ * figure is deliberately not restated here, because a numeral in this comment
+ * is the very thing the rule below refuses, and quoting the retired one would
+ * reopen the hole while describing it. This same wave had just retired the
+ * hand counts from
  * `PHASE_13_ADVANCED_RELIABILITY.md` on the grounds that a present-tense count
  * in a comment is a claim about the code that nothing checks. The number is
  * dropped rather than re-counted: nothing here depends on how many tests the
