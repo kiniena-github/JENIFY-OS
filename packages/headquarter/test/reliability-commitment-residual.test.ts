@@ -30,9 +30,20 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fileFixture, type FileFixture } from './reliability.fixture.js';
 import type { HqDatabase } from '../src/store/db.js';
-import { elidedCommitmentLedgerRows } from '../src/store/integrity.js';
+import {
+  ENGINE_IMMUTABLE_TABLES,
+  declaredGuardsFor,
+  elidedCommitmentLedgerRows,
+} from '../src/store/integrity.js';
 
 const LEDGER = 'hq_integrity_checkpoints';
+
+/** Every guard the schema DECLARES on the commitment ledger. */
+function declaredCheckpointGuards(): string[] {
+  const entry = ENGINE_IMMUTABLE_TABLES.find((row) => row.table === LEDGER);
+  if (!entry) throw new Error('the commitment ledger is no longer a declared ledger');
+  return declaredGuardsFor(entry);
+}
 
 interface TriggerRow {
   name: string;
@@ -87,7 +98,11 @@ describe('the commitment-ledger row identity closes the DELETE-and-re-seat forge
       const triggers = raw
         .prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ?`)
         .all(LEDGER) as TriggerRow[];
-      expect(triggers.length).toBe(3);
+      // DERIVED rather than hand-counted (Wave 5 correction round seven, High
+      // 3): what this asserts is "every guard the schema declares is on the
+      // ledger before the attack takes them off", and the literal was that
+      // number only until `no_overclaim` was declared beside the trio.
+      expect(triggers.map((trigger) => trigger.name).sort()).toEqual(declaredCheckpointGuards().sort());
       for (const trigger of triggers) raw.exec(`DROP TRIGGER ${trigger.name}`);
       raw.exec(`DELETE FROM ${LEDGER} WHERE seq = (SELECT MIN(seq) FROM ${LEDGER})`);
       for (const trigger of triggers) raw.exec(trigger.sql);
@@ -140,11 +155,15 @@ describe('the commitment-ledger row identity closes the DELETE-and-re-seat forge
       raw.prepare(`UPDATE sqlite_sequence SET seq = 1 WHERE name = ?`).run(LEDGER);
       for (const trigger of triggers) raw.exec(trigger.sql);
       const after = shape(raw);
-      // The row identity IS repaired by that path...
+      // The row identity IS repaired by that path, in every reading that lives
+      // inside the file...
       expect(after).toEqual({ rows: 1, greatestRowid: 1, highWaterMark: 1 });
-      expect(elidedCommitmentLedgerRows(raw)).toBe(false);
+      // ...and since round ten it is reported anyway, by the greatest rowid
+      // this ledger has ever reached, which HQ keeps in the database header
+      // where a `DELETE` and a `sqlite_sequence` write cannot reach it.
+      expect(elidedCommitmentLedgerRows(raw)).toBe(true);
       raw.close();
-      // ...and it is caught anyway, by the recorded high-water mark.
+      // It is caught by the recorded per-ledger high-water mark as well.
       const p2 = posture(fx, 'p2');
       expect(p2.bootSafeMode).toBe(true);
       expect(p2.assessSafeMode).toBe(true);

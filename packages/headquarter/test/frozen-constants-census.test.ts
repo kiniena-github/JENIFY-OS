@@ -27,6 +27,17 @@
  * `Set` or a `Map`: entries are not own properties, so a frozen
  * `QUEUED_UNREACHABLE_STATUSES` accepted `.delete()` and `.add()` and
  * `QUERY_STOPWORDS` accepted `.clear()`. Both are pinned below.
+ *
+ * Round ten, Medium 2 — the title of the second block below USED TO OUTRUN
+ * ITS ASSERTIONS. It said "frozen in its CONTENTS" while asserting only that
+ * four own, shadowing properties throw, and an own property shadows the
+ * prototype for direct property access ONLY: `Set.prototype.clear.call(x)`
+ * reaches the internal slot without reading a property of `x` at all, and
+ * emptied `QUEUED_UNREACHABLE_STATUSES` in one statement — the same cost as the
+ * `.clear()` the stubs refused. `deepFreeze` now hands out a `Proxy` over the
+ * collection instead of the collection, and the assertions below execute the
+ * prototype spelling, the `forEach` third-argument escape, and the reads that
+ * had to keep working, so the title is earned rather than advertised.
  */
 
 import { describe, expect, it } from 'vitest';
@@ -107,6 +118,110 @@ describe('a frozen Set or Map is frozen in its CONTENTS, not only in its shape',
     // Reading is untouched: a vocabulary exists to be read.
     expect([...QUEUED_UNREACHABLE_STATUSES].sort()).toEqual(before);
     expect(QUEUED_UNREACHABLE_STATUSES.has(member)).toBe(true);
+  });
+
+  it('refuses the prototype spelling too, which reaches the slot without reading a property', async () => {
+    const { QUEUED_UNREACHABLE_STATUSES } = await import('../src/contracts/events.js');
+    const target = QUEUED_UNREACHABLE_STATUSES as unknown as Set<string>;
+    const before = [...target].sort();
+    expect(before.length).toBeGreaterThan(0);
+    const member = before[0]!;
+    // Each of these is the one-statement exploit the own-property stubs did not
+    // reach: an own `clear` shadows `x.clear()` and nothing else.
+    for (const attempt of [
+      () => Set.prototype.clear.call(target),
+      () => Set.prototype.delete.call(target, member),
+      () => Set.prototype.add.call(target, 'queued'),
+    ]) {
+      expect(attempt).toThrow(TypeError);
+    }
+    expect([...target].sort()).toEqual(before);
+    expect(target.size).toBe(before.length);
+    // The decision this vocabulary is read by still sees its member, which is
+    // the whole point: an emptied set stops `task_beyond_claiming` firing.
+    expect(target.has(member)).toBe(true);
+  });
+
+  it('hands `forEach` no reference that mutates, having handed out the raw collection before', async () => {
+    const { deepFreeze } = await import('../src/contracts/freeze.js');
+    const frozen = deepFreeze(new Set(['review_passed', 'completed'])) as Set<string>;
+    const handed: unknown[] = [];
+    const visited: string[] = [];
+    frozen.forEach((entry, _key, collection) => {
+      visited.push(entry);
+      handed.push(collection);
+    });
+    expect(visited).toEqual(['review_passed', 'completed']);
+    // `Set.prototype.forEach` passes the collection it was called on as a third
+    // argument. Forwarding the raw target there was a one-statement escape.
+    expect(handed).toHaveLength(2);
+    for (const collection of handed) {
+      expect(collection).toBe(frozen);
+      expect(() => Set.prototype.clear.call(collection as Set<string>)).toThrow(TypeError);
+      expect(() => (collection as Set<string>).clear()).toThrow(TypeError);
+    }
+    expect([...frozen]).toEqual(['review_passed', 'completed']);
+  });
+
+  it('keeps every read a caller of this package actually performs', async () => {
+    const { deepFreeze } = await import('../src/contracts/freeze.js');
+    const frozen = deepFreeze(new Set(['a', 'b'])) as Set<string>;
+    expect(frozen instanceof Set).toBe(true);
+    expect(Object.isFrozen(frozen)).toBe(true);
+    expect(Object.prototype.toString.call(frozen)).toBe('[object Set]');
+    expect(frozen.has('a')).toBe(true);
+    expect(frozen.has('zz')).toBe(false);
+    expect(frozen.size).toBe(2);
+    expect([...frozen]).toEqual(['a', 'b']);
+    expect(Array.from(frozen)).toEqual(['a', 'b']);
+    expect([...frozen.keys()]).toEqual(['a', 'b']);
+    expect([...frozen.values()]).toEqual(['a', 'b']);
+    expect([...frozen.entries()]).toEqual([
+      ['a', 'a'],
+      ['b', 'b'],
+    ]);
+    expect([...new Set(frozen)]).toEqual(['a', 'b']);
+    // Method identity is stable, so a caller holding `set.has` keeps holding it.
+    expect(frozen.has).toBe(frozen.has);
+    const frozenMap = deepFreeze(new Map([['k', 1]])) as Map<string, number>;
+    expect(frozenMap instanceof Map).toBe(true);
+    expect(frozenMap.get('k')).toBe(1);
+    expect(frozenMap.has('k')).toBe(true);
+    expect(frozenMap.size).toBe(1);
+    expect([...frozenMap]).toEqual([['k', 1]]);
+    for (const attempt of [
+      () => Map.prototype.clear.call(frozenMap),
+      () => Map.prototype.delete.call(frozenMap, 'k'),
+      () => Map.prototype.set.call(frozenMap, 'k2', 2),
+    ]) {
+      expect(attempt).toThrow(TypeError);
+    }
+    expect([...frozenMap]).toEqual([['k', 1]]);
+  });
+
+  it('reaches a collection held INSIDE a frozen structure, and one that holds itself', async () => {
+    const { deepFreeze } = await import('../src/contracts/freeze.js');
+    // "All the way down" would stop at the raw Set a frozen object happens to
+    // hold, unless the property is repointed at the view.
+    const nested = deepFreeze({ vocabulary: new Set(['open', 'closed']), rows: [new Map([['a', 1]])] }) as {
+      vocabulary: Set<string>;
+      rows: Map<string, number>[];
+    };
+    expect(() => Set.prototype.clear.call(nested.vocabulary)).toThrow(TypeError);
+    expect(() => Map.prototype.clear.call(nested.rows[0]!)).toThrow(TypeError);
+    expect([...nested.vocabulary]).toEqual(['open', 'closed']);
+    expect([...nested.rows[0]!]).toEqual([['a', 1]]);
+
+    // A collection reached through a cycle has to resolve to the view as well,
+    // or the cycle itself hands out the raw reference.
+    const selfReferential = new Set<unknown>(['x']);
+    selfReferential.add(selfReferential);
+    const frozenCycle = deepFreeze(selfReferential) as Set<unknown>;
+    const entries = [...frozenCycle];
+    expect(entries[0]).toBe('x');
+    expect(entries[1]).toBe(frozenCycle);
+    expect(() => Set.prototype.clear.call(entries[1] as Set<unknown>)).toThrow(TypeError);
+    expect(frozenCycle.size).toBe(2);
   });
 
   it('refuses the same on the retrieval stopword set', async () => {

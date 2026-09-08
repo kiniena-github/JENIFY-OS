@@ -45,6 +45,24 @@
  * `HQ_INTEGRITY_FINDINGS` must be induced by some scenario below. A finding
  * that no scenario reaches cannot be classified by depth, and silently
  * omitting it is how a partition like this rots.
+ *
+ * ## Round ten, Low 1 — the same statement's COST clause
+ *
+ * The depth half of `INTEGRITY_DEPTH_STATEMENT` was pinned above; its cost
+ * half was not, and it had drifted in the fail-safe direction the same way.
+ * It said "one MAX(rowid) seek per declared ledger, and one COUNT(*) plus one
+ * indexed lookup over HQ's own small commitment ledger", and all three terms
+ * were wrong: the seeks are two per COMMITTED ledger, the third read is a full
+ * SCAN with a `json_each` expansion and a temporary B-tree `GROUP BY` rather
+ * than a lookup, and the ledger is not "small" in the sense of fixed — it
+ * grows a row per clean boot and per clean assessment.
+ *
+ * So the cost clause is derived too, by the same rule: nothing below restates
+ * the wording. The seek count comes from INSTRUMENTING `db.prepare` and
+ * counting what one pass actually executes, the shape of the ledger read comes
+ * from `EXPLAIN QUERY PLAN` over the statement the pass really ran, and the
+ * growth comes from executing a clean assessment and a clean boot and counting
+ * rows. Each is then compared to what the served sentence claims.
  */
 
 import fs from 'node:fs';
@@ -57,6 +75,7 @@ import { expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
 import { openHqDatabase, type HqDatabase } from '../src/store/db.js';
 import {
+  ENGINE_IMMUTABLE_TABLES,
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   HQ_INTEGRITY_FINDINGS,
   INTEGRITY_DEPTH_STATEMENT,
@@ -311,17 +330,43 @@ describe('the depth statement served to the Founder is derived from what the two
         const pageCount = sizing.pragma('page_count', { simple: true }) as number;
         sizing.close();
         expect(pageCount).toBeGreaterThan(4);
-        const fd = fs.openSync(file.dbPath, 'r+');
-        // An INTERIOR page, so the catalogue on page 1 stays readable and the
-        // structural pass genuinely runs rather than failing to open.
-        fs.writeSync(fd, Buffer.alloc(pageSize, 0x5a), 0, pageSize, (pageCount - 2) * pageSize);
-        fs.closeSync(fd);
-        const db = new Database(file.dbPath) as unknown as HqDatabase;
-        const outcome = bothDepths(db);
-        expect(outcome.full).toContain('database_integrity_check_failed');
-        expect(outcome.structural).not.toContain('database_integrity_check_failed');
+        const pristine = fs.readFileSync(file.dbPath);
+        // The page is chosen by OUTCOME, not by offset (Wave 5 correction round
+        // seven, at the merge with the concurrent lane). This scenario used a
+        // fixed `pageCount - 2`, which is a bet on the file's layout: the
+        // concurrent lane added a column to the commitment ledger and a row
+        // count per declared ledger, the layout moved under the bet, and the
+        // scribble landed somewhere the durability pragma itself could not read
+        // past — so the scenario failed with `database disk image is malformed`
+        // thrown out of `readDurabilityPosture` instead of asserting anything.
+        // What the scenario MEANS is "a genuinely malformed page that the
+        // catalogue read and the pragmas survive", so it looks for one and fails
+        // loudly if the file carries none.
+        let outcome: DepthOutcome | null = null;
+        for (let page = pageCount - 1; page >= 2 && outcome === null; page -= 1) {
+          fs.writeFileSync(file.dbPath, pristine);
+          const fd = fs.openSync(file.dbPath, 'r+');
+          fs.writeSync(fd, Buffer.alloc(pageSize, 0x5a), 0, pageSize, (page - 1) * pageSize);
+          fs.closeSync(fd);
+          const db = new Database(file.dbPath) as unknown as HqDatabase;
+          try {
+            const seen = bothDepths(db);
+            if (
+              seen.full.has('database_integrity_check_failed') &&
+              !seen.structural.has('database_integrity_check_failed')
+            ) {
+              outcome = seen;
+            }
+          } catch {
+            // A page the cheap pass cannot even open past is not the page this
+            // scenario is about; try the next one.
+          } finally {
+            (db as unknown as Database.Database).close();
+          }
+        }
+        expect(outcome, 'no page corruption produced a full-only integrity failure').not.toBeNull();
+        if (outcome === null) throw new Error('unreachable');
         record(outcome);
-        (db as unknown as Database.Database).close();
       } finally {
         file.cleanup();
       }
@@ -356,6 +401,159 @@ describe('the depth statement served to the Founder is derived from what the two
     // the other direction.
     expect(INTEGRITY_DEPTH_STATEMENT).toMatch(/MAX\(rowid\)/);
     expect(INTEGRITY_DEPTH_STATEMENT).toMatch(/commitment/i);
+  });
+});
+
+/**
+ * Run one structural pass with `db.prepare` instrumented, and return every SQL
+ * statement it actually EXECUTED — not every statement it prepared, because a
+ * prepared statement that is never stepped costs nothing.
+ */
+function statementsExecutedByOneStructuralPass(dbPath: string): { sql: string[]; close: () => void } {
+  const db = openHqDatabase(dbPath);
+  const executed: string[] = [];
+  const handle = db as unknown as {
+    prepare: (sql: string) => Record<string, unknown>;
+  };
+  const realPrepare = handle.prepare.bind(handle);
+  handle.prepare = (sql: string) => {
+    const statement = realPrepare(sql);
+    const normalized = sql.replace(/\s+/g, ' ').trim();
+    for (const method of ['all', 'get', 'run'] as const) {
+      const real = statement[method] as ((...args: unknown[]) => unknown) | undefined;
+      if (typeof real !== 'function') continue;
+      statement[method] = (...args: unknown[]) => {
+        executed.push(normalized);
+        return real.apply(statement, args);
+      };
+    }
+    return statement;
+  };
+  const outcome = structuralIntegrity(db, {});
+  // A pass that found something would be measuring a different code path.
+  expect([...findingsOf(outcome.observations)]).toEqual([]);
+  handle.prepare = realPrepare;
+  return { sql: executed, close: () => db.close() };
+}
+
+describe('the cost clause of the depth statement is derived from what a pass executes', () => {
+  /**
+   * RE-DERIVED at the merge with the concurrent round-seven lane, and strictly
+   * stronger than before.
+   *
+   * Round ten measured this clause at its own head and found "two MAX(rowid)
+   * seeks per COMMITTED ledger, not one per DECLARED one". The concurrent lane
+   * was closing High 2 in the same wave, and its fix reads every DECLARED
+   * ledger's identity — a `COUNT(*)` and a `MAX(rowid)` together — because a
+   * seek cannot see a row taken out of the middle of a ledger and a count can.
+   * So BOTH shapes are in the pass now, and both are counted here rather than
+   * one of them standing in for the other: the identity read is per declared
+   * ledger, the standalone seek is per committed one, and neither number is
+   * read off the sentence.
+   */
+  it('counts both reads: an identity per declared ledger, a seek per committed one', () => {
+    const file = warmedFile();
+    try {
+      const pass = statementsExecutedByOneStructuralPass(file.dbPath);
+      const identities = pass.sql.filter((sql) =>
+        /^SELECT COUNT\(\*\) AS held, COALESCE\(MAX\(rowid\), 0\) AS top FROM /.test(sql),
+      );
+      const identityLedgers = new Set(
+        identities.map((sql) => /FROM "?([A-Za-z_]+)"?/.exec(sql)![1]),
+      );
+      expect(identities.length).toBe(ENGINE_IMMUTABLE_TABLES.length);
+      expect(identityLedgers.size).toBe(ENGINE_IMMUTABLE_TABLES.length);
+
+      const seeks = pass.sql.filter((sql) => /^SELECT MAX\(rowid\) AS top FROM /.test(sql));
+      const ledgersSeeked = new Set(seeks.map((sql) => /FROM "?([A-Za-z_]+)"?/.exec(sql)![1]));
+      expect(seeks.length).toBeGreaterThan(0);
+      // Still the retired claim's disproof: the standalone seek is NOT taken
+      // over the whole declared census.
+      expect(ledgersSeeked.size).toBeLessThan(ENGINE_IMMUTABLE_TABLES.length);
+      expect(seeks.length).toBe(ledgersSeeked.size);
+
+      // The retired PHRASING stays retired, by its exact shape, and the two
+      // clauses that replaced it are the measured ones.
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(/one MAX\(rowid\) seek per declared ledger/i);
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(
+        /two MAX\(rowid\) seeks for each ledger HQ has committed a mark for/,
+      );
+      expect(INTEGRITY_DEPTH_STATEMENT).toMatch(
+        /one COUNT\(\*\) and one MAX\(rowid\) over each declared ledger/,
+      );
+      expect(INTEGRITY_DEPTH_STATEMENT).toMatch(
+        /one further MAX\(rowid\) seek for each ledger HQ has committed a mark for/,
+      );
+      pass.close();
+    } finally {
+      file.cleanup();
+    }
+  });
+
+  it('reads the commitment ledger with a SCAN and a temporary B-tree, not one indexed lookup', () => {
+    const file = warmedFile();
+    try {
+      const pass = statementsExecutedByOneStructuralPass(file.dbPath);
+      const markRead = pass.sql.find(
+        (sql) => sql.includes(HQ_INTEGRITY_CHECKPOINT_TABLE) && sql.includes('json_each'),
+      );
+      expect(markRead, 'the pass must read its committed marks out of the checkpoint ledger').toBeTruthy();
+      pass.close();
+
+      // The plan of the statement the pass REALLY ran, asked of the engine.
+      const raw = new Database(file.dbPath);
+      const plan = (raw.prepare(`EXPLAIN QUERY PLAN ${markRead!}`).all() as { detail: string }[])
+        .map((row) => row.detail)
+        .join(' | ');
+      raw.close();
+      expect(plan).toMatch(/SCAN/);
+      expect(plan).toMatch(/TEMP B-TREE/i);
+
+      // So the sentence may not call that term a lookup, and must name what it
+      // actually is. `json_each` and the temporary B-tree are the two parts a
+      // reader would otherwise have to take on trust.
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(/one COUNT\(\*\) plus one indexed lookup/);
+      expect(INTEGRITY_DEPTH_STATEMENT).toMatch(/full SCAN/);
+      expect(INTEGRITY_DEPTH_STATEMENT).toMatch(/json_each/);
+      expect(INTEGRITY_DEPTH_STATEMENT).toMatch(/temporary B-tree/i);
+    } finally {
+      file.cleanup();
+    }
+  });
+
+  it('grows the ledger it scans, by a row per clean boot and per clean assessment', () => {
+    const fx = fileFixture();
+    try {
+      const rows = (): number => {
+        const raw = new Database(fx.dbPath);
+        const count = (
+          raw.prepare(`SELECT COUNT(*) AS n FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`).get() as { n: number }
+        ).n;
+        raw.close();
+        return count;
+      };
+      const atStart = rows();
+      // One CLEAN Founder assessment, through the facade that serves the
+      // sentence being checked.
+      expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      const afterAssessment = rows();
+      fx.db.close();
+
+      // One CLEAN boot, nothing else.
+      const booted = openHqDatabase(fx.dbPath);
+      new HeadquarterOperations(booted);
+      const afterBoot = rows();
+      booted.close();
+
+      // Strictly increasing on clean activity — which is exactly why calling
+      // the ledger "small" and the read "one indexed lookup" understated it.
+      expect(afterAssessment).toBeGreaterThan(atStart);
+      expect(afterBoot).toBeGreaterThan(afterAssessment);
+      expect(INTEGRITY_DEPTH_STATEMENT).toMatch(/grows a row per clean boot and per clean assessment/);
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(/small commitment ledger/);
+    } finally {
+      fx.cleanup();
+    }
   });
 });
 

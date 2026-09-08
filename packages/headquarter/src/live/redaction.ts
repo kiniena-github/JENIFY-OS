@@ -186,8 +186,9 @@ export class BrowserSafetyError extends Error {
  *    property named above while splitting `sk-…` in two (Wave 5 correction
  *    round four, the other lane's Low 2, executed on that lane's head). It is
  *    the reason this class is stated as zero INK rather than zero width.
- *    Ordinary whitespace is still deliberately not folded — see the `\p{Zs}`
- *    paragraph below.
+ *    The plain SPACE and NO-BREAK SPACE are still deliberately not folded, and
+ *    the other fifteen `\p{Zs}` separators are — a step earlier, by
+ *    `NARROW_SPACES`; see the `\p{Zs}` paragraph below.
  *
  * `\p{Co}` PRIVATE USE is here for the SAME one-line argument that put
  * `\p{Cn}` here, and it was open for seven rounds while its twin was closed
@@ -210,12 +211,29 @@ export class BrowserSafetyError extends Error {
  * supplementary private-use planes. It appeared in no residual list, no comment
  * and no test.
  *
- * `\p{Zs}` -- the ordinary SPACE separators -- is deliberately NOT here, and
- * that is an argued boundary rather than an omission. A space is VISIBLE: it
- * changes what a reader sees, so it hides nothing. Erasing it would join
- * ordinary prose into fabricated credential shapes (`...ask -driven-workflow`),
- * which is a false REFUSAL of a Founder's own text, and `Bearer\s+...` is
- * matched on the raw string anyway.
+ * `\p{Zs}` is not here, and after round ten only TWO of its seventeen members
+ * are still admitted: U+0020 SPACE and U+00A0 NO-BREAK SPACE. The other fifteen
+ * are erased a step earlier, by `NARROW_SPACES` — see there for the reason the
+ * split has to happen before `NFKD` rather than in this set.
+ *
+ * **The justification this set carried for those fifteen was measured and did
+ * not hold** (Wave 5 correction round ten, Low 2). It read: erasing `\p{Zs}`
+ * "would join ordinary prose into fabricated credential shapes
+ * (`...ask -driven-workflow`)". That example does not fire. Executed on a
+ * scratch copy of `6ce93df` with `\p{Zs}` folded, across a 40-string corpus,
+ * exactly ONE verdict changed and it was a contrived string; the sentence's own
+ * example was still ACCEPTED, because `(?<![A-Za-z0-9])` sees the `a` of `ask`
+ * in front of `sk` and the run is too short for `{16,}` in any case. Meanwhile
+ * the residual was carrying a whole key onto the unauthenticated artifact for
+ * every one of the seventeen — `sk-<U+2007>ABCDEFGHIJKLMNOP0123456789` passed —
+ * and "a space is visible, so it hides nothing" is at its weakest exactly where
+ * the space is a FIGURE SPACE or a HAIR SPACE inside a key.
+ *
+ * What survives of the argument, and why the last two members keep it: a plain
+ * SPACE and a NO-BREAK SPACE are what ordinary prose is made of, folding them
+ * would fold every word in every sentence together, and `Bearer\s+…` is matched
+ * on the raw string anyway. That is a real boundary; it was never a reason to
+ * admit a hair space inside a credential.
  */
 const ERASED_CODE_POINTS =
   /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\p{Zl}\p{Zp}\p{Mn}\p{Me}\p{Cn}\p{Co}͏⠀]/gu;
@@ -257,13 +275,86 @@ const ERASED_CODE_POINTS =
  * already carry them. `live-redaction.test.ts`'s twelve legitimate strings and
  * the round-seven suite's accented prose are both pinned against it.
  *
- * `\p{Zs}` is STILL not folded, on the argument that has not changed: a space
- * is visible, so it hides nothing.
+ * **It DOES cost one new refusal class, which that measurement did not cover**
+ * (round ten, Low 2). "No new refusal on accented prose in five languages" was
+ * measured over PROSE, and a hyphenated proper NAME is not prose. What the fold
+ * cannot do is build a credential prefix out of nothing; what it can do is
+ * remove a mark that was ALREADY separating one from the shape. Executed:
+ * `ŠK-Slovan-Bratislava-1919` passed before this wave, because `Š` is a
+ * precomposed `Lu` that `NFKC` left alone, and is REFUSED now, because the
+ * `NFKD` strip folds it to `S` and the case-insensitive `sk-` rule fires. The
+ * refused string is the whole snapshot, so this is an availability cost on a
+ * legitimate name, not a leak.
+ *
+ * The class is stated exactly, by enumeration rather than by adjective: 53
+ * non-ASCII letters fold to `s` (`Ś ś Ŝ ŝ Ş ş Š š ſ Ș ș ˢ Ṡ ṡ …`) and 42 fold
+ * to `k` (`Ķ ķ Ǩ ǩ ᴷ ᵏ Ḱ ḱ Ḳ ḳ Ḵ ḵ ₖ K …`). A string is newly refused when, at
+ * a non-alphanumeric boundary, one of those s-like letters is followed by one
+ * of those k-like letters, then `-`, then 16 or more of `[A-Za-z0-9_-]` — and
+ * all 53 s-like spellings were executed against that tail and all 53 refuse.
+ * Nothing else in the class exists: an accented hyphenated name that does not
+ * spell s-then-k is untouched, and `Škoda-Auto-Mladá-Boleslav`,
+ * `Sköldebrand-Åkerström-Handelsbolaget` and
+ * `Ćwikliński-Żółkiewski-Przedsiębiorstwo` were each executed and each pass.
+ *
+ * **Why it is disclosed rather than fixed.** The ASCII spelling
+ * `SK-Slovan-Bratislava-1919` was ALREADY refused before this wave: the over-
+ * breadth is in the `sk-` shape, which accepts `-` in its 16-character tail
+ * because a real key does (`sk-proj-…`). The fold therefore added SPELLINGS of
+ * an existing over-refusal rather than a new one. Narrowing the shape so that
+ * hyphen-separated word runs are not credentials would be a heuristic that
+ * makes a credential guard refuse LESS, on the exact rule this guard exists
+ * for, to buy back an availability cost measured at one two-letter prefix —
+ * that trade is not taken here, and moving the `sk-` shape is its own change
+ * with its own review. `credential-scan-false-positive-class.test.ts` executes
+ * the class, and re-executes U+0301, U+20DD, U+0378, U+05BF and U+0E31 to hold
+ * the evasion direction where it is.
+ *
+ * Fifteen of the seventeen `\p{Zs}` separators are folded as of round ten, and
+ * they are folded HERE, before `NFKD` — see `NARROW_SPACES` immediately below.
  */
 const COMBINING_MARKS = /[\p{Mn}\p{Me}]/gu;
 
+/**
+ * The `\p{Zs}` separators that are NOT a plain space: U+1680 and U+2000-U+200A,
+ * U+202F, U+205F and U+3000. Erased from the scan copy.
+ *
+ * **Why they cannot be entries in `ERASED_CODE_POINTS`, which is where anyone
+ * would look for them first.** That set is applied LAST, and `NFKC`/`NFKD` run
+ * before it — compatibility normalization maps every one of these except U+1680
+ * to a plain U+0020. By the time the erase set runs there is nothing left to
+ * distinguish a HAIR SPACE from a Founder's own space bar, so adding them there
+ * is a no-op for fourteen of the fifteen. Measured, not reasoned about: with
+ * all fifteen added to `ERASED_CODE_POINTS` and nothing else changed, the
+ * whole-plane sweep still found sixteen `\p{Zs}` survivors carrying a key, and
+ * only U+1680 — the one member with no compatibility decomposition — dropped
+ * out. The erase therefore has to happen on the RAW string, before any
+ * normalization, which is exactly where it is.
+ *
+ * **What it closes.** `sk-<U+2007>ABCDEFGHIJKLMNOP0123456789` and the same
+ * shape with U+200A, U+2000-U+2009, U+202F, U+205F, U+3000 or U+1680 reached
+ * the unauthenticated `hq-snapshot.json` with every character of the key intact
+ * and a gap a reader is not required to notice. The whole-plane sweep's
+ * `\p{Zs}` survivor count moves from 17 to 2 with this change, and the two that
+ * remain are U+0020 and U+00A0.
+ *
+ * **What it costs, measured rather than hoped.** Erasing a separator can only
+ * REMOVE characters from the scan copy; it cannot introduce a letter, so it
+ * cannot build `sk-`, `ghp_`, `AIza`, a PEM header, a JWT or `Bearer ` out of
+ * prose that did not carry one. What it CAN do is close a gap, so the corpus
+ * that matters is prose that uses these separators as typography: French narrow
+ * no-break and thin spaces around `:` and inside grouped numbers, and Japanese
+ * and Chinese text spaced with U+3000. Both were run against the guard with
+ * this fold in place, together with the shipped multilingual corpus and the
+ * strings the suites already pin: zero refusals changed. The two members
+ * ordinary prose is actually MADE of, U+0020 and U+00A0, are deliberately left
+ * alone — folding those would join every word of every sentence, which is the
+ * false-refusal risk the original argument was really about.
+ */
+const NARROW_SPACES = /[\u1680\u2000-\u200a\u202f\u205f\u3000]/gu;
+
 function stripCombiningMarks(value: string): string {
-  return value.normalize('NFKD').replace(COMBINING_MARKS, '');
+  return value.replace(NARROW_SPACES, '').normalize('NFKD').replace(COMBINING_MARKS, '');
 }
 
 /**
@@ -370,6 +461,11 @@ function foldConfusableLetters(value: string): string {
  * Order is load-bearing and each step is here because the one before it does
  * not do its job:
  *
+ *  0. the narrow-space erase and the combining-mark strip run FIRST, on the raw
+ *     string and on an `NFKD` copy of it respectively, because compatibility
+ *     normalization destroys the distinction each of them depends on: it folds
+ *     fourteen of the fifteen narrow separators onto a plain U+0020, and it
+ *     recomposes a base letter with its mark;
  *  1. `NFKC` maps the fullwidth and compatibility forms onto the ASCII the
  *     patterns look for;
  *  2. the hyphen fold catches the dash family NFKC leaves canonical;
@@ -389,10 +485,16 @@ function foldConfusableLetters(value: string): string {
  * `sk-ABCDEFGHIJKLMNOP0123` into two unmatched halves while leaving every
  * character of the key present and usable. What that class is for is ZERO-INK
  * characters, whatever their width, because those are the ones that defeat a
- * shape without removing the credential. Ordinary whitespace is still
- * deliberately NOT folded: a space inside a credential is a break a reader can
- * see, folding it away would start matching prose, and `Bearer\s+…` is matched
- * on the raw string anyway.
+ * shape without removing the credential.
+ *
+ * **Whitespace is folded in step 1, and only for the fifteen `\p{Zs}`
+ * separators that are not a plain space** (round ten, Low 2). It has to happen
+ * there rather than in step 4 because `NFKC`/`NFKD` map every one of them
+ * except U+1680 onto U+0020, so by step 4 there is nothing left to tell a HAIR
+ * SPACE from a space bar — see `NARROW_SPACES`. U+0020 and U+00A0 are still
+ * deliberately NOT folded: those two are what ordinary prose is made of,
+ * folding them would join every word of every sentence in the scan copy, and
+ * `Bearer\s+…` is matched on the raw string anyway.
  */
 function normalizeForScan(value: string): string {
   return foldConfusableLetters(
@@ -556,6 +658,22 @@ function namesACredentialHolder(key: string): boolean {
  * so the hole is stated here and in the phase document rather than papered over.
  * The architecture is what answers it: credentials never enter the control
  * plane, and no HQ writer splits a value across fields.
+ *
+ * **The KEY rule reaches exactly one level, and the refusal message reads wider
+ * than that** (Wave 5 correction round seven, Low 8). "Field names a credential
+ * holder and carries a value" applies only where the value is a string or a
+ * number: `{token: 'x'}` and `{token: 12345}` are refused, and
+ * `{token: {v: 'x'}}` and `{token: ['x']}` are not, because the walk descends
+ * into the container and the key it then sees is `v` or an index rather than
+ * `token`. That is the right trade — refusing every object under a
+ * credential-named key would refuse `{apiKeyStatus: {present: true}}`, which is
+ * exactly the PRESENCE shape this boundary exists to allow — but it is narrower
+ * than the sentence sounds, so it is written down. What still covers the nested
+ * case is the VALUE rule, which runs on every string at every depth: a
+ * credential-SHAPED string is refused wherever it sits. What is not covered is
+ * a credential that is neither shaped like one nor a direct scalar under a
+ * credential-named key, and that is the same residual the split-value paragraph
+ * above states.
  */
 export function assertBrowserSafe(payload: unknown, rootPath = 'snapshot'): void {
   walk(payload, rootPath, (value, path, key) => {

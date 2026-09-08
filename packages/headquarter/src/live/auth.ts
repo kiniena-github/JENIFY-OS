@@ -153,9 +153,14 @@ export interface ControlRequest {
  * it is the marker recording how much is known about the caller, and a client
  * that could set it could upgrade its own trust level.
  *
- * **The five `*By`/`workerId` spellings were missing** (Wave 5 correction round
- * six, Medium 7). The list held `requestedBy` and stopped there, so
- * `setBy`, `observedBy`, `recordedBy`, `issuedBy` and `workerId` were accepted:
+ * **Five `*By` spellings were missing** (Wave 5 correction round six, Medium 7;
+ * this sentence corrected at round seven, Low 7, because it counted `workerId`
+ * among the five it added and then excluded it three paragraphs down, and never
+ * named `assessedBy`, which the array really does add). The five ADDED are
+ * `setBy`, `observedBy`, `recordedBy`, `issuedBy` and `assessedBy`; `workerId`
+ * was reported with them and is deliberately NOT here, for the reason below.
+ * The list held `requestedBy` and stopped there, so those spellings were
+ * accepted:
  * executed against the previous head, `requestedBy`/`principalId`/`actor`/
  * `founderId` answered 400 with the store digest unchanged, and the other five
  * answered 201 with the digest CHANGED. There is NO authority effect — every
@@ -167,7 +172,7 @@ export interface ControlRequest {
  * parameter names for the acting principal. A client that spelled one and got a
  * 201 learned the opposite of the truth.
  *
- * `workerId` was reported alongside them and is deliberately NOT here, because
+ * `workerId`, the sixth spelling the review reported, is deliberately NOT here, because
  * adding it would be wrong rather than strict: on the workforce and
  * collaboration routes `workerId` names the worker the Founder is acting UPON —
  * the object of the request, not a claim about who is making it — and reserving

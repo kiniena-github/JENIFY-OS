@@ -32,31 +32,66 @@
  * that held `entry` was frozen. Cycles are handled, so a self-referential
  * declaration cannot make this recurse forever.
  *
- * **"ALL THE WAY DOWN" was NOT TRUE OF A `Set` OR A `Map`, and the sentence
- * that said so is corrected here rather than restated** (Wave 5 correction
- * round seven, Medium NEW-5). A collection's ENTRIES are not own properties, so
- * `Reflect.ownKeys` never reaches them and `Object.freeze` does not touch them:
- * a frozen `Set` accepts `.add()`, `.delete()` and `.clear()` exactly as an
- * unfrozen one does. Both of this package's `Set` vocabularies were reachable
- * that way — `QUEUED_UNREACHABLE_STATUSES`, which `service.ts` decides a task's
- * reachability on, and `QUERY_STOPWORDS`. `.delete()` on the first is the same
- * class of exploit as `ENGINE_IMMUTABLE_TABLES.length = 0`: it narrows a
- * closed vocabulary a decision is keyed by, without touching a single frozen
- * property.
+ * ## Why a `Set` or a `Map` needs more than `Object.freeze`
  *
- * So a collection is frozen in CONTENT as well as in shape: its entries are
- * recursed into, and its write half throws — the same failure mode a write to
- * a frozen property has under ESM's always-strict semantics. Reading (`has`,
- * `get`, `size`, iteration) is untouched, because reading is what a vocabulary
- * is for.
+ * A collection's ENTRIES are not own properties. `Reflect.ownKeys` never
+ * reaches them and `Object.freeze` does not touch them, so a frozen `Set`
+ * accepted `.add()`, `.delete()` and `.clear()` exactly as an unfrozen one did
+ * (round seven, Medium NEW-5). Both of this package's `Set` vocabularies were
+ * reachable that way — `QUEUED_UNREACHABLE_STATUSES`, which `service.ts`
+ * decides a task's reachability on, and `QUERY_STOPWORDS`. Narrowing a closed
+ * vocabulary a decision is keyed by is the same class of exploit as
+ * `ENGINE_IMMUTABLE_TABLES.length = 0`, without touching one frozen property.
  *
- * **AND THE OWN-MUTATOR VERSION OF THAT FIX WAS STILL BYPASSABLE BY THE
- * PROTOTYPE, which is what this module now closes** (Wave 5 correction round
- * ten, Medium 3). Installing own throwing `add`/`delete`/`clear` shadows the
- * prototype for `frozenSet.clear()` and for nothing else. `Set.prototype`'s
- * methods do not read the receiver's properties — they operate on its internal
- * `[[SetData]]` slot — so the shadowing was invisible to them. Executed
- * against the previous head:
+ * Round seven answered it by installing own, non-configurable throwing
+ * `add`/`set`/`delete`/`clear`. **That was not enough, and round ten is where
+ * it is actually closed** (round ten, Medium 2). An own property shadows the
+ * prototype for direct property access ONLY: `Set.prototype.clear.call(x)`
+ * never reads a property of `x` at all, it reaches straight into the internal
+ * slot, so it emptied a `deepFreeze`d `QUEUED_UNREACHABLE_STATUSES` in one
+ * statement — the same cost as the `.clear()` the stubs had just refused.
+ *
+ * There is no way to make a REAL `Set` refuse that: the built-in mutators are
+ * defined in terms of the [[SetData]] slot, and patching `Set.prototype` itself
+ * would change every collection in the process, which this module has no
+ * business doing. So a frozen collection is no longer handed out as a real
+ * `Set`. It is handed out as a `Proxy` over one, and the raw collection is
+ * closed over and never escapes:
+ *
+ * - `Set.prototype.clear.call(view)` — and `add`, `delete`, `set` — throw
+ *   `TypeError: Method Set.prototype.clear called on incompatible receiver`,
+ *   because a `Proxy` carries no [[SetData]] slot of its own.
+ * - Direct `view.clear()` throws HQ's own `TypeError`, from an own,
+ *   non-configurable stub installed on the target and returned verbatim by the
+ *   trap (returning anything else would violate the proxy invariant for a
+ *   non-configurable, non-writable own property).
+ * - Reading is untouched, because reading is what a vocabulary is for: `has`,
+ *   `get`, `size`, `forEach`, `keys`/`values`/`entries`, `for…of`, spread,
+ *   `Array.from`, the ES2025 set-composition methods, `instanceof Set` and
+ *   `Object.isFrozen` all behave exactly as they did.
+ * - `forEach` is the one read that had to be rewritten rather than forwarded:
+ *   it hands its callback the collection it was called on as a THIRD argument,
+ *   and forwarding the raw target there leaked the very reference this view
+ *   exists to withhold — a one-statement escape, executed before this sentence
+ *   was written. The wrapper passes the view.
+ *
+ * "The raw collection never escapes" is a property of the CALL SITES as much as
+ * of this module: the proxy target is the very object `deepFreeze` was handed,
+ * so a caller that named its collection before freezing it would still hold a
+ * mutable reference. Both of this package's frozen collections
+ * (`QUEUED_UNREACHABLE_STATUSES` in `contracts/events.ts`, `QUERY_STOPWORDS` in
+ * `application/search-command.ts`) construct the collection inline in the
+ * `deepFreeze(...)` argument, so nothing outside this module names one. That is
+ * stated rather than assumed, because it is the half a future call site could
+ * break without touching this file.
+ *
+ * ## Two lanes fixed this, and this is the one that shipped
+ *
+ * Round ten reached the same defect from two directions. The other lane replaced
+ * a frozen collection with a hand-built frozen VIEW OBJECT — no `[[SetData]]`
+ * slot at all, so the prototype spelling throws for the same reason it throws
+ * here. Its evidence, executed against the pre-fix head, is kept because it is
+ * what made the defect real rather than theoretical:
  *
  * ```
  * own .clear()              -> threw
@@ -64,130 +99,135 @@
  * Map.prototype.delete.call -> SUCCEEDED
  * ```
  *
- * And it reached a gate: emptying `QUEUED_UNREACHABLE_STATUSES` by prototype
- * call flipped `assignTask` on a COMPLETED task from
- * `refused: task_beyond_claiming` to ACCEPTED (`service.ts`'s
- * `assignmentBarrier`).
+ * and it reached a gate rather than only a constant: emptying
+ * `QUEUED_UNREACHABLE_STATUSES` by prototype call flipped `assignTask` on a
+ * COMPLETED task from `refused: task_beyond_claiming` to ACCEPTED
+ * (`service.ts`'s `assignmentBarrier`). That consequence is pinned in
+ * `test/frozen-constants-census.test.ts`.
  *
- * No amount of property work can close that, because the vulnerable thing is
- * an internal slot rather than a property. So a frozen collection is no longer
- * a `Set` or a `Map` at all: it is a frozen VIEW object holding the real
- * collection in a closure, exposing the read half (`has`, `get`, `size`,
- * `keys`, `values`, `entries`, `forEach`, iteration) and throwing from the
- * write half. `Set.prototype.clear.call(view)` now throws
- * `TypeError: Method Set.prototype.clear called on incompatible receiver`,
- * because the view has no `[[SetData]]` slot to reach — and the collection
- * that does have one is named by nothing outside this module.
+ * The `Proxy` is what ships, because the view object closed the bypass at the
+ * cost of no longer BEING a collection: `deepFreeze(new Set(...)) instanceof
+ * Set` would have become false, and `live/redaction.ts`'s walker branches on
+ * `value instanceof Map` / `value instanceof Set` to reach a collection's
+ * entries at all. A frozen vocabulary would have fallen through to the
+ * own-property path and been walked as an empty object — a silent narrowing of
+ * the credential scan, traded for a bypass that the `Proxy` closes just as
+ * completely. Both lanes' assertions are kept and both pass against this
+ * mechanism.
  *
- * The consequences, stated rather than discovered later: a deep-frozen `Set` or
- * `Map` is `ReadonlySet`/`ReadonlyMap` in shape and in behaviour but is NOT
- * `instanceof Set`/`instanceof Map`, and `deepFreeze` therefore RETURNS a
- * different object than it was given for those two types (its own callers
- * already use the return value, and a nested collection is written back into
- * its frozen parent). `forEach`'s third argument is the VIEW, never the inner
- * collection, so a callback cannot be handed the mutable thing the view exists
- * to hide.
+ * The measured cost is real and is stated rather than waved away: a bare
+ * `.has()` costs about 15 ns direct and about 38 ns through the view on this
+ * machine. The package has exactly two frozen collections and two call sites —
+ * one `.has()` per task in `service.ts`'s claiming decision, and one `.has()`
+ * per query token in `search-command.ts` — so the added cost is bounded by a
+ * few microseconds per search and is dominated by the SQLite work on either
+ * side of it. There are no frozen collections on any loop hot enough for 23 ns
+ * to be visible, and `deepFreeze` itself is only ever called at module load.
  */
+
 const SET_MUTATORS: readonly string[] = Object.freeze(['add', 'delete', 'clear']);
 const MAP_MUTATORS: readonly string[] = Object.freeze(['set', 'delete', 'clear']);
 
-/**
- * Install own, non-configurable throwing stubs for a collection view's write
- * half, so `view.clear()` fails the same way a write to a frozen property does.
- *
- * The view has no internal collection slot, so the PROTOTYPE route already
- * throws on its own; these exist so the direct call reports the same
- * `TypeError` it always did rather than `undefined is not a function`.
- */
-function refuseCollectionMutation(target: object, kind: 'Set' | 'Map'): void {
-  for (const name of kind === 'Set' ? SET_MUTATORS : MAP_MUTATORS) {
-    Object.defineProperty(target, name, {
-      value: () => {
+type CollectionKind = 'Set' | 'Map';
+
+interface CollectionView<T extends object> {
+  /** What callers are handed. The raw collection stays closed over. */
+  readonly view: T;
+  /**
+   * Installs the throwing mutators. Deliberately separate from `view`, because
+   * the entries have to be rewritten (a nested collection is replaced by its
+   * own view) BEFORE the collection stops accepting writes, and the view has to
+   * exist before that so a self-referential collection resolves to it.
+   */
+  readonly seal: () => void;
+}
+
+function contentFrozenCollection<T extends object>(target: T, kind: CollectionKind): CollectionView<T> {
+  // Filled by `seal`. The trap closes over the map rather than the values, so
+  // the view can be built first and sealed after the entries settle.
+  const refusals = new Map<PropertyKey, () => never>();
+  const forwarded = new Map<PropertyKey, unknown>();
+
+  const view: T = new Proxy(target, {
+    get(inner, property) {
+      const refusal = refusals.get(property);
+      // Returned verbatim: after `seal` these are non-configurable and
+      // non-writable own properties of `inner`, and a proxy may not report a
+      // different value for one.
+      if (refusal !== undefined) return refusal;
+      const already = forwarded.get(property);
+      if (already !== undefined) return already;
+      // `inner` as the receiver, never the proxy: the built-ins are defined on
+      // the internal slot, which only the raw collection carries.
+      const value = Reflect.get(inner, property, inner);
+      // Non-functions — `size` above all — are read through every time, so a
+      // stale value can never be served.
+      if (typeof value !== 'function') return value;
+      const bound =
+        property === 'forEach'
+          ? (callback: (...args: unknown[]) => unknown, thisArg?: unknown): void => {
+              (value as (this: unknown, ...args: unknown[]) => unknown).call(
+                inner,
+                (entry: unknown, key: unknown) => callback.call(thisArg, entry, key, view),
+              );
+            }
+          : (value as { bind: (thisArg: unknown) => unknown }).bind(inner);
+      forwarded.set(property, bound);
+      return bound;
+    },
+    // The target is frozen, so these would fail anyway — but a failed [[Set]]
+    // only THROWS in strict mode, and a frozen vocabulary should refuse the
+    // same way whatever the caller was compiled to.
+    set(_inner, property) {
+      throw new TypeError(`Cannot set ${String(property)} on a frozen ${kind}`);
+    },
+    defineProperty(_inner, property) {
+      throw new TypeError(`Cannot define ${String(property)} on a frozen ${kind}`);
+    },
+    deleteProperty(_inner, property) {
+      throw new TypeError(`Cannot delete ${String(property)} on a frozen ${kind}`);
+    },
+    setPrototypeOf() {
+      throw new TypeError(`Cannot reassign the prototype of a frozen ${kind}`);
+    },
+  }) as T;
+
+  const seal = (): void => {
+    for (const name of kind === 'Set' ? SET_MUTATORS : MAP_MUTATORS) {
+      const refusal = (): never => {
         throw new TypeError(`Cannot call ${name} on a frozen ${kind}`);
-      },
-      writable: false,
-      enumerable: false,
-      configurable: false,
-    });
-  }
+      };
+      Object.defineProperty(target, name, {
+        value: refusal,
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      });
+      refusals.set(name, refusal);
+    }
+  };
+
+  return { view, seal };
 }
 
-/** A frozen read-only view over a `Set` that nothing outside this module names. */
-function frozenSetView<T>(inner: Set<T>): ReadonlySet<T> {
-  const view = {
-    get size(): number {
-      return inner.size;
-    },
-    has: (value: T): boolean => inner.has(value),
-    keys: (): SetIterator<T> => inner.keys(),
-    values: (): SetIterator<T> => inner.values(),
-    entries: (): SetIterator<[T, T]> => inner.entries(),
-    forEach: (
-      callback: (value: T, value2: T, set: ReadonlySet<T>) => void,
-      thisArg?: unknown,
-    ): void => {
-      // `view`, never `inner`: the third argument of `Set.prototype.forEach` is
-      // the set itself, and handing the real collection to a callback would
-      // give away exactly what this view exists to withhold.
-      inner.forEach((value, value2) => callback.call(thisArg, value, value2, view));
-    },
-    [Symbol.iterator]: (): SetIterator<T> => inner[Symbol.iterator](),
-    [Symbol.toStringTag]: 'Set',
-  } as unknown as ReadonlySet<T>;
-  refuseCollectionMutation(view as unknown as object, 'Set');
-  return Object.freeze(view);
-}
-
-/** A frozen read-only view over a `Map` that nothing outside this module names. */
-function frozenMapView<K, V>(inner: Map<K, V>): ReadonlyMap<K, V> {
-  const view = {
-    get size(): number {
-      return inner.size;
-    },
-    has: (key: K): boolean => inner.has(key),
-    get: (key: K): V | undefined => inner.get(key),
-    keys: (): MapIterator<K> => inner.keys(),
-    values: (): MapIterator<V> => inner.values(),
-    entries: (): MapIterator<[K, V]> => inner.entries(),
-    forEach: (
-      callback: (value: V, key: K, map: ReadonlyMap<K, V>) => void,
-      thisArg?: unknown,
-    ): void => {
-      inner.forEach((value, key) => callback.call(thisArg, value, key, view));
-    },
-    [Symbol.iterator]: (): MapIterator<[K, V]> => inner[Symbol.iterator](),
-    [Symbol.toStringTag]: 'Map',
-  } as unknown as ReadonlyMap<K, V>;
-  refuseCollectionMutation(view as unknown as object, 'Map');
-  return Object.freeze(view);
-}
-
-export function deepFreeze<T>(value: T, seen: Map<object, unknown> = new Map()): T {
+/**
+ * `seen` maps an already-visited object to WHAT IT FREEZES TO, not merely to
+ * the fact that it was visited: a collection freezes to a different reference
+ * than it started as, and a cycle back into one has to resolve to the view.
+ */
+export function deepFreeze<T>(value: T, seen: WeakMap<object, unknown> = new WeakMap()): T {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return value;
   const target = value as unknown as object;
-  // Cycles: the provisional entry is the value itself, so a self-referential
-  // declaration terminates rather than recursing forever.
   if (seen.has(target)) return seen.get(target) as T;
+  // Provisional, so a cycle through a plain object terminates on the object
+  // itself. A collection overwrites this with its view below, before its own
+  // entries are walked.
   seen.set(target, value);
-  // The two containers whose contents live outside their own properties, and
-  // whose mutability lives in an internal slot rather than in a property. Both
-  // are REPLACED by a frozen view — see the module comment.
-  if (target instanceof Set) {
-    const inner = new Set<unknown>();
-    for (const entry of target as Set<unknown>) inner.add(deepFreeze(entry, seen));
-    const view = frozenSetView(inner);
-    seen.set(target, view);
-    return view as unknown as T;
-  }
-  if (target instanceof Map) {
-    const inner = new Map<unknown, unknown>();
-    for (const [key, entry] of target as Map<unknown, unknown>) {
-      inner.set(deepFreeze(key, seen), deepFreeze(entry, seen));
-    }
-    const view = frozenMapView(inner);
-    seen.set(target, view);
-    return view as unknown as T;
-  }
+
+  const collection = target instanceof Set ? 'Set' : target instanceof Map ? 'Map' : null;
+  const wrapper = collection === null ? null : contentFrozenCollection(target, collection);
+  if (wrapper !== null) seen.set(target, wrapper.view);
+
   for (const key of Reflect.ownKeys(target)) {
     const descriptor = Reflect.getOwnPropertyDescriptor(target, key);
     // Only DATA properties are recursed into. Reading an accessor here would
@@ -195,12 +235,38 @@ export function deepFreeze<T>(value: T, seen: Map<object, unknown> = new Map()):
     // this function's business.
     if (!descriptor || !('value' in descriptor)) continue;
     const frozen = deepFreeze(descriptor.value, seen);
-    // A nested collection was REPLACED by its view, so the parent has to be
-    // re-pointed at it — before `Object.freeze` below, which is why this
-    // happens here rather than in the caller.
-    if (frozen !== descriptor.value && descriptor.configurable) {
+    // A nested collection freezes to a DIFFERENT reference, so the property has
+    // to be repointed at it — otherwise "all the way down" would stop at the
+    // raw `Set` a frozen object happens to hold.
+    if (frozen !== descriptor.value && (descriptor.configurable === true || descriptor.writable === true)) {
       Object.defineProperty(target, key, { ...descriptor, value: frozen });
     }
   }
+
+  if (collection === 'Set' && wrapper !== null) {
+    const entries = [...(target as Set<unknown>)];
+    const frozen = entries.map((entry) => deepFreeze(entry, seen));
+    if (frozen.some((entry, index) => entry !== entries[index])) {
+      // Rebuilt through the prototype in one pass so iteration order survives.
+      // Still legal: `seal` has not run yet.
+      Set.prototype.clear.call(target as Set<unknown>);
+      for (const entry of frozen) Set.prototype.add.call(target as Set<unknown>, entry);
+    }
+    wrapper.seal();
+    Object.freeze(target);
+    return wrapper.view as T;
+  }
+  if (collection === 'Map' && wrapper !== null) {
+    const entries = [...(target as Map<unknown, unknown>)];
+    const frozen = entries.map(([key, entry]) => [deepFreeze(key, seen), deepFreeze(entry, seen)] as const);
+    if (frozen.some(([key, entry], index) => key !== entries[index]![0] || entry !== entries[index]![1])) {
+      Map.prototype.clear.call(target as Map<unknown, unknown>);
+      for (const [key, entry] of frozen) Map.prototype.set.call(target as Map<unknown, unknown>, key, entry);
+    }
+    wrapper.seal();
+    Object.freeze(target);
+    return wrapper.view as T;
+  }
+
   return Object.freeze(value);
 }

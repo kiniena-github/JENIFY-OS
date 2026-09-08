@@ -1320,7 +1320,9 @@ export const BACKUP_RECORD_STATEMENT =
   'A candidate carrying a -wal, -shm or ' +
   '-journal sidecar is refused rather than verified, because SQLite would read the sidecar together with ' +
   'the main file and the digest covers only the file; so is one that is a hard link to another name, ' +
-  'because a file some other name can still be written through is not a snapshot. ' +
+  'because a file some other name can still be written through is not a snapshot; and so is the LIVE ' +
+  'database this process is running on, because a file HQ is still writing is not a recovery point at ' +
+  'all and recording it as one would be the most dangerous row this ledger could hold. ' +
   'WHAT verified MEANS, exactly: the bytes open as a SQLite database, PRAGMA integrity_check returns ok, ' +
   'the file carries HQ’s marker table, AND HQ’s own append-only census over those same bytes found ' +
   'nothing blocking — the declared immutability guards are present on every declared ledger the file ' +
