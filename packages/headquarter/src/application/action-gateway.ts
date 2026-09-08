@@ -34,6 +34,7 @@ import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
 import type { RiskClass } from '../operator/capabilities.js';
+import { evidenceEntryLinkStands } from '../operator/evidence.js';
 
 // ---- vocabulary (categorical only) ----
 
@@ -745,21 +746,133 @@ export function loadActionEvents(db: HqDatabase, actionId: string): ActionEventR
 }
 
 /**
+ * The kind of `op_evidence` entry `reconcileAction` appends beside the
+ * `reconciled` ledger row. ONE spelling, written by the one place that
+ * reconciles an action and read by the corroboration below — the same
+ * discipline `RUN_RECONCILED_EVIDENCE_KIND` already has on the run ledger.
+ */
+export const ACTION_RECONCILED_EVIDENCE_KIND = 'action_reconciled';
+
+/**
  * How many times this side effect was reconciled as NOT executed, across
  * every action sharing the base — the next attempt's generation is one more.
  * A `confirmed_not_executed` is the ONLY thing that opens a new generation;
  * an unknown or lost attempt never does.
+ *
+ * ## What was open (Wave 5 correction round seventeen, Critical 1)
+ *
+ * This counted ledger rows and nothing else. `hq_action_events` carries no
+ * `CHECK` on `state`, and its engine triggers refuse `UPDATE` and `DELETE`
+ * while permitting the `APPEND` this branch has already accepted as the
+ * attacker's power — so ONE plain `INSERT`, colliding with nothing because
+ * `side_effect_key` is `NULL`, minted a generation. Executed against the head
+ * `85b720d`, on `publish_release` (`visibility: 'public'`,
+ * `reversibility: 'irreversible'`, `compensation: null`):
+ *
+ * ```
+ * exec1 ok = true                       adapter calls after exec1 = 1
+ * generation before forge = 1
+ * BEFORE forge: authorizeAction REFUSED -> action_state_conflict
+ * forged INSERT: ACCEPTED
+ * generation after forge = 2
+ * AFTER forge: executeAction ok = true  adapter calls = 2
+ * ```
+ *
+ * Two real executions of the same irreversible public payload, admitted by one
+ * forged row attributed to `attacker`. The regression test round fifteen left
+ * behind (`test/action-gateway-authority.test.ts`) asserted the class in its
+ * comment and tested one spelling — `INSERT OR REPLACE` carrying the RESERVED
+ * side-effect key, which the unique index refuses for a reason that has
+ * nothing to do with this.
+ *
+ * ## What is enforced instead
+ *
+ * `witnessReconciliations`' recipe, applied to the action ledger: a
+ * `reconciled` row counts only when the hash-chained `op_evidence` log carries
+ * a STANDING link (`evidenceEntryLinkStands`, so a row with the right fields
+ * and no valid hash is not corroboration) naming this action, this actor and
+ * this decision. `reconcileAction` writes the ledger row and that evidence
+ * entry inside ONE reservation, so the pair lands together or not at all.
+ * Witnesses are consumed one per row, so a COPY of an honest reconciliation is
+ * uncorroborated rather than credited twice.
+ *
+ * An uncorroborated `reconciled` row opens no generation. That is the
+ * fail-closed direction throughout this function: every path that cannot
+ * establish a witness — an absent or unreadable evidence log included —
+ * returns the generation the ledger already stands at, which leaves the
+ * standing attempt holding its side-effect key and every further attempt
+ * refused.
+ *
+ * The candidate query still matches `state = 'reconciled'` exactly. That is
+ * not a spelling whitelist: any OTHER content in the column — a case variant,
+ * padded whitespace, a state outside the vocabulary — is not counted at all,
+ * so it can only ever produce a LOWER generation, never a higher one. The
+ * regression test exercises the whole vocabulary and those variants and pins
+ * the adapter call count, rather than trusting that reading.
+ *
+ * **The residual, stated rather than glossed.** This raises the cost from ONE
+ * append to two appends plus a sha256 over public fields, and a writer holding
+ * the file open can pay it — HQ holds no key such a writer does not also have.
+ * See `witnessReconciliations` and `SAFE_MODE_STATEMENT` for the same residual
+ * recorded on the run ledger and on the verdict ledger. What is closed
+ * completely is the thing measured above: one appended row, by an actor nobody
+ * resolved, minting a fresh generation and a second irreversible public
+ * execution of a payload HQ had already executed.
  */
 export function sideEffectGeneration(db: HqDatabase, base: string): number {
-  const row = db
+  const rows = db
     .prepare(
-      `SELECT COUNT(*) AS n FROM hq_action_events e
-       JOIN hq_action_intents i ON i.id = e.action_id
-       WHERE i.side_effect_key_base = ? AND e.state = 'reconciled'
-         AND json_extract(e.detail, '$.decision') = 'confirmed_not_executed'`,
+      `SELECT e.action_id AS action_id, e.actor AS actor, e.detail AS detail
+         FROM hq_action_events e
+         JOIN hq_action_intents i ON i.id = e.action_id
+        WHERE i.side_effect_key_base = ? AND e.state = 'reconciled'
+        ORDER BY e.seq`,
     )
-    .get(base) as { n: number };
-  return row.n + 1;
+    .all(base) as { action_id: unknown; actor: unknown; detail: unknown }[];
+  if (rows.length === 0) return 1;
+  const actionIds = [...new Set(rows.map((row) => String(row.action_id)))];
+  const available = new Map<string, number>();
+  try {
+    const witnesses = db
+      .prepare(
+        `SELECT seq, actor, payload FROM op_evidence
+          WHERE kind = ?
+            AND json_valid(payload)
+            AND json_extract(payload, '$.actionId') IN (${actionIds.map(() => '?').join(', ')})
+          ORDER BY seq`,
+      )
+      .all(ACTION_RECONCILED_EVIDENCE_KIND, ...actionIds) as {
+      seq: unknown;
+      actor: unknown;
+      payload: unknown;
+    }[];
+    for (const witness of witnesses) {
+      const seq = Number(witness.seq);
+      // A genuine LINK in the chain, not merely a row with the right fields.
+      if (!Number.isInteger(seq) || !evidenceEntryLinkStands(db, seq)) continue;
+      const payload = totalJsonObject(witness.payload);
+      const actionId = payload.actionId;
+      const decision = payload.decision;
+      if (typeof witness.actor !== 'string' || typeof actionId !== 'string' || typeof decision !== 'string') continue;
+      const key = JSON.stringify([actionId, witness.actor, decision]);
+      available.set(key, (available.get(key) ?? 0) + 1);
+    }
+  } catch {
+    // No evidence log to corroborate against is not corroboration. Every
+    // `reconciled` row stays uncorroborated, and the generation does not move.
+    return 1;
+  }
+  let generation = 1;
+  for (const row of rows) {
+    const decision = totalJsonObject(row.detail).decision;
+    if (typeof row.actor !== 'string' || typeof decision !== 'string') continue;
+    const key = JSON.stringify([String(row.action_id), row.actor, decision]);
+    const remaining = available.get(key) ?? 0;
+    if (remaining <= 0) continue;
+    available.set(key, remaining - 1);
+    if (decision === 'confirmed_not_executed') generation += 1;
+  }
+  return generation;
 }
 
 /** The action (if any) whose attempt currently holds this side-effect key. */

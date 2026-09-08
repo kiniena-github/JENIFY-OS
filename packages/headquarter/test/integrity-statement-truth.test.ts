@@ -1157,6 +1157,7 @@ describe('the module header’s counts are the constants’ counts', () => {
   }
 
   const NUMBER_WORDS: Record<string, number> = {
+    zero: 0,
     one: 1,
     two: 2,
     three: 3,
@@ -1169,7 +1170,55 @@ describe('the module header’s counts are the constants’ counts', () => {
     ten: 10,
     eleven: 11,
     twelve: 12,
+    thirteen: 13,
+    fourteen: 14,
+    fifteen: 15,
+    sixteen: 16,
+    seventeen: 17,
+    eighteen: 18,
+    nineteen: 19,
+    twenty: 20,
+    thirty: 30,
+    forty: 40,
+    fifty: 50,
+    sixty: 60,
+    seventy: 70,
+    eighty: 80,
+    ninety: 90,
+    hundred: 100,
+    // Collective quantities that DO name a number.
+    couple: 2,
+    pair: 2,
+    dozen: 12,
+    score: 20,
   };
+
+  /**
+   * Words that quantify a set without naming a number.
+   *
+   * The vocabulary is CLOSED in both directions (Wave 5 correction round
+   * seventeen, Medium 1). `NUMBER_WORDS` used to stop at `twelve`, so
+   * "a dozen", "a couple" and "thirteen" were invisible rather than wrong —
+   * the reviewer wrote all three past the sweep and it passed. Extending the
+   * numerals fixes those three; this list is the other half, because
+   * "a handful of `SAFE_MODE_BLOCKING_FINDINGS`" states something about the
+   * size too, and something a reader can be wrong about. A window carrying one
+   * of these beside a safety constant is REFUSED rather than ignored: say the
+   * number.
+   */
+  const VAGUE_QUANTITY_WORDS: readonly string[] = [
+    'few',
+    'several',
+    'many',
+    'multiple',
+    'numerous',
+    'myriad',
+    'handful',
+    'dozens',
+    'scores',
+    'countless',
+    'various',
+  ];
 
   it('says how many finding names there are, and is right', () => {
     const match = /is one of (\w+) names/.exec(headerProse());
@@ -1226,14 +1275,62 @@ describe('the module header’s counts are the constants’ counts', () => {
   const REFERENCE_LABELS = /(wave|phase|round|issue|option|lane|sol|pr|no\.|#)$/i;
 
   /**
-   * Every cardinal a sentence STATES, as numbers. Exported through the closure
-   * so the test below can attack the extractor directly with the exact
-   * phrasings that evaded its predecessor.
+   * Nouns that carry the SIZE of the thing being counted.
+   *
+   * Used only to tell `one` the pronoun from `one` the count, and derived from
+   * the constants themselves plus the words this package uses for their
+   * members, so a rename of a constant cannot leave a stale literal behind.
    */
-  function statedCardinals(text: string): number[] {
-    const prose = text.replace(/`[^`]*`/g, ' ');
-    const words = Object.keys(NUMBER_WORDS).join('|');
-    const found: number[] = [];
+  const CODE_SPAN_MARK = '«code»';
+  const SIZE_BEARING_NOUNS = new RegExp(
+    `(${CODE_SPAN_MARK}|` +
+      `\\b(names?|findings?|members?|entries|entry|items?|elements?|values?|kinds?|spellings?|constants?)\\b)`,
+    'i',
+  );
+
+  /**
+   * Backticked spans, RESOLVED rather than blanked (Wave 5 correction round
+   * seventeen, Medium 1).
+   *
+   * The extractor used to run `text.replace(/\`[^\`]*\`/g, ' ')` FIRST, so
+   * every numeral inside backticks was invisible — in a package that backticks
+   * constantly. The reviewer's evasion was one line:
+   * "`SAFE_MODE_BLOCKING_FINDINGS` holds `three` names", which passed.
+   *
+   * A span with no whitespace that contains a letter is an IDENTIFIER or a
+   * code expression — `SAFE_MODE_BLOCKING_FINDINGS`, `json_extract(x,'$.a')`,
+   * `85b720d` — and states no prose cardinal, so it is dropped. A span that is
+   * itself a quantity token — `three`, `dozen` — is a quantity in code voice
+   * and is NOT an identifier, which is the exact shape the reviewer wrote past
+   * the previous version. Every other span is prose in code voice and is
+   * UNWRAPPED, so its cardinals are extracted as if the backticks were absent.
+   */
+  function unwrapCodeSpans(text: string): string {
+    return text.replace(/`([^`]*)`/g, (_match, inner: string) => {
+      const bare = inner.trim().toLowerCase();
+      const isQuantityToken =
+        bare in NUMBER_WORDS || VAGUE_QUANTITY_WORDS.includes(bare) || /^\d+$/.test(bare);
+      // MARKED rather than blanked: an identifier states no cardinal, but it
+      // is a THING with members, so `one of the \`X\`` must still read as a
+      // claim about `X`'s size. Blanking it made the whole EV1 evasion
+      // invisible to the pronoun rule below.
+      return !/\s/.test(inner) && /[A-Za-z_$]/.test(inner) && !isQuantityToken
+        ? ` ${CODE_SPAN_MARK} `
+        : ` ${inner} `;
+    });
+  }
+
+  /**
+   * What a sentence STATES about a size: the numbers it names, and the
+   * quantity words it uses that name no number. Exported through the closure
+   * so the tests below can attack the extractor directly with the exact
+   * phrasings that evaded its predecessors.
+   */
+  function statedQuantities(text: string): { values: number[]; vague: string[] } {
+    const prose = unwrapCodeSpans(text);
+    const words = [...Object.keys(NUMBER_WORDS), ...VAGUE_QUANTITY_WORDS].join('|');
+    const values: number[] = [];
+    const vague: string[] = [];
     const pattern = new RegExp(`\\b(${words}|\\d+)\\b`, 'gi');
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(prose))) {
@@ -1243,17 +1340,37 @@ describe('the module header’s counts are the constants’ counts', () => {
       // A citation, not a count.
       if (REFERENCE_LABELS.test(before)) continue;
       if (token === 'one') {
-        // Pronoun uses: "one of …", "the only one …", "no one", "another one".
-        if (/^of\b/i.test(after)) continue;
-        if (/\b(only|no|another|each|every|same|that|this|which)$/i.test(before)) continue;
+        /**
+         * The PRONOUN carve-out, narrowed (round seventeen, Medium 1).
+         *
+         * It used to fire on `^of\b` after, or on `only|no|another|…` before,
+         * which made a false claim of size ONE unreachable: "only one of the
+         * `SAFE_MODE_BLOCKING_FINDINGS` exists" was silently skipped. It now
+         * fires only when `one` is not quantifying the set:
+         *
+         *  - nothing size-bearing follows at all — "the only one that detects
+         *    tampering" — so there is no set for it to be a claim about;
+         *  - or the partitive phrase carries its OWN cardinal before the noun
+         *    — "one of the four `SAFE_MODE_BLOCKING_FINDINGS`" — where `four`
+         *    is the size claim and `one` is the member being picked out.
+         */
+        const noun = SIZE_BEARING_NOUNS.exec(after);
+        if (!noun) continue;
+        const between = after.slice(0, noun.index);
+        const otherCardinal = new RegExp(`\\b(${Object.keys(NUMBER_WORDS).join('|')}|\\d+)\\b`, 'i');
+        if (otherCardinal.test(between)) continue;
+      }
+      if (VAGUE_QUANTITY_WORDS.includes(token)) {
+        vague.push(token);
+        continue;
       }
       const value = NUMBER_WORDS[token] ?? Number(token);
-      if (Number.isFinite(value)) found.push(value);
+      if (Number.isFinite(value)) values.push(value);
     }
-    return found;
+    return { values, vague };
   }
 
-  it('catches the four phrasings that walked past the previous sweep', () => {
+  it('catches the four phrasings that walked past the round-sixteen sweep', () => {
     // The reviewer's own evading strings, verbatim. A regression on the
     // EXTRACTOR, not on the corpus: the corpus is currently correct, so a
     // sweep that had quietly stopped working would still pass the case below.
@@ -1265,18 +1382,66 @@ describe('the module header’s counts are the constants’ counts', () => {
       'three of the `SAFE_MODE_BLOCKING_FINDINGS`',
     ];
     for (const evasion of evasions) {
-      const cardinals = statedCardinals(evasion);
-      expect(cardinals, evasion).not.toEqual([]);
+      const { values } = statedQuantities(evasion);
+      expect(values, evasion).not.toEqual([]);
       expect(
-        cardinals.some((value) => value !== size),
+        values.some((value) => value !== size),
         `${evasion} states a wrong size and must be caught`,
       ).toBe(true);
     }
     // And the constructions that are NOT claims about the size stay quiet, or
     // the sweep would be unusable and would be turned off.
-    expect(statedCardinals('one of the four `SAFE_MODE_BLOCKING_FINDINGS`')).toEqual([4]);
-    expect(statedCardinals('the only one that detects tampering')).toEqual([]);
-    expect(statedCardinals('Wave 5 correction round fifteen, issue 200')).toEqual([]);
+    expect(statedQuantities('one of the four `SAFE_MODE_BLOCKING_FINDINGS`').values).toEqual([4]);
+    expect(statedQuantities('the only one that detects tampering').values).toEqual([]);
+    expect(statedQuantities('Wave 5 correction round fifteen, issue 200').values).toEqual([]);
+  });
+
+  it('catches the four phrasings that walked past the round-seventeen sweep', () => {
+    /**
+     * The round-seventeen reviewer's four EXECUTED evasions, verbatim. Each
+     * one was written into `integrity.ts` beside the constant and the sweep
+     * PASSED; the control — a true statement of the size, and the only one
+     * that detects tampering — passed too, so the sweep was reporting
+     * "checked" over a corpus it could not read.
+     *
+     * ```
+     * CONTROL-true  four `SAFE_MODE_BLOCKING_FINDINGS` …               -> PASS
+     * EV0  `SAFE_MODE_BLOCKING_FINDINGS` holds `three` names …         -> PASS (EVADED)
+     * EV1  only one of the `SAFE_MODE_BLOCKING_FINDINGS` exists …      -> PASS (EVADED)
+     * EV2  a dozen `SAFE_MODE_BLOCKING_FINDINGS` …                     -> PASS (EVADED)
+     * EV3  a couple of `SAFE_MODE_BLOCKING_FINDINGS` …                 -> PASS (EVADED)
+     * ```
+     */
+    const size = SAFE_MODE_BLOCKING_FINDINGS.length;
+    const evasions: Record<string, string> = {
+      'EV0 backticked numeral': '`SAFE_MODE_BLOCKING_FINDINGS` holds `three` names, and this is the only one',
+      'EV1 pronoun carve-out': 'only one of the `SAFE_MODE_BLOCKING_FINDINGS` exists, and it detects tampering',
+      'EV2 collective word': 'a dozen `SAFE_MODE_BLOCKING_FINDINGS` and the only one that detects tampering',
+      'EV3 collective word': 'a couple of `SAFE_MODE_BLOCKING_FINDINGS` and the only one that detects tampering',
+      'EV4 past twelve': '`SAFE_MODE_BLOCKING_FINDINGS` has a membership of thirteen',
+    };
+    for (const [label, evasion] of Object.entries(evasions)) {
+      const { values, vague } = statedQuantities(evasion);
+      expect(
+        values.some((value) => value !== size) || vague.length > 0,
+        `${label}: "${evasion}" states a wrong size and must be caught`,
+      ).toBe(true);
+    }
+    // The vague half is refused rather than read as a number, and says which
+    // word it refused.
+    expect(statedQuantities('a handful of `SAFE_MODE_BLOCKING_FINDINGS`').vague).toEqual(['handful']);
+    expect(statedQuantities('several `HQ_INTEGRITY_FINDINGS`').vague).toEqual(['several']);
+    // A true statement in each of the same shapes still passes, or the sweep
+    // would be an alarm generator rather than a check.
+    expect(statedQuantities('`SAFE_MODE_BLOCKING_FINDINGS` holds `four` names').values).toEqual([4]);
+    expect(
+      statedQuantities('one of the four `SAFE_MODE_BLOCKING_FINDINGS` is evidence_chain_broken').values,
+    ).toEqual([4]);
+    // The price of catching EV1, stated rather than hidden: "one of the X",
+    // with no cardinal between, now READS as a claim that X holds one member.
+    // Prose in this package that picks a member out of the set must say how
+    // many the set has — which is the rule this whole sweep exists to enforce.
+    expect(statedQuantities('one of the `SAFE_MODE_BLOCKING_FINDINGS`').values).toEqual([1]);
   });
 
   it('is right about the count WHEREVER the package states it, in any phrasing', () => {
@@ -1295,8 +1460,12 @@ describe('the module header’s counts are the constants’ counts', () => {
     };
     walk(src);
     const wrong: string[] = [];
-    let mentions = 0;
-    let stated = 0;
+    const mentionsPerConstant: Record<string, number> = {};
+    const statedPerConstant: Record<string, number> = {};
+    for (const constant of Object.keys(counts)) {
+      mentionsPerConstant[constant] = 0;
+      statedPerConstant[constant] = 0;
+    }
     for (const file of files) {
       const lines = fs.readFileSync(file, 'utf8').split('\n');
       for (const [constant, size] of Object.entries(counts)) {
@@ -1304,15 +1473,21 @@ describe('the module header’s counts are the constants’ counts', () => {
         // routinely on a different line from the constant it counts.
         for (let i = 0; i < lines.length; i += 1) {
           if (!lines[i]!.includes(constant)) continue;
-          mentions += 1;
+          mentionsPerConstant[constant] += 1;
           const window = [lines[i - 1] ?? '', lines[i]!, lines[i + 1] ?? '']
             .map((line) => line.replace(/^\s*\*\s?/, '').replace(/^\s*\/\/\s?/, ''))
             .join(' ')
             .replace(/\s+/g, ' ');
-          const cardinals = statedCardinals(window);
-          if (cardinals.length === 0) continue;
-          stated += 1;
-          for (const value of cardinals) {
+          const { values, vague } = statedQuantities(window);
+          for (const word of vague) {
+            wrong.push(
+              `${path.relative(src, file)}:${i + 1} quantifies ${constant} with "${word}", which names no ` +
+                `number — say the number (${size}): ${window.slice(0, 160)}`,
+            );
+          }
+          if (values.length === 0) continue;
+          statedPerConstant[constant] += 1;
+          for (const value of values) {
             if (value !== size) {
               wrong.push(
                 `${path.relative(src, file)}:${i + 1} states ${value} beside ${constant} (${size}): ${window.slice(0, 160)}`,
@@ -1322,13 +1497,28 @@ describe('the module header’s counts are the constants’ counts', () => {
         }
       }
     }
-    // Both halves are asserted. The sweep has to SEE the mentions, and it has
-    // to see at least one that states a size — a sweep that found neither
-    // would pass while checking nothing, which is how the previous version
-    // reported `HQ_INTEGRITY_FINDINGS` as fully checked while catching zero of
-    // its seven mentions.
-    expect(mentions, 'the sweep found no mention of either constant in src/').toBeGreaterThanOrEqual(8);
-    expect(stated, 'no comment in src/ states either count — the sweep is vacuous').toBeGreaterThan(0);
+    // Every half is asserted, and the coverage half is DERIVED from the
+    // constant list rather than being a single global `> 0` (Wave 5 correction
+    // round seventeen, Medium 1). With the one true statement removed, the old
+    // `stated > 0` still passed on the OTHER constant's mentions and reported
+    // the sweep as working; the loop below fails per constant, so a constant
+    // whose size nothing states any more is named.
+    //
+    // What this is NOT: an expected number of stating windows. That number
+    // cannot be derived from the source without writing down the file and line
+    // of every comment that states a count, which is the hand-list this whole
+    // file exists to avoid. What is derived is "each constant is stated at
+    // least once, and every window that states anything states the truth".
+    for (const [constant, size] of Object.entries(counts)) {
+      expect(
+        mentionsPerConstant[constant],
+        `the sweep found no mention of ${constant} in src/`,
+      ).toBeGreaterThan(0);
+      expect(
+        statedPerConstant[constant],
+        `no comment in src/ states the size of ${constant} (${size}) — the sweep is vacuous for it`,
+      ).toBeGreaterThan(0);
+    }
     expect(wrong, 'a comment states the wrong size for a safety constant').toEqual([]);
   });
 

@@ -823,6 +823,7 @@ export function ensureWriteOnceIdentityGuards(db: HqDatabase): void {
  * rows than the engine's own high-water mark says it reached. See
  * `truncatedImmutableLedgers`.
  */
+/** Seven names, listed here and nowhere else. */
 export const HQ_INTEGRITY_FINDINGS = Object.freeze([
   'database_integrity_check_failed',
   'append_only_guard_missing',

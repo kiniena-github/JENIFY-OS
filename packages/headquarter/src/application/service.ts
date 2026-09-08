@@ -758,6 +758,7 @@ import {
   MAX_BACKUP_PATH_LENGTH,
   MAX_RUN_LABEL_LENGTH,
   MAX_RUN_NOTE_LENGTH,
+  RECONCILIATION_COMMITMENT_STATEMENT,
   RECOVERY_SCOPE_STATEMENT,
   RELIABILITY_COMMAND_CAPABILITY,
   RUN_KINDS,
@@ -788,6 +789,7 @@ import {
   reliabilityCommandCapabilityState,
   reliabilityCommandContractDrift,
   reliabilitySchemaPresent,
+  uncommittedReconciliationWitnesses,
   runAttemptGeneration,
   runAttemptKey,
   runIdempotencyKey,
@@ -1038,6 +1040,7 @@ import {
 } from './truth-command.js';
 import {
   ACTION_READ_LIMIT,
+  ACTION_RECONCILED_EVIDENCE_KIND,
   EXTERNAL_ACTION_KILL_SCOPE,
   MAX_ACTION_CONTEXT_REFS,
   MAX_ACTION_NOTE_LENGTH,
@@ -2378,6 +2381,32 @@ let readApprovalRecord: (
  */
 let readDeclaredProvider: (ops: HeadquarterOperations, workerId: string) => string | null;
 let readAssignabilityProblem: (ops: HeadquarterOperations, workerId: string) => string | null;
+/**
+ * Same recipe for the FOURTH read the Founder-facing executor readiness
+ * verdict takes (Wave 5 correction round seventeen, Medium 2).
+ *
+ * Round sixteen migrated three of the four and left `ops.directory
+ * .getSpecialist` on the line immediately above the comment claiming the CLASS
+ * was closed. It is an own-property closure on the instance, which is not
+ * harder to patch than a prototype method but EASIER — a plain assignment on
+ * the object the caller already holds, with no prototype involved. Measured
+ * against the head `85b720d`:
+ *
+ * ```
+ * descriptor directory.getSpecialist: {"on":"own","value":"function","writable":true,"configurable":true,"frozen":false}
+ * BEFORE patch, unregistered ghost worker: {"ready":false,"registered":false,"active":false,"hasCapability":false}
+ * AFTER  patch, unregistered ghost worker: {"ready":false,"registered":true,"active":true,"hasCapability":true}
+ * ```
+ *
+ * `ready` did not move — the migrated bindings refuse independently — so what
+ * was forged is WORKER FACTS on a verdict the Founder reads, which law 8
+ * forbids on its own terms. `directory.getSpecialist` stays exactly as it is
+ * for display callers. Published to `specialistRecordFor` and to nothing else.
+ */
+let readSpecialistRecord: (
+  ops: HeadquarterOperations,
+  workerId: string,
+) => ReturnType<HeadquarterStore['getSpecialist']>;
 
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
@@ -4336,6 +4365,10 @@ export class HeadquarterOperations {
       ops.#declaredProviderFromStore(workerId);
     readAssignabilityProblem = (ops: HeadquarterOperations, workerId: string): string | null =>
       ops.#assignabilityProblemFromStore(workerId);
+    readSpecialistRecord = (
+      ops: HeadquarterOperations,
+      workerId: string,
+    ): ReturnType<HeadquarterStore['getSpecialist']> => ops.#specialistFromStore(workerId);
   }
 
   /**
@@ -9200,9 +9233,40 @@ export class HeadquarterOperations {
           executable: false,
         },
       });
+      this.#commitReconciliationWitness();
     });
     if (refusal) return { ok: false, error: refusal };
     return ok({ run: this.#runRecordFromStore(runId)! });
+  }
+
+  /**
+   * Commit to the evidence log at the point a reconciliation lands (Wave 5
+   * correction round seventeen, High 1).
+   *
+   * The corroboration a `reconciled` row rests on is a standing link in
+   * `op_evidence`, and a writer holding the file open can append one. Until
+   * this existed, that two-append forgery left every health surface reporting
+   * `safeMode: false, observations: []`. Committing HERE is what makes the
+   * difference observable: an HONEST reconciliation's witness is covered by a
+   * commitment the instant it lands, so
+   * `uncommittedReconciliationWitnesses` counts only witnesses HQ did not
+   * write — see that function for what "covered" means and for the residual
+   * (a writer who also appends a checkpoint is not counted).
+   *
+   * LAST inside the caller's reservation, so the committed tip includes the
+   * evidence entry just appended and so the pair lands together or not at all
+   * — the same placement and the same safe-mode condition
+   * `assessHqIntegrity` uses: a commitment is HQ standing behind the record,
+   * and safe mode is HQ saying it cannot.
+   */
+  #commitReconciliationWitness(): void {
+    if (this.#integrityReport.safeMode) return;
+    recordIntegrityCheckpoint(this.#db, {
+      id: `checkpoint-${uuid()}`,
+      recordedAt: nowIso(),
+      processId: this.#processIdentity,
+      recordedBy: 'hq_reconciliation',
+    });
   }
 
   /**
@@ -9620,6 +9684,14 @@ export class HeadquarterOperations {
         openedByOtherProcesses: runs.filter((run) => run.processId !== this.#processIdentity).length,
       },
       verifiedBackups: this.#reliabilityStorePresent ? loadBackupRecords(this.#db).length : 0,
+      // Computed LIVE and latched nowhere — this is an observation about the
+      // file as it now stands, and a GET that latched a safety posture would
+      // be the thing this method's own docblock refuses (round seventeen,
+      // High 1).
+      commitments: {
+        uncommittedReconciliationWitnesses: uncommittedReconciliationWitnesses(this.#db),
+        statement: RECONCILIATION_COMMITMENT_STATEMENT,
+      },
       canonical: this.#canonicalInterruptions(),
       ledgerStatement: RUN_LEDGER_STATEMENT,
       retryStatement: RUN_RETRY_STATEMENT,
@@ -14125,7 +14197,10 @@ export class HeadquarterOperations {
       privileged.appendEvidence({
         taskId: intent.taskId,
         actor: input.requestedBy,
-        kind: 'action_reconciled',
+        // ONE spelling, shared with the corroboration in
+        // `sideEffectGeneration` — the pair lands inside this reservation or
+        // not at all (Wave 5 correction round seventeen, Critical 1).
+        kind: ACTION_RECONCILED_EVIDENCE_KIND,
         payload: {
           actionId,
           decision: input.decision,
@@ -14134,6 +14209,7 @@ export class HeadquarterOperations {
           executable: false,
         },
       });
+      this.#commitReconciliationWitness();
     });
     if (refusal) return this.#refuseAction(actionId, taskId, 'reconcile', refusal);
     return ok({ action: this.#actionView(actionId)! });
@@ -14308,6 +14384,17 @@ export class HeadquarterOperations {
     } catch (error) {
       return errorMessage(error);
     }
+  }
+
+  /**
+   * The specialist record, read through the `#private` store — never the
+   * public `directory.getSpecialist`, which is an own-property closure a
+   * holder can overwrite with one assignment (Wave 5 correction round
+   * seventeen, Medium 2). See `readSpecialistRecord` for the executed
+   * before/after.
+   */
+  #specialistFromStore(workerId: string): ReturnType<HeadquarterStore['getSpecialist']> {
+    return this.#store.getSpecialist(workerId);
   }
 
   #approvalRecordFromStore(taskId: string): ApprovalRecordForValidation | null {
@@ -17615,6 +17702,19 @@ export function assignabilityProblemFor(
   workerId: string,
 ): string | null {
   return readAssignabilityProblem(ops, workerId);
+}
+
+/**
+ * The specialist record — registration, active flag and capability allow-list
+ * — for a caller REPORTING or deciding on worker facts, as a FUNCTION
+ * BINDING. `directory.getSpecialist` stays as the patchable convenience read
+ * for display. See `readSpecialistRecord` for the executed before/after.
+ */
+export function specialistRecordFor(
+  ops: HeadquarterOperations,
+  workerId: string,
+): ReturnType<HeadquarterStore['getSpecialist']> {
+  return readSpecialistRecord(ops, workerId);
 }
 
 /**

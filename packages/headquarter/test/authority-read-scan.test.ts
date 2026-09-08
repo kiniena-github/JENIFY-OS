@@ -285,14 +285,19 @@ const FACADE_SELF_READS: Readonly<Record<string, { count: number } & Classificat
     kind: 'display',
     reason:
       'The field initialiser in the constructor, not a read of the published view. The reads it ' +
-      'publishes are own-property closures over `#store`, so there is no prototype to patch.',
+      'publishes are own-property closures over `#store`, which are MORE patchable than a ' +
+      'prototype method and not less — one assignment on the object a caller already holds, no ' +
+      'prototype involved (round seventeen, Medium 2: the reason here used to say the opposite). ' +
+      'What makes this `display` is therefore not the shape but the census below: every read of a ' +
+      'published view from outside this file is enumerated with a written argument, default deny.',
   },
   'this.workers': {
     count: 1,
     kind: 'display',
     reason:
       'The field initialiser. Enforcement reads `#workers`, the private triple, which is what ' +
-      '`bindDirectoryReads` resolves at bind time.',
+      '`bindDirectoryReads` resolves at bind time. Its published members are own-property ' +
+      'closures like `directory`s and are covered by the same default-deny view census below.',
   },
   'this.assignTask': {
     count: 1,
@@ -500,7 +505,6 @@ const FACADE_READS: Readonly<Record<string, number>> = {
   'src/live/snapshot.ts::projectStorePresent': 1,
   'src/live/snapshot.ts::listProjects': 1,
   'src/providers/claude/dispatch.ts::policyContext': 1,
-  'src/providers/claude/dispatch.ts::directory': 1,
   'src/providers/claude/dispatch.ts::queue': 2,
   'src/providers/claude/dispatch.ts::appendSystemEvidence': 1,
   'src/providers/claude/dispatch.ts::returnForFreshApproval': 1,
@@ -508,6 +512,40 @@ const FACADE_READS: Readonly<Record<string, number>> = {
   'src/providers/claude/dispatch.ts::reserveEvidence': 2,
   'src/providers/claude/dispatch.ts::claimNext': 1,
   'src/providers/claude/dispatch.ts::reconciliationAuthorityRefusal': 1,};
+
+/**
+ * Every read of a PUBLISHED OWN-PROPERTY VIEW (`ops.directory.x`,
+ * `ops.workers.x`) from outside `service.ts`, member by member.
+ *
+ * These are the surfaces round sixteen's census treated as one opaque read per
+ * file and the classification above excused as "no prototype to patch". They
+ * are the most patchable surface the facade has: a plain assignment on the
+ * object the caller already holds. DEFAULT DENY — a read that is not listed
+ * here fails by file and member.
+ */
+const PUBLISHED_VIEW_READS: Readonly<Record<string, { count: number } & Classification>> = {
+  'src/live/snapshot.ts::directory.listSpecialists': {
+    count: 1,
+    kind: 'display',
+    reason:
+      'The unauthenticated snapshot listing the roster for the static site. It decides nothing: ' +
+      'what may appear in that file at all is governed by `unauthenticated-founder-text.test.ts`.',
+  },
+  'src/live/snapshot.ts::directory.latestStatusPerSubject': {
+    count: 1,
+    kind: 'display',
+    reason:
+      'The same snapshot rendering the latest status per subject. A patched closure changes the ' +
+      'published page and no stored row, no claim, no approval and no external act.',
+  },
+  'src/live/control-api.ts::directory.listSpecialists': {
+    count: 1,
+    kind: 'display',
+    reason:
+      'The workforce route rendering the roster to the browser. Every act it offers is a separate ' +
+      'facade call that re-resolves the worker through `#private` state before it writes anything.',
+  },
+};
 
 /**
  * Why reads of the facade in each of these files cannot move an enforced
@@ -536,10 +574,10 @@ const FACADE_READER_REASONS: Readonly<Record<string, string>> = {
   'src/providers/claude/dispatch.ts':
     'The one file in this list that can cause a REAL external side effect, and therefore the one ' +
     'whose reads were audited member by member: the task row, the capability row, the kill switch, ' +
-    'the gateway history, the evidence rows, the approval record, the declared provider and the ' +
-    'assignability answer are ALL read through module-private function bindings. What remains here ' +
-    'is `policyContext` (a frozen options object), the queue mutations classified in `QUEUE_READS`, ' +
-    'and reads whose only consumer is the text of a verdict.',
+    'the gateway history, the evidence rows, the approval record, the declared provider, the ' +
+    'assignability answer and the specialist record are ALL read through module-private function ' +
+    'bindings. What remains here is `policyContext` (a frozen options object), the queue mutations ' +
+    'classified in `QUEUE_READS`, and reads whose only consumer is the text of a verdict.',
 };
 
 /* ------------------------------------------------------------------ */
@@ -682,6 +720,64 @@ function facadeSelfCensus(): Record<string, number> {
   return counts;
 }
 
+/**
+ * The own-property VIEWS the facade publishes, and the members each one
+ * declares — parsed from the class body, never listed here.
+ *
+ * A view is a `readonly <name>: {` field whose type is an inline object of
+ * closures. `#private` fields are invisible to the pattern by construction,
+ * which is correct: they are the surfaces a caller cannot reach at all.
+ */
+function publishedViews(): Record<string, string[]> {
+  const lines = read(FACADE_DEFINITION_FILE).split('\n');
+  const start = lines.findIndex((line) => /^export class HeadquarterOperations\b/.test(line));
+  expect(start, 'HeadquarterOperations not found').toBeGreaterThan(-1);
+  const views: Record<string, string[]> = {};
+  for (let i = start + 1; i < lines.length; i += 1) {
+    if (/^\}/.test(lines[i])) break;
+    const field = lines[i].match(/^ {2}(?:readonly\s+)?([A-Za-z_$][A-Za-z0-9_$]*)\s*:\s*\{\s*$/);
+    if (!field) continue;
+    const members: string[] = [];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      if (/^ {2}\};?\s*$/.test(lines[j])) {
+        i = j;
+        break;
+      }
+      const member = lines[j].match(/^ {4}([A-Za-z_$][A-Za-z0-9_$]*)\s*:/);
+      if (member) members.push(member[1]);
+    }
+    views[field[1]] = members;
+  }
+  return views;
+}
+
+/** `<file>::<view>.<member>` → occurrences, for view reads from every other module. */
+function publishedViewCensus(): { reads: Record<string, number>; unknownMembers: string[] } {
+  const views = publishedViews();
+  const names = Object.keys(views).join('|');
+  const reads: Record<string, number> = {};
+  const unknownMembers: string[] = [];
+  for (const relative of sourceFiles()) {
+    if (relative === FACADE_DEFINITION_FILE) continue;
+    const source = withoutComments(read(relative));
+    const pattern = new RegExp(
+      `\\b(?:ops|operations|hq)\\s*\\.\\s*(${names})\\s*\\.\\s*([A-Za-z_$][A-Za-z0-9_$]*)`,
+      'g',
+    );
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(source))) {
+      const line = source.slice(0, match.index).split('\n').length;
+      if (!views[match[1]].includes(match[2])) {
+        unknownMembers.push(`${relative}:${line} .${match[1]}.${match[2]}`);
+        continue;
+      }
+      const key = `${relative}::${match[1]}.${match[2]}`;
+      reads[key] = (reads[key] ?? 0) + 1;
+    }
+  }
+  return { reads, unknownMembers };
+}
+
 /** `<file>::<member>` → occurrences, for facade reads from every other module. */
 function facadeReaderCensus(): Record<string, number> {
   const members = new Set(facadePublicMembers());
@@ -802,8 +898,49 @@ describe('the patchable-surface census is derived from the declared surface', ()
       'export function approvalRecordFor(',
       'export function declaredProviderFor(',
       'export function assignabilityProblemFor(',
+      'export function specialistRecordFor(',
     ]) {
       expect(service, binding).toContain(binding);
+    }
+  });
+
+  /**
+   * The PUBLISHED VIEWS — `ops.directory`, `ops.workers` and any future
+   * sibling — read from outside `service.ts`, classified. DEFAULT DENY.
+   *
+   * Round sixteen's census counted `ops.directory` as one opaque read per
+   * file and never asked WHICH member, and the classification above excused
+   * the whole view on the ground that "there is no prototype to patch". That
+   * was backwards, and `executorReadiness` was reading `ops.directory
+   * .getSpecialist` on the line immediately above the comment claiming the
+   * class was closed. One assignment on the published object moved
+   * `registered`, `active` and `hasCapability` on a Founder-facing verdict
+   * from `false,false,false` to `true,true,true` for a worker the directory
+   * has never heard of.
+   *
+   * The view NAMES and their members are derived from the class body, so a
+   * view added in a future phase is covered the day it is declared, and a
+   * member added to an existing view is covered the day it is published.
+   */
+  it('classifies every read of a published own-property view from outside the facade, default deny', () => {
+    const { reads, unknownMembers } = publishedViewCensus();
+    // The derivation has to be looking at something: both published views and
+    // the member the round-seventeen finding turned on.
+    const views = publishedViews();
+    expect(Object.keys(views).sort()).toEqual(['directory', 'workers']);
+    expect(views.directory).toContain('getSpecialist');
+    // A member read off a published view that the view does not declare means
+    // the parse and the source disagree — a scan failure, not a pass.
+    expect(unknownMembers).toEqual([]);
+    const classified = Object.fromEntries(
+      Object.entries(PUBLISHED_VIEW_READS).map(([key, value]) => [key, value.count]),
+    );
+    // Both directions: an unlisted read fails, and a listing that stopped
+    // being reachable fails too.
+    expect(reads).toEqual(classified);
+    for (const [key, value] of Object.entries(PUBLISHED_VIEW_READS)) {
+      expect(value.reason.length, `${key}: the reason is what replaces the assertion`).toBeGreaterThan(80);
+      expect(value.kind, `${key}: an enforcement read belongs on a module binding`).toBe('display');
     }
   });
 

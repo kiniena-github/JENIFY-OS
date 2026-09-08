@@ -867,8 +867,21 @@ describe('secrets, immutability and the one-execution-path seam', () => {
           fx.db.prepare(`SELECT * FROM hq_action_events ORDER BY seq`).all(),
         ]);
       const before = rows();
-      // A forged "reconciled: confirmed_not_executed" event carrying the reserved
-      // key would erase the durable attempt and open a second generation.
+      /**
+       * A forged "reconciled: confirmed_not_executed" event carrying the
+       * RESERVED key would erase the durable attempt through the secondary
+       * unique index, which is the one thing this case is about.
+       *
+       * It is NOT the general claim (Wave 5 correction round seventeen,
+       * Medium 4). This comment used to assert the class while the code tested
+       * one spelling, and the class was open: measured, the same forgery with
+       * `side_effect_key = NULL` collides with nothing, lands, and moved
+       * `fx.adapter.calls` from 1 to 2 on a public irreversible action. The
+       * class is covered by `test/wave5-round17-findings.test.ts`, which
+       * attacks every INSERT spelling, every key shape and the whole state
+       * vocabulary; this case keeps testing the index, and its final
+       * `toHaveLength(1)` is the value that attack moved.
+       */
       expect(() =>
         fx.db
           .prepare(

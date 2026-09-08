@@ -800,6 +800,9 @@ The strongest claim in the phase, established three ways — the Phase 12 recipe
 | the APPEND-ONLY GUARD census that produces the other schema finding | `missingImmutabilityGuards(db)` over `ENGINE_IMMUTABLE_TABLES`, observed as the file was FOUND | whether `append_only_guard_missing` engages safe mode | canonical, and **widened twice by the Wave 5 review** — to the secondary-unique guards and `hq_memory`'s supersede rule (Medium 2), and to `hq_mission_plan_items`' three own guards (Medium 6). The declaration is **deep-frozen at module scope** (HIGH 2): it is public package API, `readonly` erases at runtime, and one `ENGINE_IMMUTABLE_TABLES.length = 0` used to empty the census and make a tampered file read clean. |
 | store presence | the constructor's `#reliabilityStorePresent` flag | whether a 0 means "absent" or "empty" | canonical, observed, never migrated. |
 | the ledger, for the unauthenticated snapshot | `#listRunsFromStore` and the `#private` report — deliberately NOT `listRuns()` or `hqReliabilityPosture()` | what `hq-snapshot.json`'s `reliability` section publishes | canonical. |
+| the SIDE-EFFECT GENERATION the next external attempt takes | `sideEffectGeneration` — the reconciliation rows of `hq_action_events`, each one corroborated against a standing `op_evidence` link by `evidenceEntryLinkStands` under `ACTION_RECONCILED_EVIDENCE_KIND` | whether a fresh generation exists, and therefore whether the same external side effect may be attempted a second time | canonical **since the Wave 5 correction round seventeen (Critical 1)**. It used to `COUNT(*)` the ledger rows, so ONE plain `INSERT` — colliding with nothing, because `side_effect_key` is NULL — minted a generation and produced a SECOND real execution of a public, irreversible action. Uncorroborated rows now count for nothing, and every path that cannot establish a witness returns the generation the ledger already stands at. |
+| the SPECIALIST RECORD behind the Founder-facing executor readiness verdict | `specialistRecordFor`, over the `#private` `#specialistFromStore` | what `--check-only` tells the Founder about a worker's registration, active flag and capability allow-list | canonical **since round seventeen (Medium 2)**. Round sixteen migrated the other three delegates and left this one on the line above the comment claiming the class was closed; it is an own-property closure, which is easier to patch than a prototype method, not harder. `directory.getSpecialist` stays as the patchable convenience read for display. |
+| RECONCILIATION WITNESSES no commitment covers | `uncommittedReconciliationWitnesses` — the standing links in `op_evidence` past the greatest standing `chain_length` in `hq_integrity_checkpoints` | nothing: it is an OBSERVATION published on the posture, never a verdict and never a latch | canonical **since round seventeen (High 1)**. It exists because the two-append forgery — a forged ledger row plus a forged, correctly-hashed witness — previously left every health surface reporting clean. |
 
 ## Privacy: what crosses to the unauthenticated artifact
 
@@ -6096,7 +6099,7 @@ derivation is possible:
 
 | Figure | Previous figure in this document | This head |
 |---|---|---|
-| test FILES in `packages/headquarter/test` | 197 | **208** — DERIVED, not typed: `phase-doc-name-truth.test.ts` reads the directory and requires this table to state what it counts |
+| test FILES in `packages/headquarter/test` | 197 | **209** — DERIVED, not typed: `phase-doc-name-truth.test.ts` reads the directory and requires this table to state what it counts (208 at round sixteen; round seventeen added `wave5-round17-findings.test.ts`) |
 | `npm run test:hq` | 197 files / 3494 tests | **208 files / 3639 tests, 0 failed** (measured at this head; a test-case count cannot be derived by a test inside the suite it counts, so it is recorded as a head-scoped measurement, which is the discipline this package already applies to every other suite figure) |
 | `SAFE_MODE_BLOCKING_FINDINGS` | 4 | **4**, and the count is now checked WHEREVER `src/` states it rather than only in `integrity.ts`'s own header — `service.ts` said "three" in the same diff |
 | unauthenticated artifact: crossing fields | 20 of 34 | **39 of 82** — see the disclosure section above; the previous figure of 23 was measured over a hand-written census whose completeness test derived its scope from that same census (round sixteen, High B-5) |
@@ -6106,3 +6109,248 @@ A test-case count typed into a document is read by nothing and goes stale on the
 next merge; that is the disclosure this table replaces rather than repeats. The
 FILE count is different — it is derivable, so it is derived, and this row fails
 the day a test file is added or removed without updating it.
+
+## Wave 5 correction round SEVENTEEN — a counter that trusted the ledger, and a sentence that named a defence
+
+A read-only hostile review of the frozen head `85b720d` returned FAIL with 1
+Critical, 1 High, 4 Medium and 1 Low. The recurring shape is the one the last
+six rounds have shared, and it is worth naming again rather than paraphrasing:
+**prose that claims more than the code does** — a "class" closed at three of
+four call sites, a regression test whose comment asserts the class and whose
+code tests one spelling, a residual note describing a guard that does not
+exist.
+
+Every fix below is mutation-proved: the guard is shown FAILING when the fix is
+reverted, and the failure message is recorded beside it.
+
+### CRITICAL 1 — one plain `INSERT` produced two real executions of an irreversible public action
+
+`sideEffectGeneration` counted `hq_action_events` rows. `state` carries no
+`CHECK`, and the append-only triggers refuse `UPDATE` and `DELETE` while
+permitting the `APPEND` this branch already accepts as the attacker's power, so
+one statement colliding with nothing — `side_effect_key` NULL — minted a
+generation. Reproduced on `publish_release` (`visibility: 'public'`,
+`reversibility: 'irreversible'`, `compensation: null`):
+
+```
+exec1 ok = true                       adapter calls after exec1 = 1
+generation before forge = 1
+BEFORE forge: authorizeAction REFUSED -> action_state_conflict
+forged INSERT: ACCEPTED
+generation after forge = 2
+AFTER forge: executeAction ok = true  adapter calls = 2
+```
+
+**Fixed** by giving the action ledger the corroboration the run ledger already
+has: a `reconciled` row counts only against a STANDING `op_evidence` link
+naming that action, actor and decision, consumed one witness per row so a copy
+of an honest reconciliation is not credited twice. `reconcileAction` writes the
+ledger row and the witness inside one reservation.
+
+Mutation proof — the fix reverted to the old `COUNT(*)`:
+
+```
+× refuses every INSERT spelling, every side-effect-key shape and the whole state vocabulary
+    AssertionError: INSERT INTO state="reconciled" key=null: expected 2 to be 1
+× an HONEST reconciliation still opens exactly one fresh generation, and a copy of it opens none
+    AssertionError: expected 3 to be 2
+× an evidence row with the right fields and no valid hash corroborates nothing
+    AssertionError: expected 2 to be 1
+```
+
+### MEDIUM 4 — the regression test asserted less than its own comment
+
+The round-fifteen cover tried `INSERT OR REPLACE … side_effect_key = <the
+reserved key>`, which the unique index refuses for a reason unrelated to the
+attack, while its comment asserted the general class. Measured: with the
+Critical 1 fix reverted that test still **passes** (`Tests 1 passed | 31
+skipped`), which is what "asserts less than its comment" means in practice.
+
+Replaced by a matrix in `wave5-round17-findings.test.ts`: seven INSERT
+spellings × six `side_effect_key` shapes (NULL, the reserved key, `base#1`,
+`base#2`, an arbitrary key, the empty string) × eighteen `state` spellings (the
+whole seven-member vocabulary plus case, whitespace and out-of-vocabulary
+variants) — 756 forgeries, each followed by an assertion that the generation has not moved,
+that an identical proposal still dedupes, and that the adapter has still been
+called exactly once. The `side_effect_key = NULL` column all lands, so the
+defence being measured is that a landed row counts for nothing, not that the
+engine refuses everything. The old case keeps testing the index and its comment
+now says only that.
+
+### HIGH 1 — the residual named a defence that does not exist
+
+The note beside `witnessReconciliations` said the chain append is "guarded by
+the engine and by a durable length commitment (`verifyEvidenceChain`)".
+Measured false: `contradictedChainCommitment` reports the first committed
+`chain_length` at which the log no longer carries the committed `tip_hash` — a
+SHORTENING or a REWRITE behind a commitment. An append PAST the newest
+commitment is ordinary chain growth and it is silent about it, which
+`wave5-round17-findings.test.ts` now executes in both directions.
+
+Two corrections, not one:
+
+- the sentence now states precisely what is and is not detected, and describes
+  the corroboration as a barrier raising the forgery from one append to two
+  appends plus a sha256 — not as a boundary;
+- the two-append state is no longer INVISIBLE. `reconcileRun` and
+  `reconcileAction` record an integrity checkpoint inside their own
+  reservation, so an honest witness is committed the instant it lands, and
+  `hqReliabilityPosture().commitments.uncommittedReconciliationWitnesses`
+  counts standing reconciliation witnesses that no standing commitment covers.
+
+**The two-append forgery still SUCCEEDS.** Re-measured on this tree, with both
+fixes in place:
+
+```
+before: {"state":"needs_reconciliation","outcome":"outcome_unknown","needsRec":true,"admits":false,"by":null}
+after : {"state":"concluded","outcome":"not_executed","needsRec":false,"admits":true,"by":"attacker"}
+inbox now: 0        chain after forge (null = intact): null
+hqReliabilityPosture -> integrity {"safeMode":false,"depth":"structural","observations":[]}
+hqReliabilityPosture -> commitments.uncommittedReconciliationWitnesses = 1
+```
+
+Only the last line changed. `integrity.safeMode` and `integrity.observations`
+are deliberately untouched: the count is not proof of tamper — a reconciliation
+HQ performed while already in safe mode reaches it too — and latching safe mode
+on it would be an alarm HQ cannot substantiate. This finding is therefore
+**partially closed**: the false sentence is corrected and the state is
+observable, and the forgery itself is not refused.
+
+**The residual that remains, executed rather than reasoned about.** A writer
+that also appends a checkpoint committing its own tip is not counted — three
+appends rather than two. That third append is not free: the same INSERT with
+`'{}'` in both commitment columns is refused with `hq_integrity_checkpoints may
+not commit beyond the record`, so it costs two extra reads of the file's own
+ledger identities. Both halves are pinned by test.
+
+Mutation proof — the reconciliation commitment removed:
+
+```
+× is silent about an APPEND past the newest committed length
+    AssertionError: the fixture must carry a real commitment for this to measure anything: expected 0 to be greater than 0
+× counts a reconciliation witness no standing commitment covers, and counts none of HQ`s own
+    AssertionError: expected 1 to be +0
+```
+
+### MEDIUM 2 — the fourth delegate, and a classification that was backwards
+
+`executorReadiness` read `ops.directory.getSpecialist`, on the line immediately
+above the comment claiming "what is being closed is the class, not the list of
+call sites somebody remembered". Measured:
+
+```
+descriptor directory.getSpecialist: {"on":"own","value":"function","writable":true,"configurable":true,"frozen":false}
+BEFORE patch, unregistered ghost worker: {"ready":false,"registered":false,"active":false,"hasCapability":false}
+AFTER  patch, unregistered ghost worker: {"ready":false,"registered":true,"active":true,"hasCapability":true}
+```
+
+`ready` did not move — the migrated bindings refuse independently — so this is
+fabricated worker facts on a Founder-facing verdict (law 8), not an authority
+bypass. Fixed with a `specialistRecordFor` module binding beside its five
+siblings.
+
+The scan's own reason for exempting the view said an own-property closure has
+"no prototype to patch", which is backwards: it is assignable directly. That
+reason is corrected, and `authority-read-scan.test.ts` gains a DEFAULT-DENY
+census of every read of a published own-property view from outside the facade,
+member by member, with the view names and their members derived from the class
+body so a view added in a future phase is covered the day it is declared.
+
+Mutation proof — the read put back on the patchable view: three failures, in
+the readiness test and in both census tests.
+
+### MEDIUM 1 — the cardinality sweep was evadable four ways
+
+`statedCardinals` stripped every backticked span before extraction, carved out
+`one` wherever it was preceded by `only`/`no`/`another`, and knew no number
+word past `twelve`. Executed against the head, each phrasing written into
+`integrity.ts` beside the constant:
+
+```
+CONTROL-true  four `SAFE_MODE_BLOCKING_FINDINGS` and the only one that detects tampering  -> PASS
+EV0  `SAFE_MODE_BLOCKING_FINDINGS` holds `three` names, and this is the only one           -> PASS (EVADED)
+EV1  only one of the `SAFE_MODE_BLOCKING_FINDINGS` exists, and it detects tampering        -> PASS (EVADED)
+EV2  a dozen `SAFE_MODE_BLOCKING_FINDINGS` and the only one that detects tampering         -> PASS (EVADED)
+EV3  a couple of `SAFE_MODE_BLOCKING_FINDINGS` and the only one that detects tampering     -> PASS (EVADED)
+```
+
+Fixed on all four fronts: backticked spans are RESOLVED rather than blanked (an
+identifier is marked, a quantity token is unwrapped); the quantity vocabulary
+runs to `hundred` and includes the collectives, and a quantity word that names
+no number is REFUSED rather than ignored; the `one` carve-out fires only when
+nothing size-bearing follows, or when the partitive phrase carries its own
+cardinal; and the coverage assertion is per constant rather than one global
+`> 0` — with the one true statement removed, `stated > 0` still passed on the
+other constant's mentions.
+
+Re-measured after the fix, same method:
+
+```
+CONTROL-true     -> PASS
+EV0              -> FAIL (caught)   integrity.ts:847 states 3 beside SAFE_MODE_BLOCKING_FINDINGS (4)
+EV1              -> FAIL (caught)   integrity.ts:847 states 1 beside SAFE_MODE_BLOCKING_FINDINGS (4)
+EV2              -> FAIL (caught)   integrity.ts:847 states 12 beside SAFE_MODE_BLOCKING_FINDINGS (4)
+EV3              -> FAIL (caught)   integrity.ts:847 states 2 beside SAFE_MODE_BLOCKING_FINDINGS (4)
+EV4              -> FAIL (caught)   integrity.ts:847 states 13 beside SAFE_MODE_BLOCKING_FINDINGS (4)
+NONE (baseline)  -> PASS
+```
+
+Two consequences stated rather than hidden. `HQ_INTEGRITY_FINDINGS`' size was
+stated nowhere within a window of the constant, so the sweep was genuinely
+vacuous for it; a one-line true statement was added at the declaration. And
+"one of the `X`" with no cardinal between now reads as a claim that `X` holds
+one member, so prose that picks a member out of one of these sets has to say
+how many the set has.
+
+### MEDIUM 3 — a safety latch whose UNKNOWN state meant "concluded"
+
+`deriveRunRecord` tested `event.witnessed === false`, so `undefined` — the
+documented "nobody consulted an evidence log" case — was treated as
+corroborated. Over the exported pure fold:
+
+```
+reconciled, witnessed=false     state=needs_reconciliation outcome=outcome_unknown admits=false by=null
+reconciled, witnessed ABSENT    state=concluded  outcome=not_executed  admits=true  by=attacker  nextGen=2
+reconciled, witnessed=null      state=concluded  outcome=not_executed  admits=true  by=attacker  nextGen=2
+reconciled, witnessed=0         state=concluded  outcome=not_executed  admits=true  by=attacker  nextGen=2
+```
+
+Not reachable through any in-package caller — all of them go through
+`loadRunEvents` — but the fold is exported and a latch whose unknown state
+means "concluded" is fail-open by construction. Both consumers now test
+`=== true`: the fold and `runAttemptGeneration`, which had the same defect
+spelled `!== false` and was not named by the review.
+
+Mutation proof — the tri-state back to `=== false`:
+`AssertionError: absent: expected 'concluded' to be 'needs_reconciliation'`.
+
+### LOW 1 — the unreadable-ceiling guard missed two of the three unreadables
+
+`evaluateBudget` guarded `ceilingMinorUnits == null` while its own docblock and
+refusal text said "not a whole non-negative number".
+
+```
+ceiling NaN       decision=within_ceiling  tiers=["frontier_cloud"]  ceiling=null
+ceiling Infinity  decision=within_ceiling  tiers=["frontier_cloud"]  ceiling=null
+ceiling null      decision=requires_founder_decision  tiers=["deterministic_local"]
+```
+
+Unreachable from the store — `rowToBudget` normalizes a malformed ceiling to
+`null` — so this is defence-in-depth on an exported function plus a docblock
+that now describes the code. Guard is `!Number.isInteger(x) || x < 0`.
+
+Mutation proof — the guard back to `== null`:
+`AssertionError: NaN: expected 'within_ceiling' to be 'requires_founder_decision'`.
+
+### The evidence figures at this head
+
+| Figure | Round sixteen | This head |
+|---|---|---|
+| test FILES in `packages/headquarter/test` | 208 | **209** — DERIVED by `phase-doc-name-truth.test.ts`, which requires the round-fifteen table above to state what it counts |
+| `npm run test:hq` | 208 files / 3639 tests | **209 files / 3651 tests, 0 failed** (head-scoped measurement; a test-case count cannot be derived by a test inside the suite it counts) |
+| `npm test` (root, Mesob pilot untouched) | — | **37 files / 569 passed, 3 pre-existing skips** |
+| `npm run test --workspace @factoryos/hq-host` | — | **23 files / 222 passed** |
+| `npm run test --workspace @factoryos/hq-server` | — | **2 files / 20 passed** |
+| web initial JS | 215.66 kB / 69.22 kB gzip | **215.66 kB / 69.22 kB gzip** — unchanged |
+| `.execute(` on an adapter in all of `src/` | 1 | **1**, in the Phase 8 gateway |
+| `.skip` / `.only` / `.todo` / `.failing` in `packages/headquarter` | 0 | **0** |

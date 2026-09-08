@@ -1666,12 +1666,28 @@ export function evaluateBudget(input: {
         'alone.',
     };
   }
-  if (input.budget.ceilingMinorUnits == null) {
+  if (!Number.isInteger(input.budget.ceilingMinorUnits) || (input.budget.ceilingMinorUnits as number) < 0) {
     // A row exists and its ceiling is unreadable. That is NOT permission, and
     // it is not `within_ceiling` either: an unguarded `Number()` used to make
     // it `NaN`, `observed >= NaN` false, and `blocked` unreachable for the
     // scope forever (Wave 5 review, Medium finding B-4). Answered as the
     // Founder decision it is, with the free local tier alone.
+    //
+    // The GUARD, not only the sentence (Wave 5 correction round seventeen,
+    // Low 1). It read `== null` while this comment and the `reason` below both
+    // said "not a whole non-negative number", so the two values `null` was
+    // standing in for went the other way. Measured against the head
+    // `85b720d`, calling the exported function directly:
+    // `ceiling NaN -> within_ceiling, tiers ["frontier_cloud"]` and
+    // `ceiling Infinity -> within_ceiling, tiers ["frontier_cloud"]`, against
+    // `ceiling null -> requires_founder_decision, tiers
+    // ["deterministic_local"]`. `rowToBudget` normalizes a malformed stored
+    // ceiling to `null`, so no store path reached it — this is
+    // defence-in-depth on an exported function plus a docblock that now
+    // describes the code. `Number.isInteger` is false for `null`, `NaN`,
+    // `Infinity`, `-Infinity`, a fraction and a non-number, so the three
+    // spellings of "unreadable" reach one branch; the `< 0` term is the
+    // "non-negative" half of the same sentence.
     const unknownAmountEntries = input.entries.filter((entry) => entry.amountMinorUnits == null).length;
     return {
       ...base,
@@ -1688,7 +1704,8 @@ export function evaluateBudget(input: {
         'answer, and the permitted tier set is the free local tier alone.',
     };
   }
-  const budget = { ...input.budget, ceilingMinorUnits: input.budget.ceilingMinorUnits };
+  // Narrowed by the guard above — `Number.isInteger` proved it is a number.
+  const budget = { ...input.budget, ceilingMinorUnits: input.budget.ceilingMinorUnits as number };
   let observedMinorUnits = 0;
   let unknownAmountEntries = 0;
   let otherCurrencyEntries = 0;

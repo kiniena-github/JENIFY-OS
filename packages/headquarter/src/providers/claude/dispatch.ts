@@ -84,6 +84,7 @@ import {
   declaredProviderFor,
   gatewayActionHistoryFor,
   killSwitchEngagedFor,
+  specialistRecordFor,
   taskEvidenceRowsFor,
   taskRowFor,
   writeDispatchOutcome,
@@ -764,13 +765,22 @@ export function executorReadiness(
   capabilityId: string | null,
 ): ExecutorReadiness {
   const problems: string[] = [];
-  const specialist = ops.directory.getSpecialist(workerId);
   // Enforcement-safe reads (Wave 5 correction round sixteen, Medium B-6 /
-  // B-7). This verdict is Founder-facing and it states PROVIDER IDENTITY —
-  // law 10 — and the handover freeze. `ops.queue.providerOf` and
+  // B-7; round seventeen, Medium 2). This verdict is Founder-facing and it
+  // states PROVIDER IDENTITY — law 10 — the handover freeze, and whether a
+  // worker exists at all. `ops.queue.providerOf` and
   // `ops.queue.assignabilityProblem` are prototype slots; neither was
-  // exploited by the review, and both are migrated because what is being
+  // exploited by the review, and both were migrated because what is being
   // closed is the class, not the list of call sites somebody remembered.
+  //
+  // `ops.directory.getSpecialist` sat on the line above that sentence for one
+  // round and was not migrated with them. It is an own-property closure, which
+  // the round-sixteen scan classified as unpatchable — backwards, since an own
+  // property is assignable directly and needs no prototype at all. Patching it
+  // moved `registered`, `active` and `hasCapability` on this verdict from
+  // `false,false,false` to `true,true,true` for a worker the directory has
+  // never heard of.
+  const specialist = specialistRecordFor(ops, workerId);
   const declaredProvider = declaredProviderFor(ops, workerId);
 
   if (!specialist) {

@@ -68,6 +68,7 @@ import {
 } from '../store/integrity.js';
 import {
   ACTION_RECONCILE_DECISIONS,
+  ACTION_RECONCILED_EVIDENCE_KIND,
   isActionReconcileDecision,
   type ActionReconcileDecision,
 } from './action-gateway.js';
@@ -648,6 +649,19 @@ export interface RunEventRow {
    *    of the real ledger goes through `loadRunEvents`, which always sets it on
    *    a `reconciled` row; `test/authority-read-scan.test.ts` derives that
    *    obligation from the source rather than trusting this sentence.
+   *
+   * Both consumers test `witnessed === true` and nothing else, so `undefined`
+   * lands with `false` (Wave 5 correction round seventeen, Medium 3). They
+   * used to test `=== false` and `!== false`, which put the UNKNOWN state on
+   * the concluding side of a safety latch: measured against the head
+   * `85b720d` over the exported pure fold, a `reconciled` row with
+   * `witnessed` absent, `null` or `0` gave `state=concluded
+   * outcome=not_executed admits=true by=attacker nextGen=2`, against
+   * `witnessed=false` giving `state=needs_reconciliation
+   * outcome=outcome_unknown admits=false by=null`. No in-package caller
+   * reached it — all of them go through `loadRunEvents` — but a latch whose
+   * unknown state means "concluded" is fail-open by construction, and this
+   * fold is exported.
    */
   witnessed?: boolean;
 }
@@ -812,16 +826,62 @@ export const RUN_RECONCILED_EVIDENCE_KIND = 'run_reconciled';
  * fold routes it to the `default` branch, which already fails closed to
  * `needs_reconciliation`. Appending noise can only ever keep a run uncertain.
  *
- * **The residual, stated rather than glossed.** HQ holds no key a foreign
- * writer does not also have, so a writer that already holds the file open can
- * forge the evidence entry too — at the cost of appending to the hash chain,
- * which is itself guarded by the engine and by a durable length commitment
- * (`verifyEvidenceChain`). Against that writer this is a real barrier and not a
- * cryptographic boundary — the same residual already recorded for
- * `standingIntegrityVerdict` and for `hq_reliability_run_events` itself. What
- * it closes completely is the thing it was built for: one appended row, by an
- * actor nobody resolved, silently concluding a run HQ had said it could not
- * account for, and re-admitting a second attempt on a `side_effect = 1`
+ * **The residual, corrected to what was measured (Wave 5 correction round
+ * seventeen, High 1).** HQ holds no key a foreign writer does not also have,
+ * so a writer that already holds the file open can forge the evidence entry
+ * too. This round's reviewer executed exactly that — one forged
+ * `hq_reliability_run_events` row plus one forged `op_evidence` entry carrying
+ * a correct sha256 over public, attacker-chosen fields — and the run went from
+ * `needs_reconciliation / outcome_unknown` to `concluded / not_executed /
+ * reconciledBy "attacker"`, with the Founder's reconciliation inbox emptied
+ * and a second attempt admitted on a `side_effect = 1` capability.
+ *
+ * The sentence that stood here for one round said the chain append was
+ * "guarded by the engine and by a durable length commitment
+ * (`verifyEvidenceChain`)". The second half of that was FALSE, and measured
+ * false rather than argued: `contradictedChainCommitment` reports the first
+ * committed `chain_length` at which the log no longer carries the committed
+ * `tip_hash`, so it fires on a log that has been SHORTENED or REWRITTEN behind
+ * a commitment and is silent about an APPEND past the newest committed length,
+ * which is indistinguishable from ordinary chain growth. There was no length
+ * commitment guarding an append, and `test/wave5-round17-findings.test.ts`
+ * pins that distinction with both directions executed.
+ *
+ * What this corroboration is, precisely: a barrier that raises the forgery
+ * from ONE append to two appends plus a sha256, not a cryptographic boundary.
+ *
+ * **The two-append forgery still SUCCEEDS, and that is stated rather than
+ * glossed.** Re-measured against this tree, with both fixes in place, the same
+ * two appends still give:
+ *
+ * ```
+ * before: {"state":"needs_reconciliation","outcome":"outcome_unknown","needsRec":true,"admits":false,"by":null}
+ * after : {"state":"concluded","outcome":"not_executed","needsRec":false,"admits":true,"by":"attacker"}
+ * inbox now: 0        chain after forge (null = intact): null
+ * hqReliabilityPosture -> integrity {"safeMode":false,"depth":"structural","observations":[]}
+ * hqReliabilityPosture -> commitments.uncommittedReconciliationWitnesses = 1
+ * ```
+ *
+ * What the round-seventeen correction changes is the LAST line, and only that
+ * line: the state is no longer invisible.
+ * `uncommittedReconciliationWitnesses` counts reconciliation witnesses that no
+ * standing checkpoint commitment covers, and
+ * `hqReliabilityPosture().commitments` publishes that count, because
+ * `reconcileRun` and `reconcileAction` now record a commitment inside their
+ * own reservation so an honest witness is never counted. `integrity.safeMode`
+ * and `integrity.observations` are deliberately UNCHANGED: this count is not
+ * proof of tamper — a reconciliation HQ performed while already in safe mode
+ * reaches it too — and latching safe mode on it would be an alarm HQ cannot
+ * substantiate, which the same laws forbid in the alarm direction as in the
+ * reassurance one. A writer who also appends a checkpoint row committing the
+ * forged tip is not counted at all — three appends rather than two, the third
+ * costing two extra reads because a bare `'{}'` commitment is refused by
+ * `trg_hq_integrity_checkpoints_no_overclaim` — and that remains disclosed
+ * rather than closed.
+ *
+ * What it closes completely is the thing it was built for: one appended row,
+ * by an actor nobody resolved, silently concluding a run HQ had said it could
+ * not account for, and re-admitting a second attempt on a `side_effect = 1`
  * capability.
  */
 function witnessReconciliations(
@@ -872,6 +932,85 @@ function witnessReconciliations(
     available.set(key, remaining - 1);
     return { ...row, witnessed: true };
   });
+}
+
+/**
+ * The two evidence kinds that CORROBORATE a reconciliation — the run ledger's
+ * and the action ledger's. Both are read from the modules that write them, so
+ * there is one spelling of each and this list cannot drift from them.
+ */
+export const RECONCILIATION_WITNESS_KINDS: readonly string[] = deepFreeze([
+  RUN_RECONCILED_EVIDENCE_KIND,
+  ACTION_RECONCILED_EVIDENCE_KIND,
+] as const);
+
+/** What `uncommittedReconciliationWitnesses` means, in the Founder's words. */
+export const RECONCILIATION_COMMITMENT_STATEMENT =
+  'A reconciliation is corroborated by a standing link in the hash-chained evidence log, and HQ ' +
+  'commits to the log at every reconciliation it performs. This count is the reconciliation ' +
+  'witnesses the log carries that NO standing checkpoint commitment covers. HQ writes none of ' +
+  'those: a witness reaches this count when it was appended by something other than HQ, or when ' +
+  'HQ was in safe mode and therefore did not stand behind the record. It is an observation, not a ' +
+  'verdict — a writer that also appends a checkpoint committing its own tip is not counted.';
+
+/**
+ * Reconciliation witnesses the evidence log carries that no standing
+ * checkpoint commitment covers (Wave 5 correction round seventeen, High 1).
+ *
+ * `witnessReconciliations` and `sideEffectGeneration` credit a reconciliation
+ * when the log carries a STANDING link naming it. A writer holding the file
+ * open can append such a link, and until this existed that state left every
+ * health surface reporting `safeMode: false, observations: []` — the forgery
+ * was refused nowhere and visible nowhere.
+ *
+ * What "covered" means: some checkpoint row commits a `chain_length` at or
+ * past the witness's `seq`, AND the log still carries that checkpoint's
+ * committed `tip_hash` at that length — the same standing test
+ * `contradictedChainCommitment` applies, so a checkpoint whose commitment the
+ * log has since contradicted cannot cover anything.
+ *
+ * Both directions matter and both are pinned by test: `reconcileRun` and
+ * `reconcileAction` record a commitment inside their own reservation, so an
+ * HONEST reconciliation is covered the moment it lands and never appears here;
+ * a witness appended by a raw writer past the newest commitment does appear.
+ *
+ * Total: an absent checkpoint ledger, an absent evidence log or an unreadable
+ * row answers 0 rather than raising, because this is a health READ and a
+ * reader that throws is a denial. 0 means "nothing observed", which the
+ * statement above says in words rather than letting it read as "nothing
+ * happened".
+ */
+export function uncommittedReconciliationWitnesses(db: HqDatabase): number {
+  try {
+    const committed = db
+      .prepare(
+        `SELECT COALESCE(MAX(c.chain_length), 0) AS n
+           FROM hq_integrity_checkpoints c
+           JOIN op_evidence e ON e.seq = c.chain_length
+          WHERE c.chain_length > 0 AND e.hash = c.tip_hash`,
+      )
+      .get() as { n: unknown };
+    const covered = Number(committed.n);
+    const rows = db
+      .prepare(
+        `SELECT seq FROM op_evidence
+          WHERE kind IN (${RECONCILIATION_WITNESS_KINDS.map(() => '?').join(', ')})
+            AND seq > ?
+          ORDER BY seq`,
+      )
+      .all(...RECONCILIATION_WITNESS_KINDS, Number.isInteger(covered) ? covered : 0) as { seq: unknown }[];
+    let uncommitted = 0;
+    for (const row of rows) {
+      const seq = Number(row.seq);
+      // Only a GENUINE link is a witness anything credits, so only a genuine
+      // link is worth reporting as uncommitted. A row with the right kind and
+      // no valid hash corroborates nothing and is already inert everywhere.
+      if (Number.isInteger(seq) && evidenceEntryLinkStands(db, seq)) uncommitted += 1;
+    }
+    return uncommitted;
+  } catch {
+    return 0;
+  }
 }
 
 export function loadBackupRecords(db: HqDatabase): BackupRow[] {
@@ -1268,8 +1407,10 @@ export function runAttemptGeneration(events: readonly RunEventRow[]): number {
         // sixteen, Critical B-2): an unwitnessed `reconciled` row concludes
         // nothing, so it must not advance the generation the next attempt is
         // labelled with either — that counter is how the two ledgers agree
-        // about how many times this work was tried.
-        event.witnessed !== false &&
+        // about how many times this work was tried. `=== true` rather than
+        // `!== false`: an UNCOMPUTED witness is not a witness (round
+        // seventeen, Medium 3).
+        event.witnessed === true &&
         str(event.detail, 'decision') === 'confirmed_not_executed',
     ).length + 1
   );
@@ -1351,13 +1492,18 @@ export function deriveRunRecord(row: RunRow, events: readonly RunEventRow[]): Ru
      * `side_effect = 1` capability. See `witnessReconciliations` for the
      * executed before/after and for the corroboration that replaces it.
      *
-     * `witnessed === false` means the evidence log was consulted and carries
-     * no standing `run_reconciled` link for this run/actor/decision. Such a
-     * row is not a conclusion and not a reconciliation — it is an event HQ
+     * `witnessed === true` means the evidence log was consulted and carries a
+     * standing `run_reconciled` link for this run/actor/decision. Anything
+     * else — consulted and empty (`false`), or never consulted (`undefined`)
+     * — is not a conclusion and not a reconciliation: it is an event HQ
      * cannot interpret, which is exactly what the `default` branch below is
      * for.
+     *
+     * The test was `=== false` for one round (round seventeen, Medium 3),
+     * which put the UNKNOWN state on the concluding side of the latch. See
+     * `RunEventRow.witnessed` for the executed before/after.
      */
-    const uncorroboratedReconciliation = event.kind === 'reconciled' && event.witnessed === false;
+    const uncorroboratedReconciliation = event.kind === 'reconciled' && event.witnessed !== true;
     /**
      * What the switch below folds. An uncorroborated `reconciled` row is
      * routed to the `default` branch rather than given a branch of its own,
@@ -1708,6 +1854,15 @@ export interface HqReliabilityPosture {
     openedByOtherProcesses: number;
   };
   verifiedBackups: number;
+  /**
+   * What HQ has and has not committed to about its own reconciliations (Wave 5
+   * correction round seventeen, High 1). An observation, never a verdict — see
+   * `RECONCILIATION_COMMITMENT_STATEMENT`.
+   */
+  commitments: {
+    uncommittedReconciliationWitnesses: number;
+    statement: string;
+  };
   canonical: HqCanonicalInterruptions;
   ledgerStatement: string;
   retryStatement: string;

@@ -71,6 +71,15 @@ function event(
     processId: 'process-one',
     detail,
     attemptKey: null,
+    // What `loadRunEvents` puts on a CORROBORATED `reconciled` row, which is
+    // what every fold below is about: an honest reconciliation the evidence
+    // log stands behind. Stated rather than left absent, because `witnessed`
+    // is a tri-state and absent means "nobody consulted the log", which the
+    // fold reads as uninterpretable (Wave 5 correction round seventeen,
+    // Medium 3). The uncorroborated and NEVER-CONSULTED cases have their own
+    // coverage in `test/reliability-fold-latch.test.ts`; overriding `over` is
+    // how a test asks for them.
+    ...(kind === 'reconciled' ? { witnessed: true } : {}),
     ...over,
   };
 }
