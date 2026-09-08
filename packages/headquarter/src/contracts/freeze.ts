@@ -130,6 +130,28 @@
  * completely. Both lanes' assertions are kept and both pass against this
  * mechanism.
  *
+ * ## Two holes in this helper itself, closed rather than disclosed
+ *
+ * Round twelve (Low 5) found both. Neither was reachable from this package —
+ * every one of the `deepFreeze(` call sites is a module-level literal constant,
+ * whose properties are configurable — and both are closed anyway, because "no
+ * current call site reaches it" is exactly the reasoning `frozen-constants-
+ * census.test.ts` exists to stop anybody depending on.
+ *
+ *  - **A collection at a property that cannot be repointed.** The nested
+ *    collection freezes to a DIFFERENT reference, and the repoint was skipped
+ *    when the property was neither configurable nor writable — leaving the
+ *    frozen object holding the RAW `Set`, which `Set.prototype.add.call(raw, …)`
+ *    mutates through the internal slot. Executed and confirmed. It now THROWS:
+ *    this function cannot deliver "all the way down" on such a property, and a
+ *    load-time refusal is the honest answer where a silent skip was not. The
+ *    census could never have caught it, because it walks exported constants and
+ *    this is a shape one of them could hold.
+ *  - **Idempotence.** Freezing anything containing a view a second time hit the
+ *    view's own `defineProperty` trap and threw `Cannot define add on a frozen
+ *    Set`. A helper called at module load on constants other modules re-export
+ *    has to survive being called twice; `HANDED_OUT` is what makes it.
+ *
  * The measured cost is real and is stated rather than waved away: a bare
  * `.has()` costs about 15 ns direct and about 38 ns through the view on this
  * machine. The package has exactly two frozen collections and two call sites —
@@ -139,6 +161,18 @@
  * side of it. There are no frozen collections on any loop hot enough for 23 ns
  * to be visible, and `deepFreeze` itself is only ever called at module load.
  */
+
+/**
+ * Every view this module has handed out.
+ *
+ * `deepFreeze` has to be IDEMPOTENT — it is called at module load on constants
+ * other modules re-export and may freeze again — and it was not: a second pass
+ * over a structure holding a view reached the view's own `defineProperty` trap
+ * and threw `Cannot define add on a frozen Set`. A view is not identifiable by
+ * inspection (that is the point of a `Proxy`), so the set of them is kept
+ * (round twelve, Low 5).
+ */
+const HANDED_OUT = new WeakSet<object>();
 
 const SET_MUTATORS: readonly string[] = Object.freeze(['add', 'delete', 'clear']);
 const MAP_MUTATORS: readonly string[] = Object.freeze(['set', 'delete', 'clear']);
@@ -214,6 +248,7 @@ function contentFrozenCollection<T extends object>(target: T, kind: CollectionKi
       throw new TypeError(`Cannot reassign the prototype of a frozen ${kind}`);
     },
   }) as T;
+  HANDED_OUT.add(view);
 
   const seal = (): void => {
     for (const name of kind === 'Set' ? SET_MUTATORS : MAP_MUTATORS) {
@@ -241,6 +276,12 @@ function contentFrozenCollection<T extends object>(target: T, kind: CollectionKi
 export function deepFreeze<T>(value: T, seen: WeakMap<object, unknown> = new WeakMap()): T {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return value;
   const target = value as unknown as object;
+  // A view this function already handed out is finished. Without this,
+  // re-freezing anything containing one THREW `Cannot define add on a frozen
+  // Set` from the view's own `defineProperty` trap — `deepFreeze` was not
+  // idempotent, which a helper called at module load on shared constants has to
+  // be (Wave 5 correction round twelve, Low 5).
+  if (HANDED_OUT.has(target)) return value;
   if (seen.has(target)) return seen.get(target) as T;
   // Provisional, so a cycle through a plain object terminates on the object
   // itself. A collection overwrites this with its view below, before its own
@@ -290,9 +331,30 @@ export function deepFreeze<T>(value: T, seen: WeakMap<object, unknown> = new Wea
     // A nested collection freezes to a DIFFERENT reference, so the property has
     // to be repointed at it — otherwise "all the way down" would stop at the
     // raw `Set` a frozen object happens to hold.
-    if (frozen !== descriptor.value && (descriptor.configurable === true || descriptor.writable === true)) {
-      Object.defineProperty(backing, key, { ...descriptor, value: frozen });
+    if (frozen === descriptor.value) continue;
+    if (descriptor.configurable !== true && descriptor.writable !== true) {
+      // The repoint is impossible, so this function CANNOT deliver what it
+      // promises: the property would keep pointing at the raw collection, and
+      // `Set.prototype.add.call(raw, …)` reaches straight into its internal
+      // slot — the exact escape the view exists to close, executed and
+      // confirmed (Wave 5 correction round twelve, Low 5). Refusing loudly is
+      // the only honest answer; every call site is a module-level literal
+      // constant whose properties are configurable, so nothing reaches this
+      // today, and anything that ever does fails at import rather than
+      // shipping a collection that is frozen in name only. Round eleven's lane
+      // reached the same property SILENTLY — it skipped the repoint — which
+      // left exactly the raw-collection hole described above; the loud refusal
+      // is the stronger of the two answers and is the one that ships.
+      throw new TypeError(
+        `Cannot deep-freeze ${String(key)}: it holds a collection and the property is sealed, ` +
+          `so the frozen view cannot replace the raw one`,
+      );
     }
+    // `backing`, not `target`: for a collection the walk is over the PRIVATE
+    // copy (round eleven, Low 1), and repointing the caller's own object would
+    // both miss the object the view actually reads and write through a
+    // reference this module has just promised not to touch.
+    Object.defineProperty(backing, key, { ...descriptor, value: frozen });
   }
 
   if (collection === 'Set' && wrapper !== null) {

@@ -270,9 +270,14 @@ const ERASED_CODE_POINTS =
  * **What this costs, bounded rather than hoped.** Accented prose folds to
  * unaccented prose in the SCAN COPY only — the original string is what is
  * refused or published, exactly as for every other fold here. Stripping a mark
- * removes characters; it cannot introduce a letter, so it cannot build `sk-`,
- * `ghp_`, `AIza`, a PEM header, `Bearer ` or a JWT out of prose that did not
- * already carry them. `live-redaction.test.ts`'s twelve legitimate strings and
+ * removes characters, so it cannot introduce a letter — but, exactly as for the
+ * narrow-space fold below, removing one can join adjacent tokens, and a prefix
+ * neither side carried alone is therefore reachable. That direction is
+ * conservative: it costs a refusal, never an admission. This sentence claimed
+ * the opposite for one round — "so it cannot build `sk-`, `ghp_`, `AIza`, a PEM
+ * header, `Bearer ` or a JWT out of prose that did not already carry them" —
+ * and the correction is recorded here rather than quietly rewritten (round
+ * eleven, Low 2). `live-redaction.test.ts`'s twelve legitimate strings and
  * the round-seven suite's accented prose are both pinned against it.
  *
  * **It DOES cost one new refusal class, which that measurement did not cover**
@@ -292,10 +297,32 @@ const ERASED_CODE_POINTS =
  * a non-alphanumeric boundary, one of those s-like letters is followed by one
  * of those k-like letters, then `-`, then 16 or more of `[A-Za-z0-9_-]` — and
  * all 53 s-like spellings were executed against that tail and all 53 refuse.
- * Nothing else in the class exists: an accented hyphenated name that does not
+ * An accented hyphenated name that does not
  * spell s-then-k is untouched, and `Škoda-Auto-Mladá-Boleslav`,
  * `Sköldebrand-Åkerström-Handelsbolaget` and
  * `Ćwikliński-Żółkiewski-Przedsiębiorstwo` were each executed and each pass.
+ *
+ * **This paragraph used to close by declaring the class complete, and that
+ * claimed more than the enumeration behind it could see** (Wave 5 correction
+ * round twelve, Low 1). The counts above are derived by walking the plane for single
+ * `\p{L}` characters whose fold is ONE ASCII letter, which is structurally blind
+ * to two other shapes: characters that are not letters (`Ⓢ Ⓚ ⓢ ⓚ 🅂 🄺 𜳨 𜳠` —
+ * eight of them fold to a single `s` or `k`), and characters whose fold is
+ * MULTI-character and ends in an s-like letter behind a non-alphanumeric
+ * (`℁` → `a/s`, `㎧` → `m∕s`, `㎮` → `rad∕s` — exactly three in the whole
+ * plane). `℁k-Slovan-Bratislava-1919` is refused, and no enumeration of single
+ * letters could ever have said so.
+ *
+ * **They are refused, and they are NOT part of the class this fold added — which
+ * was executed before it was written.** All eleven fold under `NFKC` alone, so
+ * the pipeline refused every one of them BEFORE round seven's `NFKD` mark-strip
+ * existed: run the pre-strip pipeline over `℁k-Slovan-Bratislava-1919` and it
+ * already reads `a/sk-Slovan-…`. So the availability cost this fold introduced
+ * really is the s-then-k prefix and nothing wider — but that is a statement
+ * about what CHANGED, not about what the guard refuses, and the sentence used to
+ * blur the two. `credential-scan-false-positive-class.test.ts` now enumerates
+ * the whole plane without the `\p{L}` filter, names all eleven, and asserts of
+ * each that it refuses AND that it already refused before the strip.
  *
  * **Why it is disclosed rather than fixed.** The ASCII spelling
  * `SK-Slovan-Bratislava-1919` was ALREADY refused before this wave: the over-
@@ -339,9 +366,27 @@ const COMBINING_MARKS = /[\p{Mn}\p{Me}]/gu;
  * remain are U+0020 and U+00A0.
  *
  * **What it costs, measured rather than hoped.** Erasing a separator can only
- * REMOVE characters from the scan copy; it cannot introduce a letter, so it
- * cannot build `sk-`, `ghp_`, `AIza`, a PEM header, a JWT or `Bearer ` out of
- * prose that did not carry one. What it CAN do is close a gap, so the corpus
+ * REMOVE characters from the scan copy, so it cannot introduce a letter — but
+ * removing one can join adjacent tokens, and that is enough to build a prefix
+ * no contiguous run of the original carried. `the gh<U+200A>p_…` holds no
+ * `ghp_` anywhere in it and is REFUSED, because the fold closes the gap between
+ * `gh` and `p_`; the same is true of `AI<U+3000>za…` and `Bear<U+200A>er …`.
+ * All three are executed in `redaction-narrow-spaces.test.ts`, beside the same
+ * strings written with a plain U+0020 — which this fold deliberately leaves
+ * alone — to show the join is the whole cause.
+ *
+ * **This sentence used to deny that** (round eleven, Low 2): it said the fold
+ * "cannot build `sk-`, `ghp_`, `AIza`, a PEM header, a JWT or `Bearer ` out of
+ * prose that did not carry one", which is false of exactly this case, while
+ * conceding two sentences later that it CAN close a gap. The residual it
+ * mispriced is small and points the safe way — the round-eleven review measured
+ * the fold over 138,600 real strings (this repository's own `PHASE_13` prose,
+ * `store/integrity.ts`'s source, and a French/Polish typography corpus, each
+ * against the 15 separators in 2 substitution styles) and found 15 verdicts
+ * changed, all 15 of them new REFUSALS of one contrived `gh<U+200A>p_…` string,
+ * with zero new accepts and zero changes on real prose. So the fold stays and
+ * the sentence is what changes: the cost is a false refusal on a contrived
+ * string, never a leak. What it closes is a gap, so the corpus
  * that matters is prose that uses these separators as typography: French narrow
  * no-break and thin spaces around `:` and inside grouped numbers, and Japanese
  * and Chinese text spaced with U+3000. Both were run against the guard with

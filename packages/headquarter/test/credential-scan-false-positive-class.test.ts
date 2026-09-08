@@ -61,8 +61,115 @@ function lettersFoldingTo(target: 's' | 'k'): string[] {
   return found;
 }
 
+/** The mark-strip alone, which is the step round seven added. */
+function strip(value: string): string {
+  return value.normalize('NFKD').replace(/[\p{Mn}\p{Me}]/gu, '');
+}
+
+/**
+ * Everything the enumeration above is structurally blind to.
+ *
+ * `lettersFoldingTo` walks only `\p{L}` characters and keeps only folds of
+ * length one, so two shapes can never appear in it however far the fold moves:
+ * a NON-letter that folds to a single `s`/`k`, and any character whose fold is
+ * MULTI-character and ends in an s-like letter behind a non-alphanumeric — the
+ * second of which reaches the `sk-` shape when an ordinary `k` follows it. The
+ * whole plane is walked here, without either filter, so the two shapes are
+ * enumerated rather than assumed absent (round twelve, Low 1).
+ */
+function reachesTheShapeOutsideTheLetterEnumeration(): {
+  nonLetterSingle: string[];
+  multiCharacter: string[];
+} {
+  const enumerated = new Set([...lettersFoldingTo('s'), ...lettersFoldingTo('k')]);
+  const nonLetterSingle: string[] = [];
+  const multiCharacter: string[] = [];
+  for (let codePoint = 0x80; codePoint <= 0x10ffff; codePoint += 1) {
+    if (codePoint >= 0xd800 && codePoint <= 0xdfff) continue;
+    const character = String.fromCodePoint(codePoint);
+    if (enumerated.has(character)) continue;
+    const folded = strip(character).toLowerCase();
+    if (folded === 's' || folded === 'k') nonLetterSingle.push(character);
+    else if (folded.length > 1 && /[^\p{L}\p{N}]s$/u.test(folded)) multiCharacter.push(character);
+  }
+  return { nonLetterSingle, multiCharacter };
+}
+
 /** 22 characters of `[A-Za-z0-9_-]`, comfortably over the shape's 16. */
 const TAIL = '-Slovan-Bratislava-1919';
+
+describe('the shapes the letter enumeration cannot see are enumerated separately', () => {
+  /**
+   * The defect this block exists for: the sibling describe below is titled
+   * "exactly … and no wider", and its evidence is `lettersFoldingTo`, which can
+   * only ever return single `\p{L}` characters folding to one letter. Two whole
+   * shapes were therefore invisible to it while the title claimed completeness.
+   * They are enumerated and named here, and — the half that decides whether the
+   * disclosure was wrong or merely imprecise — each is shown to have been
+   * refused BEFORE the mark-strip existed, so none of them is a cost the fold
+   * added.
+   */
+  it('names every non-letter and multi-character fold that reaches the sk- shape', () => {
+    const { nonLetterSingle, multiCharacter } = reachesTheShapeOutsideTheLetterEnumeration();
+
+    // Exactly the three the plane holds, by name, so a future Unicode or fold
+    // change that adds a fourth fails here instead of passing invisibly.
+    expect(multiCharacter).toEqual(['℁', '㎧', '㎮']);
+    expect(multiCharacter.map((character) => strip(character))).toEqual(['a/s', 'm∕s', 'rad∕s']);
+    // And the eight non-letters, which the `\p{L}` filter also drops.
+    expect(nonLetterSingle).toEqual([
+      'Ⓚ',
+      'Ⓢ',
+      'ⓚ',
+      'ⓢ',
+      '\u{1CCE0}',
+      '\u{1CCE8}',
+      '\u{1F13A}',
+      '\u{1F142}',
+    ]);
+
+    // Every one of them really does reach a refusal — the multi-character ones
+    // need an ordinary `k` after them, because their fold ENDS in the s.
+    for (const character of multiCharacter) {
+      expect(refuses(`${character}k${TAIL}`), `${character} + k`).toBe(true);
+    }
+    for (const character of nonLetterSingle) {
+      const folded = strip(character).toLowerCase();
+      const probe = folded === 's' ? `${character}K${TAIL}` : `S${character}${TAIL}`;
+      expect(refuses(probe), character).toBe(true);
+    }
+  });
+
+  it('shows none of them is a cost the mark-strip added, by running the pipeline without it', () => {
+    // The pre-round-seven pipeline is this one minus the `NFKD` strip. If a
+    // string already folded to the shape under `NFKC` alone, the strip did not
+    // newly refuse it, and it is not in the class the disclosure describes.
+    const { nonLetterSingle, multiCharacter } = reachesTheShapeOutsideTheLetterEnumeration();
+    const beforeTheStrip = (value: string): boolean => /(^|[^A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/i.test(
+      value.normalize('NFKC'),
+    );
+    for (const character of multiCharacter) {
+      expect(beforeTheStrip(`${character}k${TAIL}`), `${character} was already refused`).toBe(true);
+    }
+    for (const character of nonLetterSingle) {
+      const folded = strip(character).toLowerCase();
+      const probe = folded === 's' ? `${character}K${TAIL}` : `S${character}${TAIL}`;
+      expect(beforeTheStrip(probe), `${character} was already refused`).toBe(true);
+    }
+    // The control: the string the fold really DID newly refuse does NOT fold to
+    // the shape without the strip, which is what makes it the class.
+    expect(beforeTheStrip('ŠK-Slovan-Bratislava-1919')).toBe(false);
+    expect(refuses('ŠK-Slovan-Bratislava-1919')).toBe(true);
+  });
+
+  it('no longer claims the single-letter enumeration is the whole class', () => {
+    const source = fs.readFileSync(REDACTION_SOURCE, 'utf8');
+    expect(source).not.toMatch(/Nothing else in the class exists/);
+    // And the shapes it was blind to are named where the class is stated.
+    expect(source).toContain('℁');
+    expect(source).toContain('㎮');
+  });
+});
 
 describe('the mark-strip’s new refusal class is exactly the s-then-k prefix, and no wider', () => {
   it('refuses every non-ASCII spelling of the two-letter head, and the ASCII head already was', () => {

@@ -370,3 +370,185 @@ describe('a commitment is not capped by a number the attacker can write', () => 
     }
   });
 });
+
+/**
+ * Wave 5, correction round twelve, HIGH 1 — the guard above was bypassed by a
+ * DUPLICATE JSON KEY, at one statement.
+ *
+ * `json_extract(x, '$.k')` returns the FIRST value a duplicated key carries;
+ * `json_each(x)` yields every one of them. The guard bounded a commitment with
+ * `json_extract` and `committedGreatest` read it back with `json_each` + `MAX`,
+ * so a single `INSERT` whose `ledger_marks` named the same ledger twice — the
+ * legal value first, the forged value second — was bounded by the legal one and
+ * believed at the forged one. Executed against `48dd026` on a file built by this
+ * package's own fixture: the plain over-claim was REFUSED and
+ * `{"op_evidence":4,"op_evidence":999}` was ACCEPTED, after which
+ * `regressedImmutableLedgers` reported `["op_evidence"]` and the file latched
+ * `append_only_guard_missing` with `safeMode: true`, permanently, about a log
+ * nothing had touched.
+ *
+ * That is the round-seven defect re-opened by a second route, and the direction
+ * matters: it FABRICATES a finding. The module forbids that in the alarm
+ * direction exactly as in the reassurance direction, so this file pins the
+ * refusal rather than the survivability of the alarm.
+ */
+describe('a commitment whose JSON does not have one value per key is refused', () => {
+  /**
+   * Append one checkpoint with the two JSON columns written as RAW TEXT.
+   *
+   * `append` above builds them with `JSON.stringify`, which cannot express a
+   * duplicated key — so the attack is unreachable through it, and reaching the
+   * attack is the whole point of this block.
+   */
+  function appendRawJson(raw: HqDatabase, marks: string, rows: string, chainLength = 0): void {
+    raw
+      .prepare(
+        `INSERT INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE}
+           (id, recorded_at, chain_length, tip_hash, ledger_marks, ledger_rows, process_id, recorded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        `forged-${Math.random().toString(36).slice(2)}`,
+        new Date().toISOString(),
+        chainLength,
+        '',
+        marks,
+        rows,
+        'attacker',
+        'attacker',
+      );
+  }
+
+  /** Whether the ledger accepted the row, and the refusal message when it did not. */
+  function attempt(raw: HqDatabase, marks: string, rows: string): { accepted: boolean; message: string } {
+    try {
+      appendRawJson(raw, marks, rows);
+      return { accepted: true, message: '' };
+    } catch (error) {
+      return { accepted: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  it('refuses the duplicate-key over-claim on ledger_marks, which one INSERT used to land', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      const raw = fx.raw();
+      const genuine = Number(JSON.parse(newest(raw).ledger_marks).op_evidence);
+      expect(genuine).toBeGreaterThan(0);
+
+      // The CONTROL: the plain over-claim the round-seven guard already refused,
+      // so this test cannot pass because the ledger refuses everything.
+      const plain = attempt(raw, JSON.stringify({ op_evidence: 999 }), '{}');
+      expect(plain.accepted, 'the plain over-claim must stay refused').toBe(false);
+
+      // The ATTACK, at one statement: legal value first, forged value second.
+      const duplicated = attempt(raw, `{"op_evidence":${genuine},"op_evidence":999}`, '{}');
+      expect(duplicated.accepted, 'a duplicated key must not carry an over-claim past the guard').toBe(
+        false,
+      );
+      expect(duplicated.message).toMatch(/may not commit beyond the record/);
+      raw.close();
+
+      // And the fabricated finding it used to manufacture is simply absent.
+      expect(regressedImmutableLedgers(fx.raw())).toEqual([]);
+      expectNoFinding(fx, ['after-refused-duplicate-marks']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('refuses the same shape on ledger_rows, which was the second landed route', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      const raw = fx.raw();
+      const genuine = Number(JSON.parse(newest(raw).ledger_rows).op_evidence);
+      expect(genuine).toBeGreaterThan(0);
+      const duplicated = attempt(raw, '{}', `{"op_evidence":${genuine},"op_evidence":999}`);
+      expect(duplicated.accepted, 'the row-count half must refuse it too').toBe(false);
+      raw.close();
+      expect(regressedImmutableLedgers(fx.raw())).toEqual([]);
+      expectNoFinding(fx, ['after-refused-duplicate-rows']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('refuses a duplicated key even when both values are legal, because the parses may not differ', () => {
+    // The refusal is of the AMBIGUITY, not of the over-claim: a value the two
+    // spellings could read differently never lands, so no reader has to be
+    // trusted to have picked the same one.
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      const raw = fx.raw();
+      const genuine = Number(JSON.parse(newest(raw).ledger_marks).op_evidence);
+      expect(attempt(raw, `{"op_evidence":${genuine},"op_evidence":${genuine}}`, '{}').accepted).toBe(
+        false,
+      );
+      // A JSON SCALAR is the same ambiguity in the other direction: `json_each`
+      // yields one row with a NULL key, so its cardinality exceeds its distinct
+      // key count too.
+      expect(attempt(raw, 'null', '{}').accepted).toBe(false);
+      raw.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('still accepts every commitment HQ itself writes, and keeps recording new ones', () => {
+    // The half that must never move: a refusal that also refused HQ's own
+    // checkpoints would stop the commitment ledger advancing at all, which is a
+    // worse outcome than the attack it closes.
+    const fx = fileFixture();
+    try {
+      const before = (
+        fx.db.prepare(`SELECT COUNT(*) AS n FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`).get() as { n: number }
+      ).n;
+      warm(fx);
+      const after = (
+        fx.db.prepare(`SELECT COUNT(*) AS n FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`).get() as { n: number }
+      ).n;
+      expect(after, 'HQ must still be able to commit').toBeGreaterThan(before);
+      fx.db.close();
+
+      // An empty commitment and an ordinary one are both still writable by a raw
+      // writer, so the clause refuses the ambiguous shape and nothing wider.
+      const raw = fx.raw();
+      expect(attempt(raw, '{}', '{}').accepted).toBe(true);
+      raw.close();
+      expectNoFinding(fx, ['after-legitimate-commitments']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('leaves the three-statement price as the cheapest path, by executing it', () => {
+    // Without this the block above would pass on a ledger that had simply
+    // stopped accepting forgeries by some unrelated means. The disclosed price
+    // is three statements, and three statements still reach.
+    const fx = fileFixture();
+    try {
+      warm(fx);
+      fx.db.close();
+      const raw = fx.raw();
+      const last = newest(raw);
+      const guard = (
+        raw
+          .prepare(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name = ?`)
+          .get(OVERCLAIM_GUARD) as { sql: string }
+      ).sql;
+      raw.exec(`DROP TRIGGER ${OVERCLAIM_GUARD}`);
+      appendRawJson(raw, JSON.stringify({ op_evidence: 999 }), '{}', last.chain_length);
+      raw.exec(guard);
+      expect(regressedImmutableLedgers(raw)).toContain('op_evidence');
+      raw.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+});

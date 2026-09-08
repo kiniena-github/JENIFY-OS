@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { CAPS, expectOk } from './application.fixture.js';
@@ -21,6 +22,7 @@ import {
   schemaEnsuredMarkBeforeMigration,
 } from '../src/store/db.js';
 import {
+  BACKUP_REFUSAL_REASONS,
   ENGINE_IMMUTABLE_TABLES,
   HQ_DURABILITY_REQUIREMENT,
   HQ_INTEGRITY_CHECKPOINT_TABLE,
@@ -2041,6 +2043,119 @@ describe('the two nearly-true facts about a file HQ has been in', () => {
       second.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Wave 5, correction round twelve — Low 3: the page's own count of the backup
+ * guard's refusals was short, and its count of the exercised ones was short of
+ * that.
+ *
+ * The paragraph said thirteen and omitted `file_has_multiple_links` and
+ * `candidate_is_the_live_database` from the list it wrote out — both added by
+ * this wave, neither picked up by the prose. Nothing compared either number to
+ * anything, which is the same reason the cost clause went wrong three times.
+ * Both are compared here, against `BACKUP_REFUSAL_REASONS` itself rather than
+ * against a figure typed into this file: the constant reached SEVENTEEN at the
+ * merge with the concurrent round-eleven lane, which added
+ * `candidate_census_unavailable`, and this test caught the drift with no edit —
+ * which is exactly what it was written to do.
+ */
+const HERE_FOR_PHASE_13 = path.dirname(fileURLToPath(import.meta.url));
+
+/**
+ * Test files whose job is to COUNT refusals rather than to induce them.
+ *
+ * The docblock below explains why comments are stripped: a reason written
+ * ABOUT is not a reason exercised. The merge of the two correction lanes turned
+ * up the same hazard one level in, in code rather than in prose. The other
+ * lane's `backup-refusal-vocabulary.test.ts` asserts the identity of the
+ * UNEXERCISED set, which it can only do by writing those three names out as
+ * quoted literals — and a sweep that counted them reported all seventeen as
+ * exercised, including `file_too_large`, which would need a two-gigabyte file
+ * that no test in this package writes. Excluding the censuses keeps both lanes'
+ * sweeps measuring the one real property, and both lanes' assertions pass
+ * against it.
+ */
+const REFUSAL_CENSUS_FILES: readonly string[] = Object.freeze([
+  'backup-refusal-vocabulary.test.ts',
+]);
+
+describe('the page’s count of the backup guard’s refusals is the constant’s count', () => {
+  const PHASE_13_PAGE = path.join(
+    HERE_FOR_PHASE_13,
+    '..',
+    '..',
+    '..',
+    'docs',
+    'HEADQUARTER',
+    'PHASE_13_ADVANCED_RELIABILITY.md',
+  );
+
+  const NUMBER_WORDS: Record<string, number> = {
+    ten: 10,
+    eleven: 11,
+    twelve: 12,
+    thirteen: 13,
+    fourteen: 14,
+    fifteen: 15,
+    sixteen: 16,
+    seventeen: 17,
+  };
+
+  /**
+   * Which reasons any test in this package actually induces.
+   *
+   * Comments are stripped first, and it matters: this file's own docblock names
+   * two reasons in backticks, and a sweep that counted those would report a
+   * reason as exercised because somebody wrote about it. Only a quoted string
+   * in code counts — which is how a test names the refusal it expects.
+   */
+  function exercised(): string[] {
+    const dir = HERE_FOR_PHASE_13;
+    const found = new Set<string>();
+    for (const entry of fs.readdirSync(dir)) {
+      if (!entry.endsWith('.test.ts')) continue;
+      // See `REFUSAL_CENSUS_FILES`: a file that names a reason in order to
+      // assert about it has not exercised it.
+      if (REFUSAL_CENSUS_FILES.includes(entry)) continue;
+      const text = fs
+        .readFileSync(path.join(dir, entry), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+      for (const reason of BACKUP_REFUSAL_REASONS) {
+        if (new RegExp(`['"]${reason}['"]`).test(text)) found.add(reason);
+      }
+    }
+    return [...found].sort();
+  }
+
+  it('states the number of refusals the constant holds, and names every one', () => {
+    const page = fs.readFileSync(PHASE_13_PAGE, 'utf8');
+    const match = /(\w+) categorical\s*\n?refusals, never an exception/.exec(page);
+    expect(match, 'the page must state how many categorical refusals there are').toBeTruthy();
+    expect(NUMBER_WORDS[match![1]!.toLowerCase()]).toBe(BACKUP_REFUSAL_REASONS.length);
+    // The count alone was right about a list nobody could see, so the list is
+    // checked too — that is how two reasons went unnamed for a whole wave.
+    for (const reason of BACKUP_REFUSAL_REASONS) {
+      expect(page, `the page must name the refusal ${reason}`).toContain(`\`${reason}\``);
+    }
+  });
+
+  it('states how many are exercised, and names the ones that are not', () => {
+    const page = fs.readFileSync(PHASE_13_PAGE, 'utf8');
+    const match = /(\w+) of the \w+ are exercised/.exec(page);
+    expect(match, 'the page must state how many refusals are exercised').toBeTruthy();
+
+    const driven = exercised();
+    const notDriven = BACKUP_REFUSAL_REASONS.filter((reason) => !driven.includes(reason));
+    expect(NUMBER_WORDS[match![1]!.toLowerCase()]).toBe(driven.length);
+    // And each unexercised one has to be admitted by name, with its reason —
+    // a count that quietly absorbs a newly-unexercised reason is the failure.
+    for (const reason of notDriven) {
+      expect(page, `the page must say ${reason} is not exercised`).toContain(`\`${reason}\``);
+      expect(page).toMatch(new RegExp(`${reason}[\\s\\S]{0,400}?NOT exercised|NOT exercised[\\s\\S]{0,400}?${reason}|${reason}[\\s\\S]{0,400}?not exercised`));
     }
   });
 });

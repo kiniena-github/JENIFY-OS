@@ -74,10 +74,22 @@ describe('every exported closed vocabulary in src/ is frozen, by enumeration ove
     }
     expect(unfrozen).toEqual([]);
     // Floors, so a narrowing of the enumeration is visible rather than quietly
-    // passing over an empty set. 131 modules and 225 distinct bindings at this
-    // head; the entry-point scan reaches 202 of them.
+    // passing over an empty set. New exported vocabulary is ordinary; the thing
+    // worth failing on is the enumeration SHRINKING.
+    //
+    // The two numbers below ARE the measurement at this head, and they are
+    // stated nowhere else — not restated in this comment, and not carried in
+    // prose beside the assertion (round eleven, Low 1). What used to sit here
+    // said "225 distinct bindings at this head" while this very code measured
+    // 226, and added "the entry-point scan reaches 202 of them", which nothing
+    // asserted anywhere: 202 was a round-six measurement of a BARREL-based
+    // scan that `reliability-verdict-durability.test.ts` has since replaced
+    // with a path-based enumeration of `src/`, so it had stopped describing
+    // anything at all. An unasserted number in a comment is exactly how the
+    // wave's cost clause drifted three times, and the fix is the same one:
+    // keep the number where a test reads it, or do not ship it.
     expect(files).toBeGreaterThanOrEqual(131);
-    expect(seen.size).toBeGreaterThanOrEqual(225);
+    expect(seen.size).toBeGreaterThanOrEqual(226);
   });
 
   it('freezes the gate the entry-point scan could not see', async () => {
@@ -394,5 +406,80 @@ describe('a frozen collection is immutable through the PROTOTYPE too, not only t
     expect(refused.ok).toBe(false);
     if (refused.ok) throw new Error('unreachable');
     expect(refused.error.code).toBe('task_beyond_claiming');
+  });
+});
+
+/**
+ * Wave 5, correction round twelve — Low 5: two holes in `deepFreeze` itself,
+ * neither reachable from this package today and both closed rather than
+ * disclosed, because "no current call site reaches it" is exactly the reasoning
+ * the census above exists to stop anybody depending on.
+ *
+ *  1. **A collection at a SEALED property kept its RAW reference.** The repoint
+ *     that swaps a nested `Set` for its view was skipped when the property was
+ *     neither configurable nor writable, so the frozen object went on holding
+ *     the real collection — and `Set.prototype.add.call(raw, …)` mutated it,
+ *     the exact escape the view exists to close. Executed before the fix: the
+ *     property still pointed at the raw `Set`, `view.add()` was refused by the
+ *     own stub, and the prototype spelling put a second entry in. The census
+ *     could not have caught it, because it walks EXPORTED constants and this is
+ *     a shape one of them could hold.
+ *  2. **`deepFreeze` was not idempotent.** A second pass over anything holding
+ *     a view hit the view's own `defineProperty` trap and threw. A helper called
+ *     at module load on constants other modules re-export has to survive being
+ *     called twice.
+ */
+describe('deepFreeze holds against the two shapes the census cannot see', () => {
+  it('refuses outright when a collection sits at a property it cannot repoint', async () => {
+    const { deepFreeze } = await import('../src/contracts/freeze.js');
+    // A fresh structure per attempt: `deepFreeze` walks and seals as it goes, so
+    // a structure it has already refused is half-frozen and would fail the
+    // second time for a different reason. That partial state never reaches a
+    // caller — the refusal happens at module load, so the module does not load.
+    const sealedHost = (): { host: Record<string, unknown>; raw: Set<string> } => {
+      const raw = new Set(['a']);
+      const host: Record<string, unknown> = {};
+      Object.defineProperty(host, 'collection', {
+        value: raw,
+        writable: false,
+        configurable: false,
+        enumerable: true,
+      });
+      return { host, raw };
+    };
+
+    // It may not return a structure whose property still points at the raw set.
+    expect(() => deepFreeze(sealedHost().host)).toThrow(TypeError);
+    expect(() => deepFreeze(sealedHost().host)).toThrow(/sealed/);
+
+    // And the reason it must refuse, executed on the raw collection directly:
+    // the prototype spelling reaches the internal slot whatever own stubs are
+    // installed, so a raw reference left in place is a live mutation path.
+    const { host, raw } = sealedHost();
+    expect(() => deepFreeze(host)).toThrow();
+    Set.prototype.add.call(raw, 'proof');
+    expect(raw.has('proof')).toBe(true);
+  });
+
+  it('is idempotent over a structure containing a frozen collection', async () => {
+    const { deepFreeze } = await import('../src/contracts/freeze.js');
+    const once = deepFreeze({ vocabulary: new Set(['x']) }) as { vocabulary: Set<string> };
+    expect(once.vocabulary.has('x')).toBe(true);
+
+    // The second pass used to throw `Cannot define add on a frozen Set`.
+    const twice = deepFreeze(once) as { vocabulary: Set<string> };
+    expect(twice).toBe(once);
+    expect(twice.vocabulary).toBe(once.vocabulary);
+    expect(twice.vocabulary.has('x')).toBe(true);
+    expect(twice.vocabulary.size).toBe(1);
+
+    // A bare view, re-frozen on its own, is the same case.
+    const view = deepFreeze(new Set(['y'])) as Set<string>;
+    expect(deepFreeze(view)).toBe(view);
+    expect(view.size).toBe(1);
+
+    // And re-freezing did not quietly re-open it.
+    expect(() => Set.prototype.add.call(view, 'bad')).toThrow(TypeError);
+    expect(view.size).toBe(1);
   });
 });

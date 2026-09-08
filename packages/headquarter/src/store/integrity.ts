@@ -36,14 +36,16 @@
  * 3. **Cost is stated, not hidden, and it went UP.** `structuralIntegrity` is
  *    the cheap half — the `sqlite_master` reads, four pragmas, one `COUNT(*)`
  *    and one `MAX(rowid)` over EACH of the 33 declared ledgers, one further
- *    `MAX(rowid)` seek for each ledger HQ has committed a mark for, and five
+ *    `MAX(rowid)` seek for each declared ledger the engine carries a positive
+ *    `sqlite_sequence` row for, and five
  *    reads of HQ's own commitment ledger: a `COUNT(*)` served by a covering
  *    index, one indexed lookup joined to `op_evidence` by rowid, and three full
  *    SCANs of that ledger which expand every row's marks through `json_each`
  *    and group them in a temporary B-tree.
  *
- *    **This clause has been wrong twice in one wave, in the same direction, and
- *    both corrections are recorded rather than the latest one written as if it
+ *    **This clause has been wrong three times in one wave, in the same
+ *    direction, and every correction is recorded rather than the latest one
+ *    written as if it
  *    had always been there.** It first said "one `MAX(rowid)` seek per declared
  *    ledger … one `COUNT(*)` plus one indexed lookup", which round ten (Low 1)
  *    disproved in three ways by counting the statements a pass executes and
@@ -55,10 +57,63 @@
  *    MERGED one, because the concurrent round-seven lane was closing High 2 in
  *    the same wave: reading each declared ledger's row COUNT is what sees a row
  *    removed from the MIDDLE, and a `COUNT(*)` IS proportional to the rows a
- *    ledger holds where a seek is not. RE-MEASURED at the merged head, the same
- *    way: 46 statements per pass and 0.871 ms averaged over 50, on a real file
- *    carrying commitments. Pinned in `integrity-statement-truth.test.ts` rather
- *    than estimated. `fullIntegrity` adds `integrity_check`,
+ *    ledger holds where a seek is not.
+ *
+ *    **And a THIRD time, in the same direction, inside the very sentence
+ *    written to stop the recurrence.** Two concurrent lanes off the same base
+ *    found it independently — round eleven's Medium 1 and round twelve's
+ *    Medium 1 — and this paragraph is the merge of both, because each saw a
+ *    different half of it. "46 statements per pass and 0.871 ms averaged over
+ *    50 … Pinned in `integrity-statement-truth.test.ts` rather than estimated"
+ *    was false in BOTH halves: the pass executes 48 statements on the fixture
+ *    that figure was taken from, and nothing pinned either number. That file
+ *    pinned the SHAPES of the reads rigorously and neither of the figures
+ *    beside them, which is exactly how a re-measured constant drifted a third
+ *    time while its own test kept passing.
+ *
+ *    The correction is not a better constant, because a bare total cannot stay
+ *    right: two of its three terms are CENSUSES rather than constants. The pass
+ *    is one identity read per DECLARED ledger, one further standalone
+ *    `MAX(rowid)` seek, and eleven catalogue, pragma and commitment-ledger
+ *    reads that do not move. Over the 33 ledgers this build declares, the two
+ *    terms that do NOT move with the store's history are 33 + 11 = 44
+ *    statements.
+ *
+ *    **The seek term is NOT "one per ledger HQ has committed a mark for", which
+ *    is what the first attempt at this correction wrote and what the sentence
+ *    below said for three rounds.** `truncatedImmutableLedgers` takes that seek
+ *    while walking `sqlite_sequence`, so it reaches every declared ledger the
+ *    engine carries a positive `sqlite_sequence` row for — on the fixture's own
+ *    warmed file that is FOUR ledgers where HQ has committed marks for THREE,
+ *    it can reach a ledger HQ has committed nothing about, and it omits the
+ *    declared ledgers that are not AUTOINCREMENT however much HQ has committed
+ *    about them. The two sets coincide in SIZE on that fixture and in nothing
+ *    else, which is why a count-only assertion would have passed on the wrong
+ *    rule.
+ *
+ *    So no total is written here as though it were the cost of a pass: the cost
+ *    is `STRUCTURAL_STATEMENT_BASE` plus one seek per declared ledger with a
+ *    positive `sqlite_sequence` row — on the warmed fixture 44 + 4 = 48
+ *    statements, and on a file HQ has merely booted twice 44 + 2 = 46
+ *    statements, which is the whole reason a single total is the wrong thing to
+ *    ship. That base is a pinned constant the
+ *    Founder-facing sentence interpolates, and
+ *    `integrity-statement-truth.test.ts` asserts the RULE against instrumented
+ *    counts on TWO files whose seek terms differ, decomposes one real pass into
+ *    its three terms, compares the seeked set to the `sqlite_sequence` set it
+ *    really comes from and shows it DIFFERENT from the committed set, and
+ *    parses every number in the served sentence and in THIS paragraph back out
+ *    and compares it to the measurement — instead of asserting a number against
+ *    nothing, which is how the first two went unnoticed.
+ *
+ *    **No time is quoted, here or in the served sentence.** The retired figure
+ *    was 0.871 ms; the same measurement re-run gives 0.830 ms on one machine
+ *    and the review that found the error measured 1.023 ms on another. A
+ *    duration that moves with the machine is not a property of the code and no
+ *    test can pin one, so it is not shipped as though it were — not even as
+ *    "under a millisecond", which the other lane's correction still carried and
+ *    which a test now forbids along with every other timing shape.
+ *    `fullIntegrity` adds `integrity_check`,
  *    `foreign_key_check` and a whole-log evidence-chain verification, which
  *    are O(database) and O(log), and it is therefore an explicit act. Which
  *    one produced a verdict is carried ON the verdict, so nobody can mistake a
@@ -706,18 +761,70 @@ export const SAFE_MODE_STATEMENT =
  * failing a test, which is the only reason it is safe to state it this
  * precisely.
  */
+/**
+ * The FIXED part of a structural pass's statement count — everything that does
+ * not depend on how many ledgers the engine carries a `sqlite_sequence` row for.
+ *
+ * **What it is made of, as a sum rather than as a figure.** It is the 33
+ * identity reads over the declared ledgers plus the 11 catalogue, pragma and
+ * commitment-ledger reads that do not move: 33 + 11 = 44 statements. Both terms
+ * are measured off one real pass and compared to this constant.
+ *
+ * **Why a constant here rather than a number in the sentence.** The cost clause
+ * has now shipped a wrong total three times in one wave, always understating,
+ * and each time the number was true of the file it was measured on and of no
+ * other. A pass costs this base plus one standalone `MAX(rowid)` seek for each
+ * declared ledger with a positive `sqlite_sequence` row, and that second term
+ * moves with the store's own history. Measured the same way on two files that
+ * differ in exactly that term: a file HQ has booted twice carries 2 such
+ * ledgers and executes 46 statements; one carrying a run attempt carries 4 and
+ * executes 48 statements.
+ *
+ * **It is the cost on a file HQ HAS COMMITTED ON, which is the only file the
+ * expensive half runs over at all.** With no checkpoint there is nothing to
+ * compare a ledger's identity against, so `regressedImmutableLedgers` returns
+ * before it reads any of the 33 — measured at 11 statements and ZERO identity
+ * reads on a freshly established file. Quoting the committed-on figure as if it
+ * were the cost of every pass would overstate the unestablished case by four
+ * times, so both branches are stated rather than the convenient one.
+ *
+ * `integrity-statement-truth.test.ts` asserts the RULE — the executed statement
+ * count equals this base plus the measured seek count, on both committed-on
+ * files, and the 33 identity reads are absent before the first commitment — and
+ * it PARSES every number above back out of this docblock and compares it to
+ * that measurement, so neither the base nor any figure beside it can drift
+ * without failing a test, and the Founder-facing sentence interpolates the
+ * constant rather than restating it. The three previous corrections were all
+ * possible because the pin never compared a number to anything.
+ */
+export const STRUCTURAL_STATEMENT_BASE = 44;
+
 export const INTEGRITY_DEPTH_STATEMENT =
   'A structural assessment reads the schema catalogue, the durability pragmas, and the marks HQ ' +
   'keeps about its own append-only records — one COUNT(*) and one MAX(rowid) over each declared ledger, ' +
-  'one further MAX(rowid) seek for each ledger HQ has committed a mark for, and five reads of HQ’s own ' +
+  'one further MAX(rowid) seek for each declared ledger the engine carries a positive sqlite_sequence ' +
+  'row for, and five reads of HQ’s own ' +
   'commitment ledger: a COUNT(*) served by a covering index, one indexed lookup joined to the evidence ' +
   'log by rowid, and three full SCANs of that ledger which expand every row’s marks through json_each ' +
-  'and group them in a temporary B-tree. Counting a ledger’s rows IS proportional to the rows it holds, ' +
+  'and group them in a temporary B-tree. That seek set is NOT the set of ledgers HQ has committed a ' +
+  'mark for, which is what this sentence said until it was measured: it is taken while walking ' +
+  'sqlite_sequence, so it can reach a ledger HQ has committed nothing about, and it omits the five ' +
+  'declared ledgers that are not AUTOINCREMENT however much HQ has committed about them. ' +
+  'Counting a ledger’s rows IS proportional to the rows it holds, ' +
   'unlike the seek beside it, and that cost is paid deliberately: a seek cannot see a row removed from ' +
   'the MIDDLE of a ledger and a count can. The commitment ledger it scans is HQ’s own and is not fixed ' +
   'in size — it grows a row per clean boot and per clean assessment, so that term grows with HQ’s own ' +
-  'history. Measured on a real file, the whole pass is 46 statements and under a millisecond, which is ' +
-  'what keeps it affordable at every construction. It is ' +
+  'history. The whole pass is therefore not a fixed number of statements, and no total is quoted here: ' +
+  'it is one identity read per declared ledger, one further seek per declared ledger the engine carries ' +
+  'a positive sqlite_sequence row for, and 11 catalogue, pragma and commitment-ledger reads that do not ' +
+  'move. Over the 33 ledgers this build declares, that is ' +
+  `${STRUCTURAL_STATEMENT_BASE} statements plus one for each of those seeks — stated as the rule ` +
+  'rather than as one file’s total, because the seek term is not a constant and a total measured on ' +
+  'one file has now been shipped wrong three times. It moves with HQ’s own census and not with the rows ' +
+  'those ledgers hold, which is what keeps it affordable at every construction. Before the first ' +
+  'commitment there is nothing to compare a ledger against, so the per-ledger identity reads do not run ' +
+  'at all and the pass is about a quarter of that. No duration is quoted, because a time measured on ' +
+  'one machine is not a property of the code and no test can pin one. It is ' +
   'therefore not a ' +
   'catalogue read alone: a declared ledger that has been emptied, and an evidence log that contradicts a ' +
   'commitment HQ recorded outside it, are both found and both blocking at this depth. A full assessment ' +
@@ -1365,6 +1472,76 @@ BEGIN SELECT RAISE(ABORT, 'hq_integrity_checkpoints is append-only'); END;
 /** The one guard whose text is built from the schema rather than written out. */
 const OVERCLAIM_GUARD = 'trg_hq_integrity_checkpoints_no_overclaim';
 
+/** The two commitment columns, in the one place both the guard and the readers take them from. */
+const COMMITMENT_JSON_COLUMNS: readonly ['ledger_marks', 'ledger_rows'] = Object.freeze([
+  'ledger_marks',
+  'ledger_rows',
+] as const);
+
+/**
+ * Refuse a commitment whose JSON does not have ONE value per key — the clause
+ * that makes the guard and its readers read the same number (Wave 5 correction
+ * round twelve, High 1).
+ *
+ * **The defect.** `json_extract(x, '$.k')` returns the FIRST value for a
+ * duplicated key; `json_each(x)` yields EVERY one of them. The guard bounded a
+ * commitment with `json_extract` and `committedGreatest` read it back with
+ * `json_each` + `MAX`, so one `INSERT` carrying the same key twice — the legal
+ * value first, the forged value second — was bounded by the legal one and read
+ * as the forged one. No trigger had to be dropped. Executed against `48dd026` on
+ * a real file built by this package's own fixture: `{"op_evidence":4}` alone is
+ * refused as an over-claim at 999, `{"op_evidence":4,"op_evidence":999}` is
+ * ACCEPTED, and the file then reports `regressedImmutableLedgers
+ * ["op_evidence"]` and `append_only_guard_missing` with `safeMode: true`, at
+ * every depth and every process afterwards, of a log nothing had touched. That
+ * is fail-closed in DIRECTION and fabricated in SUBSTANCE, which the same laws
+ * forbid in the alarm direction as in the reassurance one — and it re-opened by
+ * a different route the exact defect round seven closed.
+ *
+ * **Why this shape rather than teaching the guard to read `MAX` per table.**
+ * Reading the bound with `json_each` would make the guard agree with
+ * `committedGreatest` and leave a THIRD parse still disagreeing with both:
+ * `committedLedgerGaps` takes each key/value out of `ledger_rows` with
+ * `json_each` and looks the matching mark up in `ledger_marks` with
+ * `json_extract`, in one expression, so no single choice of parse can align it.
+ * Refusing the ambiguity instead makes all five readers agree by making the only
+ * input they can differ on unreachable through the guard, and it costs two
+ * subqueries per column rather than two per declared ledger — the clause list
+ * stays O(1) in the census's size rather than growing with it.
+ *
+ * **What it refuses, exactly.** A value whose `json_each` cardinality is not its
+ * distinct-key count. That is duplicate keys (`{"a":1,"a":2}` — 2 against 1) and
+ * a JSON scalar (`'null'`, `'5'` — 1 against 0, because `json_each` over a
+ * scalar yields one row with a NULL key). `'{}'` is 0 against 0 and an ordinary
+ * object is n against n, so no commitment HQ writes is affected: every one is
+ * `JSON.stringify` of a `Record<string, number>`. Malformed JSON is unchanged —
+ * `json_each` raises `malformed JSON` exactly as the `json_extract` clauses
+ * beside it already did, so such an `INSERT` was refused before this clause and
+ * is refused after it, for the same reason.
+ *
+ * **The residual, executed rather than reasoned about.** This is a `BEFORE
+ * INSERT` guard, so it bounds what LANDS and not what a file already holds. A
+ * duplicate-keyed row written by a raw writer at a build without this clause is
+ * still read at its greatest value: planted at `48dd026` and then opened by this
+ * build, `regressedImmutableLedgers ["op_evidence"]`, `append_only_guard_missing`
+ * and `safeMode: true` — the fabricated finding, surviving the fix. It is
+ * disclosed rather than closed by a read-time rule, on one argument: NO GENUINE
+ * FILE CAN CARRY SUCH A ROW. This ledger has exactly one writer
+ * (`recordIntegrityCheckpoint`), which writes both columns as `JSON.stringify`
+ * of a `Record<string, number>` and therefore cannot emit a duplicate key at
+ * all. Reaching the state needs a raw writer, and a raw writer already has the
+ * three-statement path to the same fabricated finding — so a read-time rule
+ * would buy nothing against an attacker while adding the fourth parse of these
+ * columns that this correction exists to avoid.
+ */
+const AMBIGUOUS_COMMITMENT_CLAUSES: readonly string[] = Object.freeze(
+  COMMITMENT_JSON_COLUMNS.map(
+    (column) =>
+      `(SELECT COUNT(*) FROM json_each(NEW.${column})) <> ` +
+      `(SELECT COUNT(DISTINCT key) FROM json_each(NEW.${column}))`,
+  ),
+);
+
 /**
  * The guard that refuses a commitment the file does not support AT THE MOMENT
  * IT IS WRITTEN (Wave 5 correction round seven, High 3).
@@ -1423,9 +1600,21 @@ const OVERCLAIM_GUARD = 'trg_hq_integrity_checkpoints_no_overclaim';
  * is never observed missing, because the as-found census reads `sqlite_master`
  * at construction time only. What is closed is the INVERSION: fabricating a
  * finding is no longer cheaper than everything else HQ defends against.
+ *
+ * **That price was FALSE for one commit and is true again** (Wave 5 correction
+ * round twelve, High 1). Between the round-seven guard and this round the
+ * cheapest path was ONE statement, not three: a single `INSERT` whose
+ * `ledger_marks` carried the same key twice slipped the bound without any
+ * trigger being touched. The sentence above was not softened to accommodate
+ * that — `AMBIGUOUS_COMMITMENT_CLAUSES` puts the one-statement path back out of
+ * reach, and the three-statement price is re-measured rather than re-asserted.
  */
 function overclaimGuardDdl(db: HqDatabase): string {
   const clauses = [
+    // FIRST, because every clause after it reads a commitment with
+    // `json_extract` and would otherwise be reading a different value than the
+    // readers do. See `AMBIGUOUS_COMMITMENT_CLAUSES`.
+    ...AMBIGUOUS_COMMITMENT_CLAUSES,
     `NEW.chain_length > COALESCE(CAST(json_extract(NEW.ledger_marks, '$.op_evidence') AS INTEGER), 0)`,
   ];
   for (const entry of ENGINE_IMMUTABLE_TABLES) {
@@ -1743,6 +1932,15 @@ function committedChainLength(db: HqDatabase): number {
  * where it is WRITTEN now (`overclaimGuardDdl`), so nothing this reader believes
  * had to be weakened to close the fabricated finding (Wave 5 correction round
  * seven, High 3).
+ *
+ * **`json_each` here and `json_extract` in the guard is what round twelve's
+ * High 1 was.** For a key carried TWICE the two disagree — the first value
+ * against the greatest — and the guard bounded the first while this read the
+ * greatest. It is not resolved by changing which one this reader uses: a value
+ * carrying a key twice is now refused where it is written
+ * (`AMBIGUOUS_COMMITMENT_CLAUSES`), so the two spellings cannot be handed an
+ * input they answer differently, and `committedLedgerGaps` — which uses BOTH in
+ * one expression — is covered by the same refusal rather than by a third rule.
  */
 function committedGreatest(db: HqDatabase, column: 'ledger_marks' | 'ledger_rows'): Map<string, number> {
   const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
@@ -1794,11 +1992,30 @@ function committedGreatest(db: HqDatabase, column: 'ledger_marks' | 'ledger_rows
  *
  * **A ledger whose rowids legitimately had a hole before HQ first committed on
  * it is therefore not a false alarm**: the hole is committed as the baseline and
- * only growth beyond it is reported. That the declared ledgers have no such hole
- * is not assumed — `ledger-rowid-contiguity.test.ts` drives every conflicting,
- * deduplicated and refused write path this package has on all 33 of them and
- * asserts that none burns a rowid, so a future path that does fails a test
- * instead of latching a permanent finding on a healthy store.
+ * only growth beyond it is reported.
+ *
+ * **That the declared ledgers have no such hole is not assumed, and the way it
+ * is established is stated at what it actually covers** (Wave 5 correction round
+ * twelve, Medium 2). This sentence used to cite
+ * `ledger-rowid-contiguity.test.ts` as "driving every conflicting, deduplicated
+ * and refused write path this package has on all 33 of them". That file had
+ * never existed on any commit, and no enumeration of paths could have carried
+ * the claim anyway: `ledger-identity.test.ts` drives a handful of them, and only
+ * about eight of the 33 ledgers hold any rows in its fixture, so 25 pass
+ * trivially. It is now covered in the two halves that do generalize:
+ *
+ *  - `ledger-rowid-contiguity.test.ts` establishes against the ENGINE which
+ *    behaviours burn a rowid — a UNIQUE violation, a `BEFORE INSERT` trigger
+ *    `ABORT` and a rolled-back `SAVEPOINT` all burn nothing, while
+ *    `INSERT … ON CONFLICT … DO UPDATE` DOES raise `sqlite_sequence` even when
+ *    it inserts no row — and then reads this package's whole `src/` tree to
+ *    assert that no upsert, no `INSERT OR REPLACE`/`OR IGNORE`/`REPLACE INTO`
+ *    and no `DELETE FROM` names any of the 33. That covers all of them, and a
+ *    future write path that would burn one fails a test whether or not anybody
+ *    thinks to drive it.
+ *  - `ledger-identity.test.ts` keeps the executed sampling: real refused,
+ *    deduplicated and rolled-back writes through the facade, with the gap
+ *    asserted empty afterwards and across `VACUUM` and a byte copy.
  */
 function committedLedgerGaps(db: HqDatabase): Record<string, number> {
   const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));

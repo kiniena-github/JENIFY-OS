@@ -1576,9 +1576,16 @@ are on the Phase 13 page.
   five, a `critical_review` decision under an exhausted ceiling was ACCEPTED,
   and `structuralIntegrity` and `fullIntegrity` both reported `safeMode: false`
   with no observation. The SAME one pass also empties the `spentUnder` half —
-  `UPDATE hq_intel_cost_entries SET mission_ids='[]', project_ids='[]'` under
-  its four lifted guards takes an exhausted ceiling's `observed` from 5000 to 0
-  for a task that HAS recorded spend of its own. This is not a new capability:
+  `UPDATE hq_intel_cost_entries SET mission_ids='[]', project_ids='[]', mission_id=NULL, project_id=NULL`
+  under its four lifted guards takes an exhausted ceiling's `observed` from 5000
+  to 0 for a task that HAS recorded spend of its own. **This statement named
+  only the two array columns until round twelve (Low 2), and as written it does
+  not reproduce**: `recordedScopeIds` reads the array column UNION the single
+  legacy column — the fail-closed reading — and `recordIntelligenceCost` writes
+  both, so clearing the arrays alone leaves the ceiling charged at 5000. Both
+  variants are executed in `intelligence-project-scope-residual.test.ts`: two
+  columns leave `observed` at 5000, four take it to 0. Nothing had executed that
+  `UPDATE` before it was disclosed. This is not a new capability:
   it is the class `PHASE_13_ADVANCED_RELIABILITY.md`'s residual list already
   carries for every guarded-but-unhashed ledger, it needs raw file access and
   DDL privileges, and both SUPPORTED routes — the `hq.mission_command`-only
