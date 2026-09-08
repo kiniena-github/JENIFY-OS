@@ -36,8 +36,10 @@ import { describe, expect, it } from 'vitest';
 import { fileFixture, type FileFixture } from './reliability.fixture.js';
 import type { HqDatabase } from '../src/store/db.js';
 import {
+  ENGINE_IMMUTABLE_TABLES,
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   SAFE_MODE_STATEMENT,
+  declaredGuardsFor,
   commitmentWitnessPresent,
   elidedCommitmentLedgerRows,
   regressedImmutableLedgers,
@@ -54,6 +56,24 @@ function warm(fx: FileFixture, times = 3): void {
   for (let i = 0; i < times; i += 1) {
     expect(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }).ok).toBe(true);
   }
+}
+
+/** Every guard the schema DECLARES on the commitment ledger, sorted. */
+function declaredCheckpointGuards(): string[] {
+  const entry = ENGINE_IMMUTABLE_TABLES.find((row) => row.table === HQ_INTEGRITY_CHECKPOINT_TABLE);
+  if (!entry) throw new Error('the commitment ledger is no longer a declared ledger');
+  return declaredGuardsFor(entry).sort();
+}
+
+/** Every trigger the FILE carries on one table, sorted. */
+function guardNamesOn(raw: HqDatabase, table: string): string[] {
+  return (
+    raw
+      .prepare(`SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name = ?`)
+      .all(table) as { name: string }[]
+  )
+    .map((row) => row.name)
+    .sort();
 }
 
 function rowCount(raw: HqDatabase, table: string): number {
@@ -146,13 +166,11 @@ describe('destroying HQ’s commitment ledger outright is blocking, not silent',
       // The two checks the attack was aimed at have nothing to say — which is
       // exactly why it worked — and the witness does.
       expect(regressedImmutableLedgers(raw)).toEqual([]);
-      expect(
-        (
-          raw
-            .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND tbl_name = ?`)
-            .get(HQ_INTEGRITY_CHECKPOINT_TABLE) as { n: number }
-        ).n,
-      ).toBe(3);
+      // DERIVED, not counted by hand (Wave 5 correction round seven, High 3).
+      // The point of the assertion is "every guard the schema declares on this
+      // ledger is back", and a literal `3` stopped being that number the moment
+      // `no_overclaim` was declared beside the trio.
+      expect(guardNamesOn(raw, HQ_INTEGRITY_CHECKPOINT_TABLE)).toEqual(declaredCheckpointGuards());
       expect(elidedCommitmentLedgerRows(raw)).toBe(true);
       raw.close();
 
@@ -223,19 +241,14 @@ describe('destroying HQ’s commitment ledger outright is blocking, not silent',
       fx.db.close();
 
       const raw = fx.raw();
-      for (const guard of [
-        'trg_hq_integrity_checkpoints_no_rewrite',
-        'trg_hq_integrity_checkpoints_no_erase',
-        'trg_hq_integrity_checkpoints_no_replace',
-      ]) {
+      // DERIVED from the schema's own declaration rather than hand-listed
+      // (Wave 5 correction round seven, High 3): the attack this test models is
+      // "take EVERY guard off this ledger", and a hand-written list of three
+      // silently modelled a weaker attack the day a fourth guard was declared.
+      for (const guard of declaredCheckpointGuards()) {
         raw.exec(`DROP TRIGGER IF EXISTS ${guard}`);
       }
-      const guardSql = (
-        raw
-          .prepare(`SELECT sql FROM sqlite_master WHERE type='trigger' AND tbl_name = ?`)
-          .all(HQ_INTEGRITY_CHECKPOINT_TABLE) as { sql: string }[]
-      ).map((row) => row.sql);
-      expect(guardSql).toEqual([]);
+      expect(guardNamesOn(raw, HQ_INTEGRITY_CHECKPOINT_TABLE)).toEqual([]);
       raw.exec(`DELETE FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`);
       raw.exec(`DELETE FROM sqlite_sequence WHERE name = '${HQ_INTEGRITY_CHECKPOINT_TABLE}'`);
       expect(elidedCommitmentLedgerRows(raw)).toBe(true);

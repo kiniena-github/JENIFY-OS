@@ -1909,9 +1909,18 @@ export interface CostEntryRow {
    * refused decision recorded (Wave 5 correction round six, High 3).
    *
    * HQ-derived, never caller-supplied, on an append-only row — so this is
-   * monotone and unforgeable in exactly the way the single columns were meant
-   * to be. On a row recorded before these columns existed the arrays are the
-   * single columns, which is what that row actually committed to.
+   * monotone against every supported route, in exactly the way the single
+   * columns were meant to be. On a row recorded before these columns existed
+   * the arrays are the single columns, which is what that row actually
+   * committed to.
+   *
+   * It is NOT "unforgeable", which is what this sentence said until round ten,
+   * Medium 1. Append-only here means four engine triggers and no hash chain, so
+   * a writer holding the file can drop them, rewrite these two arrays in place
+   * without changing the row count, and put them back — executed, taking an
+   * exhausted ceiling's observed spend from 5000 to 0 with both integrity
+   * depths clean. See `service.ts`'s `spentUnder` comment and Phase 14's
+   * NOT-fixed list for the executed cost.
    */
   missionIds: string[];
   projectIds: string[];

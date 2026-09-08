@@ -216,8 +216,10 @@ describe('rolling the commitment ledger back to a PREFIX of itself is blocking',
       expect(committed).toBe(before);
 
       const statements = replayPrefix(raw, HQ_INTEGRITY_CHECKPOINT_TABLE, 1);
-      // The whole act: one DROP, five DDL objects, one row put back.
-      expect(statements).toBe(7);
+      // The whole act: one DROP, six DDL objects — the table, its index and its
+      // four guards, the fourth being the concurrent lane's overclaim guard —
+      // and one row put back.
+      expect(statements).toBe(8);
 
       // The four checks the attack was aimed at have nothing to say — which is
       // exactly why it worked — and the header mark does.
@@ -277,12 +279,19 @@ describe('rolling the commitment ledger back to a PREFIX of itself is blocking',
 
       const raw = fx.raw();
       // The generalisation the reviewer measured: once the commitments are
-      // rolled back, rows can be taken out of anything. The commitment ledger
-      // is rolled back LAST, exactly as the attack does it, so no surviving
-      // commitment records what the other ledgers reached.
+      // rolled back, rows can be taken out of anything.
+      //
+      // The commitment ledger is rolled back FIRST here, and that ordering is
+      // itself a result. The concurrent round-ten lane's overclaim guard is a
+      // BEFORE INSERT on this ledger, so replaying a genuine checkpoint row
+      // AFTER the other ledgers have been shortened is refused — the row's own
+      // recorded marks no longer fit the file. Rolling the commitments back
+      // while the file is still intact costs the attacker nothing and walks
+      // round that guard entirely, which is exactly why the ledger needed a
+      // witness the replay cannot rebuild.
+      replayPrefix(raw, HQ_INTEGRITY_CHECKPOINT_TABLE, 1);
       replayPrefix(raw, 'hq_events', 1);
       replayPrefix(raw, 'op_evidence', 2);
-      replayPrefix(raw, HQ_INTEGRITY_CHECKPOINT_TABLE, 1);
       expect(elidedCommitmentLedgerRows(raw)).toBe(true);
       raw.close();
 

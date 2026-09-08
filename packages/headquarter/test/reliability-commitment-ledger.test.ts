@@ -48,6 +48,7 @@ import {
   SAFE_MODE_STATEMENT,
   committedCheckpointMark,
   elidedCommitmentLedgerRows,
+  declaredGuardsFor,
   immutableLedgerMarks,
   recordIntegrityCheckpoint,
   regressedImmutableLedgers,
@@ -56,11 +57,24 @@ import {
 /** The chain's zero value, spelled here only to BUILD the forgery. */
 const GENESIS = 'genesis';
 
-const CHECKPOINT_GUARDS = [
-  'trg_hq_integrity_checkpoints_no_rewrite',
-  'trg_hq_integrity_checkpoints_no_erase',
-  'trg_hq_integrity_checkpoints_no_replace',
-];
+/**
+ * Every guard the schema DECLARES on the commitment ledger, DERIVED rather than
+ * hand-listed (Wave 5 correction round seven, High 3).
+ *
+ * The forgery this file models takes the ledger's guards off, rewrites it and
+ * puts them back. A hand-written list of three silently modelled a WEAKER attack
+ * the day a fourth guard was declared beside the trio — the wipe left
+ * `no_overclaim` standing, so the re-creation collided with itself and the test
+ * failed for a reason that had nothing to do with what it asserts. Reading the
+ * declaration keeps the attack complete by construction.
+ */
+const CHECKPOINT_GUARDS = declaredCheckpointGuards();
+
+function declaredCheckpointGuards(): string[] {
+  const entry = ENGINE_IMMUTABLE_TABLES.find((row) => row.table === HQ_INTEGRITY_CHECKPOINT_TABLE);
+  if (!entry) throw new Error('the commitment ledger is no longer a declared ledger');
+  return declaredGuardsFor(entry);
+}
 
 function findings(observations: readonly { finding: string }[]): string[] {
   return observations.map((observation) => observation.finding);
@@ -152,6 +166,23 @@ function wipeCommitmentsInPlace(
   // variant has to do, since the mark it commits must not exceed what the file
   // will show afterwards.
   if (options.omitOwnMark) delete marks[HQ_INTEGRITY_CHECKPOINT_TABLE];
+  // The forged row commits the ROW COUNTS as well as the marks (Wave 5
+  // correction round seven, High 1 and High 2 added the column). Leaving the
+  // column at its `'{}'` default would model a WEAKER attacker than the one this
+  // file is about: HQ's next checkpoint would see every count advance, append
+  // immediately, and re-create the high-water mark a whole process earlier than
+  // the residual this test prices. An attacker composing the replacement row
+  // composes both columns.
+  const heldRows: Record<string, number> = {};
+  for (const table of Object.keys(marks)) {
+    try {
+      heldRows[table] = (
+        raw.prepare(`SELECT COUNT(*) AS n FROM "${table}"`).get() as { n: number }
+      ).n;
+    } catch {
+      // A table the forgery has already dropped commits no count.
+    }
+  }
   // The gutted-store variant drops `op_evidence` too, and an attacker with no
   // log to agree with simply commits to none.
   let tip: { seq: number; hash: string } | undefined;
@@ -167,8 +198,8 @@ function wipeCommitmentsInPlace(
     raw
       .prepare(
         `INSERT INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE}
-           (seq, id, recorded_at, chain_length, tip_hash, ledger_marks, process_id, recorded_by)
-         VALUES (1, ?, ?, ?, ?, ?, ?, ?)`,
+           (seq, id, recorded_at, chain_length, tip_hash, ledger_marks, ledger_rows, process_id, recorded_by)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         'checkpoint-forged',
@@ -176,6 +207,7 @@ function wipeCommitmentsInPlace(
         tip?.seq ?? 0,
         tip?.hash ?? '',
         JSON.stringify(marks),
+        JSON.stringify(heldRows),
         'attacker',
         'hq_boot',
       );
@@ -184,8 +216,8 @@ function wipeCommitmentsInPlace(
     raw
       .prepare(
         `INSERT INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE}
-           (id, recorded_at, chain_length, tip_hash, ledger_marks, process_id, recorded_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (id, recorded_at, chain_length, tip_hash, ledger_marks, ledger_rows, process_id, recorded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         'checkpoint-forged',
@@ -193,6 +225,7 @@ function wipeCommitmentsInPlace(
         tip?.seq ?? 0,
         tip?.hash ?? '',
         JSON.stringify(marks),
+        JSON.stringify(heldRows),
         'attacker',
         'hq_boot',
       );
@@ -217,13 +250,18 @@ describe('HQ’s own commitment ledger is checked against itself', () => {
       // are back, and the as-found census therefore has nothing to observe.
       expect(shape.rows).toBe(1);
       expect(shape.highWater).toBeGreaterThan(shape.rows);
+      // DERIVED, not hand-counted (Wave 5 correction round seven, High 3): what
+      // matters is that EVERY declared guard is back, which is what leaves the
+      // as-found census nothing to observe.
       expect(
         (
           raw
-            .prepare(`SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND tbl_name = ?`)
-            .get(HQ_INTEGRITY_CHECKPOINT_TABLE) as { n: number }
-        ).n,
-      ).toBe(3);
+            .prepare(`SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name = ?`)
+            .all(HQ_INTEGRITY_CHECKPOINT_TABLE) as { name: string }[]
+        )
+          .map((row) => row.name)
+          .sort(),
+      ).toEqual([...CHECKPOINT_GUARDS].sort());
       expect(elidedCommitmentLedgerRows(raw)).toBe(true);
       raw.close();
 
@@ -335,12 +373,30 @@ describe('HQ’s own commitment ledger is checked against itself', () => {
     }
   });
 
+  /**
+   * RE-PRICED twice, downwards both times, and measured rather than carried
+   * forward.
+   *
+   * This test used to be called "every process after the first", because the
+   * one-statement repair — delete the ledger's `sqlite_sequence` row instead of
+   * matching it — bought the forger exactly one clean process, including the
+   * Founder assessment it was aiming to pass.
+   *
+   * The concurrent round-ten lane took the ASSESSMENT away from it: HQ's
+   * committed mark used to be gated on the ledger having a `sqlite_sequence`
+   * row, so deleting that row meant HQ saw nothing to commit about its own
+   * commitment ledger and appended nothing during the assessment. The mark is
+   * now read from the ledger's own rows, so the first thing that assessment
+   * does is append a checkpoint, which re-creates the high-water mark from the
+   * rowid the forged row still carries, and the identity breaks inside the same
+   * process.
+   *
+   * This lane takes the BOOT away from it as well: the greatest rowid the
+   * ledger has ever reached is recorded in the database header, which no
+   * `sqlite_sequence` write can touch, so the very first boot after the wipe is
+   * already blocking. Nothing is bought at all now.
+   */
   it('no longer sells even one clean process for the cheaper one-statement repair', () => {
-    // The other half of the same closed residual. Removing the
-    // `sqlite_sequence` row rather than matching it used to buy the ONE
-    // process the forgery needed, and only HQ's own next commitment broke the
-    // identity again. The header mark is not in `sqlite_sequence`, so there is
-    // no clean process to buy any more — the first boot after the wipe blocks.
     const fx = fileFixture();
     try {
       warm(fx);
@@ -354,6 +410,9 @@ describe('HQ’s own commitment ledger is checked against itself', () => {
       expect(elidedCommitmentLedgerRows(raw)).toBe(true);
       raw.close();
 
+      // The boot the statement used to buy is blocking now, and so is the
+      // Founder assessment it was aiming to pass, and so is every process
+      // afterwards.
       for (const tag of ['the-process-it-used-to-buy', 'and-then-one', 'and-then-two']) {
         const process = fx.reopen(tag);
         expect(process.ops.hqReliabilityPosture().integrity.safeMode, tag).toBe(true);
@@ -390,8 +449,8 @@ describe('HQ’s own commitment ledger is checked against itself', () => {
       // the exact fabricated-finding failure the Low of this round corrects.
       const duplicate = raw.prepare(
         `INSERT INTO ${HQ_INTEGRITY_CHECKPOINT_TABLE}
-           (id, recorded_at, chain_length, tip_hash, ledger_marks, process_id, recorded_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (id, recorded_at, chain_length, tip_hash, ledger_marks, ledger_rows, process_id, recorded_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const existing = raw
         .prepare(`SELECT id FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE} ORDER BY seq LIMIT 1`)

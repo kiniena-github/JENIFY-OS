@@ -9201,8 +9201,20 @@ export class HeadquarterOperations {
           // `hq_mission_plan_items` is the one place HQ records that a task
           // belongs to a mission, so deriving membership from it here is the
           // canonical-truth answer rather than a second store that can drift
-          // from it. The stored columns stay as recorded attribution and
-          // measure nothing.
+          // from it.
+          //
+          // **The stored columns DO measure, and the sentence that used to sit
+          // here said they did not** (Wave 5 correction round seven, Low 5). It
+          // read "the stored columns stay as recorded attribution and measure
+          // nothing", and the round-four paragraph immediately below it — which
+          // adds `entry.missionIds` to this very predicate — has contradicted it
+          // ever since. What round three took away was the stored columns being
+          // the ONLY answer; what round four gave back was their being one of
+          // two, unioned, so that a link broken afterwards cannot take a
+          // recorded spend out of the ceiling that governed it. Corrected here
+          // rather than deleted, because a reader arriving at the union needs to
+          // know which round changed what.
+          //
           // CANONICAL membership UNION the attribution HQ itself recorded on
           // the entry (Wave 5 correction round four, High H2).
           //
@@ -9220,9 +9232,21 @@ export class HeadquarterOperations {
           // `mission_id` and `project_id` on this row are HQ-DERIVED, never
           // caller-supplied (`recordIntelligenceCost` writes them from
           // `#canonicalTaskScopes`), and the row is append-only. So the union
-          // is monotone and unforgeable: once HQ has filed a spend under a
-          // mission, no later relinking can take it out of that mission's
-          // measurement, and no caller can put it into another's.
+          // is monotone against every supported route: once HQ has filed a
+          // spend under a mission, no later relinking can take it out of that
+          // mission's measurement, and no caller can put it into another's.
+          //
+          // It is NOT "unforgeable", which is what this comment said until
+          // round ten, Medium 1. `hq_intel_cost_entries` is append-only by
+          // trigger and carries no hash chain, so a writer holding the file can
+          // DROP the four guards, `UPDATE ... SET mission_ids='[]',
+          // project_ids='[]'` in place, and put the guards back. Executed on a
+          // task with its OWN recorded spend — the half that had always held —
+          // the observed figure went 5000 to 0 and a refused `critical_review`
+          // was ACCEPTED, with the row count unchanged at 1 and both integrity
+          // depths reporting `safeMode: false` and no observation. That is the
+          // count-preserving in-place rewrite class in Phase 13's residual
+          // list, not a route this union was ever going to close.
           //
           // The recorded half is EVERY scope HQ derived at record time, not the
           // single `mission_id`/`project_id` column (Wave 5 correction round
@@ -9400,17 +9424,43 @@ export class HeadquarterOperations {
    * ends of every move it makes, and `commandMission` records the project a
    * mission was created under. So clearing the current link narrows nothing:
    * the act of clearing it is itself the record that the project once governed.
-   * Monotone and unforgeable in the same sense the `spentUnder` union is — it
-   * can only ever ADD scopes, and no caller supplies one.
+   * Monotone in the same sense the `spentUnder` union is — it can only ever ADD
+   * scopes, and no caller supplies one.
    *
-   * **What it does not reach, stated rather than implied.** A mission CREATED
-   * with a project by a build older than this — whose `commanded` event
-   * therefore carries no `projectId` — and never re-assigned through the
-   * facade, whose link is then cleared by RAW SQL, leaves no history to derive
-   * from. The facade route is closed for such a mission regardless of build
-   * age, because `assignMissionToProject` writes `from` at the moment it
-   * clears. The raw-SQL route on a pre-existing mission is the residual, and it
-   * is in the phase document's NOT-fixed list.
+   * **This used to say "monotone and UNFORGEABLE", and the residual below used
+   * to be scoped to an old build. Both were false** (round ten, Medium 1).
+   * `hq_mission_events` carries no hash chain: its append-only property is held
+   * by three triggers, and a trigger is a row in `sqlite_master` that a writer
+   * holding the file can DROP and put back. Executed against a CURRENT-build
+   * mission that WAS assigned through the facade — three `DROP TRIGGER`, one
+   * count-preserving update of the event log's `detail` column through
+   * `json_remove(detail, '$.projectId', '$.to', '$.from')`, three
+   * `CREATE TRIGGER`, then one write clearing `hq_missions.project_id` — the
+   * governing set fell from
+   * `["deployment", "project:task_project"]` to `["deployment"]`,
+   * `permittedTiers` widened from `["deterministic_local"]` to all five, and a
+   * `critical_review` decision was ACCEPTED under an exhausted ceiling. No
+   * `DELETE`, no `INSERT`, no row-count change, no restart, no Founder act, and
+   * `structuralIntegrity` and `fullIntegrity` both reported `safeMode: false`
+   * with no observation.
+   *
+   * That is not a new capability and it is not specific to this term: it is the
+   * count-preserving IN-PLACE REWRITE class that Phase 13's residual list
+   * already carries for every guarded-but-unhashed ledger, and the same one
+   * pass also empties the `spentUnder` half by rewriting `mission_ids` /
+   * `project_ids` on `hq_intel_cost_entries`. It needs raw file access and DDL
+   * privileges, which is a writer who could equally rewrite anything else here.
+   *
+   * **What it does not reach, stated rather than implied.** Every SUPPORTED
+   * route is closed: `assignMissionToProject({ projectId: null })` by a
+   * principal holding only `hq.mission_command` is refused its effect, and so
+   * is a raw `UPDATE hq_missions SET project_id = NULL`, both executed. What it
+   * does not reach is (a) a writer who lifts the engine guards and rewrites the
+   * event detail in place, per the paragraph above, and (b) a mission CREATED
+   * with a project by a build older than the `commanded` event detail and never
+   * re-assigned through the facade, whose link is then cleared by raw SQL —
+   * such a mission left no history to derive from in the first place. Both are
+   * in Phase 14's NOT-fixed list, at the cost each was executed at.
    */
   #durableTaskProjectScopes(taskId: string): string[] {
     if (!this.#missionStorePresent) return [];

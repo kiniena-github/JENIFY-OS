@@ -176,8 +176,9 @@ export type ArtifactDigestProvenance = (typeof ARTIFACT_DIGEST_PROVENANCES)[numb
 export const ARTIFACT_DIGEST_STATEMENT =
   'contentDigest is DECLARED by whoever recorded the version; HQ never fetched the artifact and never ' +
   'verified the hash, so it is never reported as verified. recordDigest is computed by HQ over this row’s ' +
-  'own canonical fields and pins the row itself — the row is engine-immutable, so a changed recordDigest ' +
-  'is impossible rather than merely detectable.';
+  'own canonical fields and pins the row itself — the row is engine-immutable, so no path this ' +
+  'repository has can change it, and a writer who lifts the engine guards and rewrites the row in place ' +
+  'leaves a recordDigest that no longer matches the fields it was computed over.';
 
 /** Product event kinds — the append-only history of one product. */
 export const PRODUCT_EVENT_KINDS = deepFreeze(['registered', 'lifecycle_moved', 'artifact_versioned'] as const);

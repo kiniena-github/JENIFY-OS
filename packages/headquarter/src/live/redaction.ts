@@ -275,6 +275,41 @@ const ERASED_CODE_POINTS =
  * already carry them. `live-redaction.test.ts`'s twelve legitimate strings and
  * the round-seven suite's accented prose are both pinned against it.
  *
+ * **It DOES cost one new refusal class, which that measurement did not cover**
+ * (round ten, Low 2). "No new refusal on accented prose in five languages" was
+ * measured over PROSE, and a hyphenated proper NAME is not prose. What the fold
+ * cannot do is build a credential prefix out of nothing; what it can do is
+ * remove a mark that was ALREADY separating one from the shape. Executed:
+ * `ŠK-Slovan-Bratislava-1919` passed before this wave, because `Š` is a
+ * precomposed `Lu` that `NFKC` left alone, and is REFUSED now, because the
+ * `NFKD` strip folds it to `S` and the case-insensitive `sk-` rule fires. The
+ * refused string is the whole snapshot, so this is an availability cost on a
+ * legitimate name, not a leak.
+ *
+ * The class is stated exactly, by enumeration rather than by adjective: 53
+ * non-ASCII letters fold to `s` (`Ś ś Ŝ ŝ Ş ş Š š ſ Ș ș ˢ Ṡ ṡ …`) and 42 fold
+ * to `k` (`Ķ ķ Ǩ ǩ ᴷ ᵏ Ḱ ḱ Ḳ ḳ Ḵ ḵ ₖ K …`). A string is newly refused when, at
+ * a non-alphanumeric boundary, one of those s-like letters is followed by one
+ * of those k-like letters, then `-`, then 16 or more of `[A-Za-z0-9_-]` — and
+ * all 53 s-like spellings were executed against that tail and all 53 refuse.
+ * Nothing else in the class exists: an accented hyphenated name that does not
+ * spell s-then-k is untouched, and `Škoda-Auto-Mladá-Boleslav`,
+ * `Sköldebrand-Åkerström-Handelsbolaget` and
+ * `Ćwikliński-Żółkiewski-Przedsiębiorstwo` were each executed and each pass.
+ *
+ * **Why it is disclosed rather than fixed.** The ASCII spelling
+ * `SK-Slovan-Bratislava-1919` was ALREADY refused before this wave: the over-
+ * breadth is in the `sk-` shape, which accepts `-` in its 16-character tail
+ * because a real key does (`sk-proj-…`). The fold therefore added SPELLINGS of
+ * an existing over-refusal rather than a new one. Narrowing the shape so that
+ * hyphen-separated word runs are not credentials would be a heuristic that
+ * makes a credential guard refuse LESS, on the exact rule this guard exists
+ * for, to buy back an availability cost measured at one two-letter prefix —
+ * that trade is not taken here, and moving the `sk-` shape is its own change
+ * with its own review. `credential-scan-false-positive-class.test.ts` executes
+ * the class, and re-executes U+0301, U+20DD, U+0378, U+05BF and U+0E31 to hold
+ * the evasion direction where it is.
+ *
  * Fifteen of the seventeen `\p{Zs}` separators are folded as of round ten, and
  * they are folded HERE, before `NFKD` — see `NARROW_SPACES` immediately below.
  */
@@ -623,6 +658,22 @@ function namesACredentialHolder(key: string): boolean {
  * so the hole is stated here and in the phase document rather than papered over.
  * The architecture is what answers it: credentials never enter the control
  * plane, and no HQ writer splits a value across fields.
+ *
+ * **The KEY rule reaches exactly one level, and the refusal message reads wider
+ * than that** (Wave 5 correction round seven, Low 8). "Field names a credential
+ * holder and carries a value" applies only where the value is a string or a
+ * number: `{token: 'x'}` and `{token: 12345}` are refused, and
+ * `{token: {v: 'x'}}` and `{token: ['x']}` are not, because the walk descends
+ * into the container and the key it then sees is `v` or an index rather than
+ * `token`. That is the right trade — refusing every object under a
+ * credential-named key would refuse `{apiKeyStatus: {present: true}}`, which is
+ * exactly the PRESENCE shape this boundary exists to allow — but it is narrower
+ * than the sentence sounds, so it is written down. What still covers the nested
+ * case is the VALUE rule, which runs on every string at every depth: a
+ * credential-SHAPED string is refused wherever it sits. What is not covered is
+ * a credential that is neither shaped like one nor a direct scalar under a
+ * credential-named key, and that is the same residual the split-value paragraph
+ * above states.
  */
 export function assertBrowserSafe(payload: unknown, rootPath = 'snapshot'): void {
   walk(payload, rootPath, (value, path, key) => {
