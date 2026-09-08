@@ -339,9 +339,28 @@ function isTrivial(value: unknown): boolean {
 }
 
 /**
- * How deep the walk goes before it stops descending. A bound rather than a
- * hope: the traversal now follows `toJSON`, and a `toJSON` that returns a fresh
- * object every call cannot be closed over by the cycle set.
+ * How deep the walk goes before it REFUSES. A bound rather than a hope: the
+ * traversal follows `toJSON`, and a `toJSON` that returns a fresh object every
+ * call cannot be closed over by the cycle set.
+ *
+ * **Reaching it is a refusal, not a stop** (Wave 5 correction round six, High
+ * 5). It used to `return`, and the comment on `walk` claimed that was
+ * "fail-CLOSED in the only direction that matters: they stop the walk
+ * descending, they never stop a finding being raised". That was exactly
+ * backwards: `JSON.stringify` has NO depth limit, so everything below the bound
+ * is still serialized and still published — stopping the walk IS stopping the
+ * finding. Executed through `proposeAction`, whose own comment says the payload
+ * "is stored permanently and handed verbatim to an adapter" and which applies
+ * both scans: a `ghp_…` at nesting depth 60–63 was refused and the SAME
+ * credential at depth 64 was accepted and stored, with the strict scan on the
+ * response stopping at 64 as well, so the Founder route served it rather than
+ * failing.
+ *
+ * HQ now refuses what it cannot read in full. That is the same rule the rest of
+ * this module applies — a check that could not run is not a check that passed —
+ * and it costs nothing real: 64 levels of nesting is far beyond any structure
+ * the control plane composes, and a caller that genuinely needs to publish one
+ * has a shape problem rather than a scanning problem.
  */
 const MAX_SCAN_DEPTH = 64;
 
@@ -364,9 +383,15 @@ const MAX_SCAN_DEPTH = 64;
  *    are.
  *
  * A `seen` set makes a cyclic graph terminate instead of overflowing the stack,
- * and `depth` bounds the rest. Both are fail-CLOSED in the only direction that
- * matters: they stop the walk descending, they never stop a finding being
- * raised.
+ * and `depth` bounds the rest. They are fail-closed for DIFFERENT reasons, and
+ * conflating them was the round-five defect (Wave 5 correction round six, High
+ * 5):
+ *
+ *  - the `seen` set stops at a value this walk has ALREADY scanned, so nothing
+ *    goes unread and no finding is lost;
+ *  - `depth` stops at a value the walk has NOT read, so continuing silently
+ *    would publish unscanned content — `JSON.stringify` has no depth limit.
+ *    Reaching it therefore THROWS. See `MAX_SCAN_DEPTH`.
  */
 function walk(
   value: unknown,
@@ -377,7 +402,16 @@ function walk(
 ): void {
   visit(value, path);
   if (value == null || typeof value !== 'object') return;
-  if (depth >= MAX_SCAN_DEPTH) return;
+  if (depth >= MAX_SCAN_DEPTH) {
+    // REFUSED, not skipped. Everything below here would still be serialized and
+    // still be published; a scan that stopped would be a finding that never
+    // happened.
+    throw new BrowserSafetyError(
+      `Value nests deeper than ${MAX_SCAN_DEPTH} levels, which is deeper than HQ scans. HQ refuses what it ` +
+        'cannot read in full rather than publishing the part it did not read',
+      path,
+    );
+  }
   const target = value as object;
   if (seen.has(target)) return;
   seen.add(target);

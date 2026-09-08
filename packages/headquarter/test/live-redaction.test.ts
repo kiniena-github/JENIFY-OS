@@ -461,3 +461,77 @@ describe('assertNoFabricatedFields', () => {
     expect(() => assertNoFabricatedFields({ model: { contextWindowTokens: 200000 } })).not.toThrow();
   });
 });
+
+/**
+ * Wave 5 correction round six, High 5 — the depth bound was fail-OPEN, and the
+ * module said the opposite.
+ *
+ * The comment on `walk` claimed the cycle set and the depth bound were "both
+ * fail-CLOSED in the only direction that matters: they stop the walk
+ * descending, they never stop a finding being raised". `JSON.stringify` has no
+ * depth limit, so everything below the bound is still serialized and still
+ * published: stopping the walk IS stopping the finding. Executed through
+ * `proposeAction`, which applies BOTH scans and whose own comment says the
+ * payload "is stored permanently and handed verbatim to an adapter" — a
+ * credential at nesting depth 63 was refused and the same credential at depth
+ * 64 was accepted and stored.
+ */
+describe('the scan depth bound refuses what it cannot read', () => {
+  const CREDENTIAL = 'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123';
+
+  function nest(depth: number, leaf: unknown): unknown {
+    let node: unknown = leaf;
+    for (let index = 0; index < depth; index += 1) node = { down: node };
+    return node;
+  }
+
+  it('refuses a credential at every depth, on both sides of the old boundary', () => {
+    // 63 was already refused; 64 and beyond were ACCEPTED. Both are asserted,
+    // so a future change that moves the bound cannot quietly reopen the hole.
+    for (const depth of [0, 1, 62, 63, 64, 65, 128, 512]) {
+      expect(
+        () => assertBrowserSafe(nest(depth, { note: CREDENTIAL }), 'payload'),
+        `depth ${depth}`,
+      ).toThrow(BrowserSafetyError);
+    }
+  });
+
+  it('refuses a structure too deep to scan even when nothing in it looks secret', () => {
+    // The refusal is about what HQ could NOT read, so it does not depend on
+    // finding anything. This is the fail-closed statement itself.
+    expect(() => assertBrowserSafe(nest(400, { note: 'entirely ordinary prose' }))).toThrow(
+      BrowserSafetyError,
+    );
+    // And the bound is nowhere near anything the control plane composes.
+    expect(() => assertBrowserSafe(nest(40, { note: 'entirely ordinary prose' }))).not.toThrow();
+  });
+
+  it('applies the same rule to the fabricated-field gate, which walks the same graph', () => {
+    expect(() => assertNoFabricatedFields(nest(400, { card: { ok: 1 } }))).toThrow(
+      BrowserSafetyError,
+    );
+    expect(() => assertNoFabricatedFields(nest(40, { card: { ok: 1 } }))).not.toThrow();
+  });
+
+  it('does not refuse a repeated reference, because the cycle set stops at a value already READ', () => {
+    // The two bounds are fail-closed for different reasons, and this is the
+    // difference: the `seen` set stops at a value this walk has already
+    // scanned, so nothing goes unread and no finding is lost. A shared subtree
+    // is ordinary and must stay accepted...
+    const shared = { label: 'ordinary' };
+    expect(() => assertBrowserSafe({ a: shared, b: shared, c: { d: shared } })).not.toThrow();
+    // ...and a credential in a shared subtree is still found, on the first
+    // visit, however many times it is referenced.
+    const poisoned = { note: CREDENTIAL };
+    expect(() => assertBrowserSafe({ a: poisoned, b: poisoned })).toThrow(BrowserSafetyError);
+  });
+
+  it('refuses a toJSON that manufactures a FRESH object at every level', () => {
+    // The reason the bound exists at all: a `toJSON` that returns a new object
+    // every call cannot be closed over by the cycle set, so only the depth
+    // bound can end the walk — and ending it silently is what published
+    // unscanned content.
+    const endless = (): unknown => ({ toJSON: () => ({ down: endless() }) });
+    expect(() => assertBrowserSafe(endless())).toThrow(BrowserSafetyError);
+  });
+});

@@ -152,6 +152,28 @@ export interface ControlRequest {
  * `actorAuthentication` is here for the same reason as the identity keys —
  * it is the marker recording how much is known about the caller, and a client
  * that could set it could upgrade its own trust level.
+ *
+ * **The five `*By`/`workerId` spellings were missing** (Wave 5 correction round
+ * six, Medium 7). The list held `requestedBy` and stopped there, so
+ * `setBy`, `observedBy`, `recordedBy`, `issuedBy` and `workerId` were accepted:
+ * executed against the previous head, `requestedBy`/`principalId`/`actor`/
+ * `founderId` answered 400 with the store digest unchanged, and the other five
+ * answered 201 with the digest CHANGED. There is NO authority effect — every
+ * actor a control route passes to the facade is `founder.principal.id` and the
+ * body field is never read — but the module's own stated rule is that such a
+ * key is "REFUSED if any is present — not ignored, refused, so a client that
+ * believes it can name a principal learns immediately that it cannot", and
+ * `setBy`/`observedBy`/`recordedBy`/`issuedBy` are literally the FACADE's
+ * parameter names for the acting principal. A client that spelled one and got a
+ * 201 learned the opposite of the truth.
+ *
+ * `workerId` was reported alongside them and is deliberately NOT here, because
+ * adding it would be wrong rather than strict: on the workforce and
+ * collaboration routes `workerId` names the worker the Founder is acting UPON —
+ * the object of the request, not a claim about who is making it — and reserving
+ * it took eleven real behaviours out of the product. Tried, measured, reverted.
+ * The rule this list encodes is "a client may not name WHO IS ACTING", and
+ * `workerId` does not.
  */
 export const CLIENT_IDENTITY_KEYS: readonly string[] = deepFreeze([
   'principalId',
@@ -160,6 +182,11 @@ export const CLIENT_IDENTITY_KEYS: readonly string[] = deepFreeze([
   'founder',
   'isFounder',
   'requestedBy',
+  'setBy',
+  'observedBy',
+  'recordedBy',
+  'issuedBy',
+  'assessedBy',
   'by',
   'actor',
   'actorAuthentication',
