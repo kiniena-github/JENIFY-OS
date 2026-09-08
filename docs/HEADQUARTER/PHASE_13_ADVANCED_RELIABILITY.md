@@ -878,7 +878,18 @@ Founder's stop-everything reason stays off the unauthenticated file. Measured
 with a second scope left ENGAGED, the reason, the scope and the engaging
 principal all cross, at
 `operations.data.killSwitch.engagedScopes[].reason` / `.scope` / `.engagedBy`.
-The count is **thirty-nine fields, not four** — `src/cli/snapshot.ts` writes
+**And that count was still short, because the DERIVATION that was supposed to
+make it complete had a regex that could not cross a comma** (Wave 5 correction
+round seventeen, High-2). `declaredCallerText` matched
+`callerTextRefusal\([^,]+,\s*\[…\]`, so every call site whose first argument
+is an object literal with more than one key was invisible: 37 of 43 declaring
+methods derived, six hidden — `assignTask.rationale`, `failTask.reason`,
+`reviewTask.note`, `reconcileTask.note`, `engageKillSwitch.reason`,
+`rejectProposal.note` — and four of those six were in neither column of the
+table. Two of them publish. The argument is brace-matched now and everything was
+re-measured through the real facade.
+
+The count is **forty-one fields, not four** — `src/cli/snapshot.ts` writes
 the whole object `liveSnapshotFromOperations` returns, so everything in it is
 published:
 
@@ -923,6 +934,8 @@ published:
 | `verifyTruth.limitations` | `truth.data.records[].verifications[].limitations` |
 | `acceptTruth.note` | `truth.data.records[].acceptances[].note` |
 | `openCollaborationSession.title` | `collaboration.data.recent[].title` — the field the round-sixteen review published to prove the census was short |
+| `reviewTask.note` | `activity.data[].summary` — on a FAIL verdict; hidden from the census until round seventeen |
+| `reconcileTask.note` | `activity.data[].summary` — hidden from the census until round seventeen |
 
 **The sixteen rows below the kill-switch group are round sixteen's correction,
 and the sentence they replace is the reason they are here** (Wave 5 correction
@@ -944,11 +957,15 @@ declared and absent across 25 entirely unexercised methods. The test now derives
 `callerTextRefusal` list — and requires each declared parameter to be planted or
 exempted in writing, so a method that starts scanning caller text in a future
 phase fails on the day it is written. Re-measured with all of them exercised
-through the real facade: **thirty-nine of eighty-two**.
+through the real facade: **thirty-nine of eighty-two** — and that pair of
+numerals was itself produced by the comma-blind regex above. Re-measured at
+round seventeen with the first argument brace-matched, the four hidden
+parameters planted and every plant executed: **forty-one of eighty-six**, across
+**forty-three** declaring methods.
 
-Forty-three further Founder- and worker-typed fields were planted and do NOT
+Forty-five further Founder- and worker-typed fields were planted and do NOT
 cross, and that half is pinned too, because it is what makes the payload
-carve-out from the credential scan defensible: `createTask.payload`, `commandMission.instruction`, `amendMissionIntent.amendment`, `setIntelligenceBudget.note`, `recordModelObservation.unitCostBasis`, `recordModelObservation.note`, `recordVerifiedBackup.backupPath`, `recordVerifiedBackup.note`, `postMissionMessage.body`, `postMissionMessage.refs`, `recordIntelligenceDecision.label`, `recordIntelligenceCost.basis`, `recordIntelligenceCost.note`, `recordIntelligenceCost.providerId`, `recordIntelligenceCost.modelId`, `approveTask.note`, `deactivateExecutionWorker.reason`, `assignTaskAsFounder.rationale`, `registerAiMember.displayName`, `registerAiMember.modelId`, `registerAiMember.modelVersion`, `registerAiMember.providerId`, `registerAiMember.toolMetadata`, `disableAiMember.reason`, `transitionMission.note`, `createProduct.name`, `createProduct.problem`, `createProduct.summary`, `createProduct.targetUsers`, `moveProductLifecycle.note`, `registerProductArtifact.locator`, `registerProductArtifact.name`, `registerProductArtifact.note`, `openRun.label`, `recordRunOutcome.note`, `reconcileRun.note`, `recordIntelligenceOutcome.note`, `proposeAction.target`, `reconcileAction.note`, `openCollaborationSession.purpose`, `recordContribution.artifactRefs`, `recordContribution.content`, `recordContribution.reason`.
+carve-out from the credential scan defensible: `assignTask.rationale`, `rejectProposal.note`, `createTask.payload`, `commandMission.instruction`, `amendMissionIntent.amendment`, `setIntelligenceBudget.note`, `recordModelObservation.unitCostBasis`, `recordModelObservation.note`, `recordVerifiedBackup.backupPath`, `recordVerifiedBackup.note`, `postMissionMessage.body`, `postMissionMessage.refs`, `recordIntelligenceDecision.label`, `recordIntelligenceCost.basis`, `recordIntelligenceCost.note`, `recordIntelligenceCost.providerId`, `recordIntelligenceCost.modelId`, `approveTask.note`, `deactivateExecutionWorker.reason`, `assignTaskAsFounder.rationale`, `registerAiMember.displayName`, `registerAiMember.modelId`, `registerAiMember.modelVersion`, `registerAiMember.providerId`, `registerAiMember.toolMetadata`, `disableAiMember.reason`, `transitionMission.note`, `createProduct.name`, `createProduct.problem`, `createProduct.summary`, `createProduct.targetUsers`, `moveProductLifecycle.note`, `registerProductArtifact.locator`, `registerProductArtifact.name`, `registerProductArtifact.note`, `openRun.label`, `recordRunOutcome.note`, `reconcileRun.note`, `recordIntelligenceOutcome.note`, `proposeAction.target`, `reconcileAction.note`, `openCollaborationSession.purpose`, `recordContribution.artifactRefs`, `recordContribution.content`, `recordContribution.reason`.
 
 `recordIntelligenceCost.providerId` and `.modelId` were EXEMPTED from the plant
 until Wave 5 correction round fifteen (Medium 4), with the reason "bounded to a
@@ -960,8 +977,9 @@ stood, for the wrong reason. Both are planted now (the canary text is lowercase
 so it survives `normalizeProviderId`), and the artifact's silence about them is
 measured rather than argued.
 
-Exactly TWO parameters remain exempted from the plant, each with a written and
-checkable reason: `amendMissionIntent.specifyPlanItems`, a structured object
+Two parameters remain exempted from the plant — measured, at the head that
+closed round seventeen's High-2, by the same derivation that produces the
+counts above — each with a written and checkable reason: `amendMissionIntent.specifyPlanItems`, a structured object
 list with no free-text member (its text comes from `addPlanItems`, which is
 planted and crosses); and `recoverInterruptedRuns.reason`, whose type is a
 closed five-member union, so no canary can be planted in it at all — the
@@ -984,7 +1002,7 @@ methods and asserted three `toContain` paths, so a field added beside them
 published silently.
 
 **What the pin does now.** `unauthenticated-founder-text.test.ts` plants a
-distinct canary in all 34 fields, asserts every facade call RETURNED OK (a
+distinct canary in all 86 fields, asserts every facade call RETURNED OK (a
 canary that was never written would otherwise read as "does not cross"), asserts
 the crossing set EXACTLY in both directions, checks each published field lands
 at the path this table names, DERIVES the completeness of the plant from
@@ -2160,11 +2178,23 @@ as well as here:
   verdict that says ENGAGED stands whoever appended it; a verdict that says
   CLEAR counts only when the hash-chained evidence log carries the entry naming
   it, which the two writers of a verdict append inside the same reservation.
-  What remains is stated on `standingIntegrityVerdict`: HQ holds no key a
-  foreign writer does not also have, so a writer holding the file open can forge
-  the evidence entry too — at the cost of appending to a chain that is now
-  engine-guarded and length-committed. A real barrier, not a cryptographic
-  boundary, and the same residual class as the run-event ledger above.
+  What remains is stated on `standingIntegrityVerdict`, and **round seventeen
+  (Medium-5) corrected its price**: this text used to say the forgery costs
+  "appending to a chain that is now engine-guarded and length-committed. A real
+  barrier". Measured — one raw `INSERT` of a locally-valid
+  `hq_integrity_assessed` link plus one raw `INSERT` of a clean verdict row
+  carrying its id took the standing verdict from ENGAGED to CLEAR while
+  `verifyEvidenceChain` still reported the chain broken. `op_evidence`'s
+  triggers refuse UPDATE and DELETE, not INSERT; the hash is public and
+  unkeyed; a break earlier in the log does not invalidate a later link. So HQ
+  holds no key a foreign writer does not also have, and against a writer
+  holding the whole file this is **not a barrier at all** — what it closes is
+  the narrower attack it was built for, a writer who can append to
+  `hq_reliability_verdicts` and not to `op_evidence`. Closing the rest needs
+  secret material HQ does not have and would not introduce without a Founder
+  decision. Same residual class, and same measured price, as the run-event
+  ledger above; both are executed in
+  `packages/headquarter/test/reliability-forgery-price.test.ts`.
 - **An HQ database file created before this wave engages safe mode once, on its
   first boot afterwards**, because `trg_hq_mission_plan_items_no_erase` did not
   exist in it and the as-found census observes it missing. The finding is true
@@ -6096,13 +6126,191 @@ derivation is possible:
 
 | Figure | Previous figure in this document | This head |
 |---|---|---|
-| test FILES in `packages/headquarter/test` | 197 | **208** — DERIVED, not typed: `phase-doc-name-truth.test.ts` reads the directory and requires this table to state what it counts |
-| `npm run test:hq` | 197 files / 3494 tests | **208 files / 3639 tests, 0 failed** (measured at this head; a test-case count cannot be derived by a test inside the suite it counts, so it is recorded as a head-scoped measurement, which is the discipline this package already applies to every other suite figure) |
-| `SAFE_MODE_BLOCKING_FINDINGS` | 4 | **4**, and the count is now checked WHEREVER `src/` states it rather than only in `integrity.ts`'s own header — `service.ts` said "three" in the same diff |
-| unauthenticated artifact: crossing fields | 20 of 34 | **39 of 82** — see the disclosure section above; the previous figure of 23 was measured over a hand-written census whose completeness test derived its scope from that same census (round sixteen, High B-5) |
+| test FILES in `packages/headquarter/test` | 197 | **210** — DERIVED, not typed: `phase-doc-name-truth.test.ts` reads the directory and requires this table to state what it counts |
+| `npm run test:hq` | 197 files / 3494 tests | **210 files / 3664 tests, 0 failed** (measured at the head that closed Wave 5 correction round seventeen; a test-case count cannot be derived by a test inside the suite it counts, so it is recorded as a head-scoped measurement, which is the discipline this package already applies to every other suite figure) |
+| `SAFE_MODE_BLOCKING_FINDINGS` | 4 | **4**, and the count is checked wherever `src/` states it in a CARDINAL within three lines, backticked numerals included — `service.ts` said "three" in the same diff. Round seventeen (Medium-2) narrowed the claim from "any phrasing", which was false for 11 of 12 measured phrasings, and lists the eight that still evade in `integrity-statement-truth.test.ts` |
+| unauthenticated artifact: crossing fields | 20 of 34 | **41 of 86** — see the disclosure section above. The round-sixteen figure of "39 of 82" was produced by a derivation whose regex could not cross a comma (round seventeen, High-2) |
+| DDL sites routed through `execSchemaDdl` | n/a | **47 across 18 files**, with exactly one `db.exec` left in `src/` — derived in `schema-change-resilience.test.ts` (round seventeen, Medium-3) |
+| `reliability-commitment-prefix-replay.test.ts` determinism | not measured | **32 runs / 2 failures** before round seventeen (both at `ports.ts:171`); **32 runs / 0 failures**, then **32 more / 1 failure at a third site** (`ensurePrincipalSchema`) which is what turned the fix from a leaf into the package-wide DDL derivation above; **64 runs / 0 failures** after it |
 | `unguardedUniqueIndexes` | named 5 times, defined 0 times | **defined**, exercised on both branches, and the class held by `prose-names-a-real-mechanism.test.ts` |
 
 A test-case count typed into a document is read by nothing and goes stale on the
 next merge; that is the disclosure this table replaces rather than repeats. The
 FILE count is different — it is derivable, so it is derived, and this row fails
 the day a test file is added or removed without updating it.
+
+---
+
+## Wave 5 correction round SEVENTEEN
+
+A third fresh read-only hostile review returned **FAIL — 0 Critical / 2 High /
+5 Medium / 2 Low** on `85b720d`. The trend across three rounds is 3C/7H/4M →
+2C/3H/3M → 0C/2H/5M. Every finding below was REPRODUCED BY EXECUTION before it
+was touched, and every fix was mutation-proven by reverting it and watching the
+new guard go red.
+
+**The governing lesson, now three rounds old, and how this round answered it.**
+Every previous round closed findings as *a migration of named lines* and then
+wrote prose claiming a *class* was closed. Two of this round's findings were
+literally that: "the guard you wrote last round to close a class is scoped to
+one file" and "the derivation you wrote last round to replace a hand list has a
+regex that cannot cross a comma". So in every case below **the deliverable is
+the derivation**, and the numerals were re-measured rather than adjusted.
+
+### High-1 — `promoteProposal` committed executable work under a refusal
+
+`service.ts` wrote the proposal row, the `sourceProposalId` meta and the
+hash-chained evidence append with no reservation. Under a
+`BEFORE INSERT ON op_evidence WHEN NEW.kind = 'mission_promoted_to_task' ->
+RAISE(ABORT)` trigger, reproduced at this head:
+
+```
+BEFORE: {"tasks":0,"proposalStatus":"proposed"}
+RESULT: THREW blocked                      <- the caller was told it failed
+AFTER : tasks 1, proposalStatus promoted, evidenceRows 0, status queued
+CLAIM : {"ok":true,"claimedBy":"claude"}   <- claimable, zero audit rows
+RE-PROMOTE: {"ok":false,"code":"proposal_not_open"}   <- permanently wedged
+```
+
+`rejectProposal` (`{"status":"rejected","evidenceRows":0}`) and `proposeMission`
+(`{"proposals":1,"evidenceRows":0}`) reproduced the same shape.
+
+**The fix is the widening, not the three methods.**
+`queue-mutation-atomicity.test.ts`'s shape guard scanned ONE FILE
+(`src/operator/queue.ts`) while its docblock described a class. It now walks
+every `.ts` file under `src/` and every unit in each — class members, top-level
+functions and top-level `const` bindings. Measured at this head: **42 units in
+`src/` pair a canonical write with an evidence append**; nine are credited by
+the `atomic(…)` wrapper or by every caller reserving, and the rest reserve for
+themselves. The widening produced a FOURTH method the review had not named,
+`assignTask`, and all four are now one reservation each with a behavioural
+abort-trigger proof. The scan's five real limitations are listed on the file.
+
+### High-2 — the caller-text census was a hand list wearing a derivation
+
+`declaredCallerText` matched `callerTextRefusal\([^,]+,\s*\[…\]`, and `[^,]+`
+cannot cross a comma, so every call site whose first argument is a multi-key
+object literal was invisible. Measured: **37 of 43** declaring facade methods
+derived; six invisible — `assignTask.rationale`, `failTask.reason`,
+`reviewTask.note`, `reconcileTask.note`, `engageKillSwitch.reason`,
+`rejectProposal.note`. Four were in neither column of the 82-entry census, and
+two of those PUBLISH to the unauthenticated artifact.
+
+The first argument is brace-matched now, the four hidden parameters are planted
+and exercised through the real facade, and **everything was re-measured**:
+`reviewTask.note` and `reconcileTask.note` cross (`activity.data[].summary`);
+`assignTask.rationale` and `rejectProposal.note` do not. The census is
+**41 of 86** across **43** declaring methods, and the test's floor moved from 37
+to 43. The disclosure table above carries the two new rows.
+
+### Medium-1 — the inverted census had a fourth blind spot and one false sentence
+
+`authority-read-scan.test.ts` said: "Aliasing, destructuring, computed access
+and passing the handle as a value are therefore all refused rather than silently
+missed." Only shapes containing a literal `.queue` were refused.
+`const { queue } = ops; queue.approvalFor(id);` was INVISIBLE to every census in
+the file, and `withoutComments` treated a `//` inside a STRING LITERAL as a
+comment, blanking live code after it. Both closed — a binding-pattern and
+computed-access denial under the same default-deny rule, and a string-aware
+comment scanner — each with its own regression case against the review's exact
+strings, because `src/` contains neither shape and an empty corpus result would
+otherwise pass while checking nothing. The limitation list is now complete and
+includes what the scanner still cannot parse (regex literals, template
+interpolations, multi-line binding patterns).
+
+### Medium-2 — the count sweep claimed "any phrasing"; 11 of 12 evaded
+
+Backticking a numeral is the prevailing style in these docblocks and the sweep
+stripped every code span, so ``holds `three` names`` and ``holds `3` names``
+both evaded; the word table stopped at twelve; the window was ±1. Fixed: a
+backticked span whose whole content is a cardinal is unwrapped (identifiers and
+shas are still stripped), the table runs to twenty plus the round tens, and the
+window is ±3. **Eight phrasings still evade** — "a trio of", "a pair of",
+"both", "thrice", "a triple", "III", and the two reference-label forms — and
+rather than keep the overclaim, the test is renamed to what it does and the
+eight are asserted SILENT so the disclosure is itself a measurement.
+
+### Medium-3 — the `SQLITE_SCHEMA` retry did not close the class
+
+Reproduced: **32 runs of `reliability-commitment-prefix-replay.test.ts`, 2
+failures**, both `SqliteError: database schema has changed` at `ports.ts:171` —
+inside `#resolveRequester`, i.e. thrown out of an enforcement decision by a read
+whose own docblock promised it would not throw out of one. Round sixteen's retry
+was applied to a callback that re-prepares; `specialistDirectoryReads` bound its
+`get` once and could never recover.
+
+`bindSchemaResilientGet` re-prepares once from a construction-captured `prepare`
+and a construction-captured `Statement.prototype.get`, so the retry adds no
+prototype lookup the primary path did not already make.
+
+**And that was not enough, which is the finding's real shape.** With it in
+place, the next 64 runs produced one failure at a THIRD site —
+`ensurePrincipalSchema`, a `db.exec` of boot DDL racing another process's. So
+the fix became a derivation: `execSchemaDdl` is the ONE DDL path, **47 sites
+across 18 files** route through it, exactly one `db.exec` remains in `src/`, and
+`schema-change-resilience.test.ts` fails the day a second one appears.
+Measurements: 32/2 before, 32/0 then 32/1-at-a-new-site, 64/0 after.
+
+### Medium-4 — the assignment-intent read failed OPEN on any error
+
+`queue.ts` and its `service.ts` twin caught EVERY error and answered "no intent
+stands", while the docblock called that "the honest answer rather than a
+fail-open one". Reproduced:
+
+```
+A7  DROP TABLE hq_op_task_meta;  claimNext('jules', github.open_pr)
+      -> {"ok":true,"claimedBy":"jules","fence":1}
+A6  Database.prototype.prepare patched to throw ONLY for the intent SELECT
+      -> the identical stolen claim
+```
+
+Absence is now distinguished from every other failure (`isMissingTableError`,
+one spelling in `db.ts`) and every other failure is RETHROWN. A7 stays
+permissive because a database that never ran `ensureApplicationSchema` genuinely
+has no gate; A6 refuses. Both twins are mutation-proven independently. A8 — a
+raw `UPDATE` of the meta row — is unchanged and remains documented as advisory.
+
+### Medium-5 / Low-1 — the forgery was priced falsely in shipped source
+
+`reliability-command.ts` said the residual forgery costs "appending to the hash
+chain, which is itself guarded by the engine and by a durable length commitment
+(`verifyEvidenceChain`). Against that writer this is a real barrier." Measured:
+**neither guard participates.** `op_evidence`'s triggers refuse UPDATE and
+DELETE, not INSERT; the hash is public and unkeyed; `verifyEvidenceChain`
+returns `null` before AND after. Cost: about six lines of SQL, and it works with
+`actor='founder'`. The identical sentence stood on `standingIntegrityVerdict`
+and a third time in this document; the verdict path was EXECUTED too rather than
+reasoned by analogy — two appends take a latched safe mode from ENGAGED to CLEAR
+while the chain stays broken. All three texts now carry the measured price, and
+`reliability-forgery-price.test.ts` executes both so the price cannot drift.
+
+Making the forgery genuinely hard needs a key HQ holds and a foreign writer does
+not. HQ has no key store and introducing secret material is a Founder decision,
+so it is priced rather than closed.
+
+**Low-1**: the claim "appending noise can only ever keep a run uncertain" was
+false in one direction. Witnesses are consumed one per event, so a raw COPY of
+an HONEST `reconciled` row drives a `concluded / not_executed` run back to
+`needs_reconciliation`. That is the FAIL-CLOSED direction — the run returns to
+the Founder's inbox and the `openRun` guard comes back — and the cheap repair
+would be to stop the fold's `default` branch downgrading a concluded run, i.e. a
+strictly less conservative latch. Recorded and pinned rather than traded away.
+
+### Low-2 — `proposalRowFor` was cited as evidence of a migration it did not make
+
+Measured: zero callers in `src/`. `promoteProposal` reaches the same `#private`
+method directly as `this.#proposalFromStore`, because it lives in the defining
+module; there is no shipped route and no other module that decides on a
+proposal, so there is nothing honest to wire it to. The census now COUNTS the
+callers of every binding in that family and asserts the published-but-uncalled
+set exactly, in both directions — `['proposalRowFor']` — so the claim is a
+measurement and wiring it, or losing another binding's last caller, fails.
+
+### What this round did NOT close
+
+- the unkeyed-chain residual on both ledgers (Medium-5) — priced, not closed;
+- Low-1's revert-by-copy — recorded, deliberately not repaired;
+- eight count phrasings the sweep cannot read (Medium-2) — disclosed and pinned;
+- A8, the raw `UPDATE` of an advisory assignment intent (Medium-4);
+- the atomicity scan proves ENCLOSURE for eight mutations behaviourally, not for
+  all 42 it credits lexically.
