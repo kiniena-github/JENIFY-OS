@@ -1322,8 +1322,18 @@ export const BACKUP_RECORD_STATEMENT =
   'the main file and the digest covers only the file; so is one that is a hard link to another name, ' +
   'because a file some other name can still be written through is not a snapshot; and so is the LIVE ' +
   'database this process is running on, because a file HQ is still writing is not a recovery point at ' +
-  'all and recording it as one would be the most dangerous row this ledger could hold. verified means these ' +
-  'bytes are a sound HQ database — never that they are the whole of what was committed when they were ' +
+  'all and recording it as one would be the most dangerous row this ledger could hold. ' +
+  'WHAT verified MEANS, exactly: the bytes open as a SQLite database, PRAGMA integrity_check returns ok, ' +
+  'the file carries HQ’s marker table, AND HQ’s own append-only census over those same bytes found ' +
+  'nothing blocking — the declared immutability guards are present on every declared ledger the file ' +
+  'carries, no ledger holds fewer rows than HQ’s own durable commitments record it held, HQ’s ' +
+  'commitment ledger satisfies its own row-count identity, and the evidence log still carries the entry a ' +
+  'commitment pins it to. A file that would latch SAFE MODE if it were opened live is refused rather than ' +
+  'verified, so this register cannot certify a recovery point HQ has said it cannot stand behind. ' +
+  'WHAT IT STILL DOES NOT MEAN, stated rather than implied: a declared ledger the file does not carry AT ' +
+  'ALL is not a finding here, because an honest recovery point older than the phase that declared the ' +
+  'table looks identical to a robbed one and refusing both would refuse every genuinely old backup; and ' +
+  'verified is never a claim that these bytes are the whole of what was committed when they were ' +
   'copied, which is a question no reading of the bytes can answer. HQ did not take this backup and cannot restore it: ' +
   'taking one safely ' +
   'belongs to the durable persistence owner, and restoring is a deliberate operator act against a stopped ' +

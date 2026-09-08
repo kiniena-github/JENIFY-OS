@@ -250,6 +250,105 @@ describe('a frozen Set or Map is frozen in its CONTENTS, not only in its shape',
 });
 
 /**
+ * Wave 5 correction round ten, MEDIUM 3 — the named bypass the own-mutator fix
+ * did not close.
+ *
+ * Installing own throwing `add`/`delete`/`clear` shadows the prototype for a
+ * direct call and for nothing else: `Set.prototype`'s methods operate on the
+ * receiver's internal `[[SetData]]` slot and never read its properties.
+ * Executed against the previous head:
+ *
+ * ```
+ * own .clear()              -> threw
+ * Set.prototype.clear.call  -> SUCCEEDED (size 86 -> 0 on QUERY_STOPWORDS)
+ * Map.prototype.delete.call -> SUCCEEDED
+ * ```
+ *
+ * And it reached a real gate: emptying `QUEUED_UNREACHABLE_STATUSES` by
+ * prototype call flipped `assignTask` on a COMPLETED task from
+ * `refused: task_beyond_claiming` to ACCEPTED.
+ */
+describe('a frozen collection is immutable through the PROTOTYPE too, not only through its own properties', () => {
+  it('refuses Set.prototype.clear/add/delete called on the frozen vocabulary', async () => {
+    const { QUEUED_UNREACHABLE_STATUSES } = await import('../src/contracts/events.js');
+    const target = QUEUED_UNREACHABLE_STATUSES as unknown as Set<string>;
+    const before = [...QUEUED_UNREACHABLE_STATUSES].sort();
+    expect(before.length).toBeGreaterThan(0);
+    for (const attempt of [
+      () => Set.prototype.clear.call(target),
+      () => Set.prototype.delete.call(target, before[0]!),
+      () => Set.prototype.add.call(target, 'queued'),
+    ]) {
+      expect(attempt).toThrow(TypeError);
+    }
+    expect([...QUEUED_UNREACHABLE_STATUSES].sort()).toEqual(before);
+  });
+
+  it('refuses the same on the retrieval stopword set, which the exploit emptied', async () => {
+    const { QUERY_STOPWORDS } = await import('../src/application/search-command.js');
+    const target = QUERY_STOPWORDS as unknown as Set<string>;
+    const before = QUERY_STOPWORDS.size;
+    expect(before).toBeGreaterThan(0);
+    expect(() => Set.prototype.clear.call(target)).toThrow(TypeError);
+    expect(QUERY_STOPWORDS.size).toBe(before);
+  });
+
+  it('refuses Map.prototype.set/delete/clear on a frozen Map', async () => {
+    const { deepFreeze } = await import('../src/contracts/freeze.js');
+    const frozen = deepFreeze(new Map([['k', { nested: ['v'] }]]));
+    const target = frozen as unknown as Map<string, unknown>;
+    for (const attempt of [
+      () => Map.prototype.clear.call(target),
+      () => Map.prototype.delete.call(target, 'k'),
+      () => Map.prototype.set.call(target, 'k2', 1),
+    ]) {
+      expect(attempt).toThrow(TypeError);
+    }
+    expect(frozen.get('k')!.nested).toEqual(['v']);
+    expect(frozen.size).toBe(1);
+  });
+
+  it('forEach hands the callback the VIEW, never the collection it hides', async () => {
+    const { QUERY_STOPWORDS } = await import('../src/application/search-command.js');
+    const before = QUERY_STOPWORDS.size;
+    let seen: unknown = null;
+    QUERY_STOPWORDS.forEach((_value, _value2, set) => {
+      seen ??= set;
+    });
+    expect(seen).toBe(QUERY_STOPWORDS);
+    expect(() => Set.prototype.clear.call(seen as Set<string>)).toThrow(TypeError);
+    expect(QUERY_STOPWORDS.size).toBe(before);
+  });
+
+  it('the gate the exploit flipped stays refused: assignTask on a completed task', async () => {
+    // The consequence, not just the collection. `assignmentBarrier` reads
+    // `QUEUED_UNREACHABLE_STATUSES.has(task.status)`; emptying it by prototype
+    // call turned a refusal into an acceptance.
+    const { QUEUED_UNREACHABLE_STATUSES } = await import('../src/contracts/events.js');
+    const { setupFixture, CAPS, expectOk } = await import('./application.fixture.js');
+    const fx = setupFixture();
+    const created = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { repo: 'jenify-os' },
+        requestedBy: 'claude',
+      }),
+    );
+    const claimed = expectOk(fx.ops.claimNext('claude', CAPS.readStatus, undefined, created.task.id));
+    expectOk(fx.ops.startTask(claimed.id, 'claude', claimed.fence));
+    expectOk(fx.ops.submitResult(claimed.id, 'claude', claimed.fence, { ok: true }));
+
+    expect(() => Set.prototype.clear.call(QUEUED_UNREACHABLE_STATUSES as unknown as Set<string>)).toThrow(
+      TypeError,
+    );
+    const refused = fx.ops.assignTask(claimed.id, 'codex', 'founder');
+    expect(refused.ok).toBe(false);
+    if (refused.ok) throw new Error('unreachable');
+    expect(refused.error.code).toBe('task_beyond_claiming');
+  });
+});
+
+/**
  * Wave 5, correction round twelve — Low 5: two holes in `deepFreeze` itself,
  * neither reachable from this package today and both closed rather than
  * disclosed, because "no current call site reaches it" is exactly the reasoning

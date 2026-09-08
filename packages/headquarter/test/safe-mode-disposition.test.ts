@@ -34,8 +34,18 @@
  * from being a comfortable lie:
  *
  *  - the READ list below is explicit, and every name on it is re-checked
- *    against the write markers, so a mutator cannot be hidden by being called
- *    a read;
+ *    against the write markers — and, since round ten (Medium 1), TRANSITIVELY
+ *    rather than against the direct method body alone. `WRITE_MARKERS` is a
+ *    regex over one body, so a read that reached a write through a helper was
+ *    invisible to it: `reconciliationAuthorityRefusal` appends an
+ *    `op_evidence` row through `#assertApprovalAuthority`, and
+ *    `evaluateTaskEligibility` appends one through `this.routeTask`, and both
+ *    sat on the READ list under an assertion that said "nothing on the READ
+ *    list reaches a write — the list cannot hide a mutator". That sentence was
+ *    false. It is now true, in the only way it can be: the reachability is
+ *    computed through the call graph, everything it reaches is NAMED, and what
+ *    each named member actually writes is MEASURED by table delta at the
+ *    bottom of this file rather than asserted;
  *  - the dispositions the round-seven corrections turn on are ALSO proven
  *    behaviourally, against a real file-backed database with a real latched
  *    finding, at the bottom of this file. A derivation that drifted from the
@@ -46,7 +56,8 @@ import { describe, expect, it } from 'vitest';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CAPS } from './application.fixture.js';
+import { CAPS, expectOk, setupFixture } from './application.fixture.js';
+import type { HqDatabase } from '../src/store/db.js';
 import { fileFixture } from './reliability.fixture.js';
 import {
   TRUTH_RECORD_CAPABILITY,
@@ -155,6 +166,54 @@ const READS: readonly string[] = [
   'readMeta',
 ];
 
+/**
+ * READ-list members that DO write — an append to the audit chain and nothing
+ * else — with the reason each is acceptable.
+ *
+ * Named rather than excused: an `op_evidence` append is a write, so the honest
+ * classification is "a read that records that it was asked", not "a read". Both
+ * are measured below, and the measurement is what enforces the word "and
+ * nothing else".
+ *
+ *  - `reconciliationAuthorityRefusal` resolves whether an actor may decide an
+ *    ambiguous external outcome, through the SAME `#assertApprovalAuthority`
+ *    that `approveTask` and `denyTask` use. That helper AUDITS a refusal, on
+ *    purpose: an attempt to decide an irreversible external act by someone who
+ *    may not is exactly the thing HQ must not forget. The append happens only
+ *    on a REFUSAL (measured: a registered worker and a resolved approver both
+ *    append nothing), it names no new authority, and it creates no task,
+ *    approval, claim or run;
+ *  - `evaluateTaskEligibility` calls `this.routeTask`, whose `routing_evaluated`
+ *    evidence note is why `/workforce/route` already sits on the control API's
+ *    WRITE surface. The comment on `orchestrateMission`'s preview says so in
+ *    those words. It changes no canonical state: the eligibility answer is
+ *    computed from the capability registry and the directory allow-list, and
+ *    the claim it might inform is refused under safe mode anyway.
+ *
+ * Both stay AVAILABLE under safe mode for the same reason `routeTask` and
+ * `appendSystemEvidence` do — refusing them would leave HQ unable to record
+ * that it was asked, which loses truth in the posture built for not losing it.
+ */
+const READS_THAT_APPEND_AUDIT_EVIDENCE: readonly string[] = [
+  'reconciliationAuthorityRefusal',
+  'evaluateTaskEligibility',
+];
+
+/**
+ * READ-list members the CALL-GRAPH reachability names but that write nothing,
+ * because the writing branch of the helper they call is one they cannot take.
+ *
+ * Listed rather than silently subtracted, because the static reachability is an
+ * over-approximation and pretending otherwise in either direction would be the
+ * same failure: claiming these append evidence would be as false as claiming
+ * the two above do not. Measured below — both come back with an EMPTY table
+ * delta.
+ */
+const READS_REACHING_A_WRITE_ONLY_ON_AN_UNTAKEN_BRANCH: readonly string[] = [
+  'intelligenceBudgetDecision',
+  'intelligenceRoutingProposal',
+];
+
 /** Markers that a method body reaches a write. */
 const WRITE_MARKERS =
   /(?:INSERT\s+INTO|UPDATE\s+\w+\s+SET|DELETE\s+FROM)|appendEvidence\(|appendEvent\(|#upsertMeta\(|#requirePrivilegedQueue\(\)|postMessage\(|registry\.(?:register|disable|setHealth|assign|update)\(|#workerProviderRegistrar\.|#appendRunEvent\(|this\.queue\.(?:start|heartbeat|complete|fail|claim)\(/;
@@ -207,6 +266,55 @@ function facadeMethods(): MethodFacts[] {
   return facts;
 }
 
+/**
+ * Every public method that reaches a write TRANSITIVELY, through the class's
+ * own call graph.
+ *
+ * `#private` members are included in the graph (they are how a read reaches a
+ * write) but never in the answer, which is about the public surface. A
+ * fixpoint, so a chain of any length is followed.
+ */
+function transitiveWriters(): Set<string> {
+  const lines = fs.readFileSync(SERVICE, 'utf8').split('\n');
+  const classStart = lines.findIndex((line) => /^export class HeadquarterOperations\b/.test(line));
+  const starts: { name: string; line: number }[] = [];
+  for (let i = classStart; i < lines.length; i += 1) {
+    const match = /^ {2}(#?[A-Za-z_][A-Za-z0-9_]*)\s*[(<]/.exec(lines[i]);
+    if (match && !CONTROL_WORDS.has(match[1])) starts.push({ name: match[1], line: i });
+  }
+  const bodies = new Map<string, string>();
+  for (let k = 0; k < starts.length; k += 1) {
+    const from = starts[k].line;
+    const to = k + 1 < starts.length ? starts[k + 1].line : lines.length;
+    // Overloads and re-declared names accumulate rather than overwrite.
+    bodies.set(starts[k].name, (bodies.get(starts[k].name) ?? '') + lines.slice(from, to).join('\n'));
+  }
+  const writers = new Set<string>();
+  for (const [name, body] of bodies) if (WRITE_MARKERS.test(body)) writers.add(name);
+  const callees = new Map<string, Set<string>>();
+  for (const [name, body] of bodies) {
+    const found = new Set<string>();
+    for (const call of body.matchAll(/this\.(#?[A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
+      if (bodies.has(call[1])) found.add(call[1]);
+    }
+    callees.set(name, found);
+  }
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const [name, called] of callees) {
+      if (writers.has(name)) continue;
+      for (const callee of called) {
+        if (writers.has(callee)) {
+          writers.add(name);
+          grew = true;
+          break;
+        }
+      }
+    }
+  }
+  return writers;
+}
+
 /** The first backticked identifier in each row of the table under `heading`. */
 function tableIdentifiers(heading: string): string[] {
   const doc = fs.readFileSync(PHASE_13, 'utf8').split('\n');
@@ -244,12 +352,49 @@ describe('safe-mode disposition is stated for every facade write, and the statem
     expect(unclassified.map((m) => m.name)).toEqual([]);
   });
 
-  it('nothing on the READ list reaches a write — the list cannot hide a mutator', () => {
+  it('nothing on the READ list writes DIRECTLY — the list cannot hide a mutator', () => {
     const byName = new Map(facadeMethods().map((m) => [m.name, m]));
     const stale = READS.filter((name) => !byName.has(name));
     expect(stale, 'READ list names a method that no longer exists').toEqual([]);
     const writers = READS.filter((name) => byName.get(name)!.writes);
     expect(writers).toEqual([]);
+  });
+
+  it('every READ that reaches a write TRANSITIVELY is named, with what it writes', () => {
+    // Round ten, Medium 1. The assertion above is a regex over one method body,
+    // which is precisely why two mutators sat on the READ list under a sentence
+    // that said none could. The call graph is followed instead, and everything
+    // it reaches has to be classified by hand — with the classification then
+    // MEASURED at the bottom of this file.
+    const reaching = transitiveWriters();
+    const unclassified = READS.filter(
+      (name) =>
+        reaching.has(name) &&
+        !READS_THAT_APPEND_AUDIT_EVIDENCE.includes(name) &&
+        !READS_REACHING_A_WRITE_ONLY_ON_AN_UNTAKEN_BRANCH.includes(name),
+    );
+    expect(
+      unclassified,
+      'a READ-list method reaches a write and is in neither classification list',
+    ).toEqual([]);
+    // The CONTRAST, spelled out, because it is the whole finding: the direct
+    // predicate the previous round relied on reports both of these as
+    // non-writers, and the measurement at the bottom of this file shows each
+    // appending a row. A per-body regex cannot see through a helper, so the
+    // sentence it was asked to enforce could never have been true.
+    const direct = new Map(facadeMethods().map((method) => [method.name, method.writes]));
+    for (const name of READS_THAT_APPEND_AUDIT_EVIDENCE) {
+      expect(direct.get(name), `${name} should be invisible to the DIRECT predicate`).toBe(false);
+    }
+    // The derivation is not vacuous: the two the review found are still found.
+    for (const name of READS_THAT_APPEND_AUDIT_EVIDENCE) {
+      expect(reaching.has(name), `${name} is no longer seen to reach a write`).toBe(true);
+      expect(READS).toContain(name);
+    }
+    for (const name of READS_REACHING_A_WRITE_ONLY_ON_AN_UNTAKEN_BRANCH) {
+      expect(reaching.has(name), `${name} is no longer seen to reach a write`).toBe(true);
+      expect(READS).toContain(name);
+    }
   });
 
   it('the phase document REFUSED table names exactly the methods the code refuses', () => {
@@ -548,6 +693,124 @@ describe('the round-seven dispositions hold at runtime, not only in the source s
       if (!reconciled.ok) expect(reconciled.error.code).not.toBe('safe_mode_engaged');
     } finally {
       fx.cleanup();
+    }
+  });
+});
+
+/**
+ * The MEASURED half of the round-ten classification (Medium 1).
+ *
+ * A static reachability answer is an over-approximation and a hand-written
+ * reason is a claim. Both are settled here by counting rows in every table
+ * before and after the call, so "appends one audit row and nothing else" and
+ * "writes nothing at all" are facts rather than sentences.
+ */
+function tableCounts(db: HqDatabase): Record<string, number> {
+  const tables = (
+    db
+      .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+      .all() as { name: string }[]
+  ).map((row) => row.name);
+  const counts: Record<string, number> = {};
+  for (const table of tables) {
+    counts[table] = (db.prepare(`SELECT COUNT(*) AS n FROM "${table}"`).get() as { n: number }).n;
+  }
+  return counts;
+}
+
+/** Which tables grew, and by how much. */
+function rowsWritten(db: HqDatabase, act: () => unknown): Record<string, number> {
+  const before = tableCounts(db);
+  act();
+  const after = tableCounts(db);
+  const delta: Record<string, number> = {};
+  for (const [table, count] of Object.entries(after)) {
+    if (count !== (before[table] ?? 0)) delta[table] = count - (before[table] ?? 0);
+  }
+  return delta;
+}
+
+describe('what each classified READ actually writes, measured rather than asserted', () => {
+  it('reconciliationAuthorityRefusal appends exactly one op_evidence row on a REFUSAL, and nothing else', () => {
+    const fx = setupFixture();
+    // A principal that exists but holds no approval authority: the refusal
+    // path, which is the one that audits.
+    expect(rowsWritten(fx.db, () => fx.ops.reconciliationAuthorityRefusal('analyst'))).toEqual({
+      op_evidence: 1,
+    });
+    // An id that resolves to nothing at all: same audited refusal.
+    expect(rowsWritten(fx.db, () => fx.ops.reconciliationAuthorityRefusal('nobody'))).toEqual({
+      op_evidence: 1,
+    });
+    // And the two paths that are NOT a refusal of a human decider write
+    // nothing, so the audit is scoped to the act it is about.
+    expect(rowsWritten(fx.db, () => fx.ops.reconciliationAuthorityRefusal('founder'))).toEqual({});
+    expect(rowsWritten(fx.db, () => fx.ops.reconciliationAuthorityRefusal('claude'))).toEqual({});
+  });
+
+  it('evaluateTaskEligibility appends exactly one op_evidence row, and nothing else', () => {
+    const fx = setupFixture();
+    const created = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { repo: 'jenify-os' },
+        requestedBy: 'claude',
+      }),
+    );
+    expect(rowsWritten(fx.db, () => fx.ops.evaluateTaskEligibility(created.task.id))).toEqual({
+      op_evidence: 1,
+    });
+  });
+
+  it('the two the call graph only SUSPECTS write nothing at all', () => {
+    const fx = setupFixture();
+    const created = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { repo: 'jenify-os' },
+        requestedBy: 'claude',
+      }),
+    );
+    expect(
+      rowsWritten(fx.db, () =>
+        fx.ops.intelligenceBudgetDecision({
+          scopeKind: 'deployment',
+          scopeId: 'deployment',
+          window: 'total',
+        }),
+      ),
+    ).toEqual({});
+    expect(
+      rowsWritten(fx.db, () =>
+        fx.ops.intelligenceRoutingProposal({
+          taskId: created.task.id,
+          complexity: 'routine',
+          contextSize: 'medium',
+          workKind: 'coding',
+        }),
+      ),
+    ).toEqual({});
+  });
+
+  it('a sample of the plain READ list writes nothing — the classification is not covering for the rest', () => {
+    const fx = setupFixture();
+    const created = expectOk(
+      fx.ops.createTask({
+        capabilityId: CAPS.readStatus,
+        payload: { repo: 'jenify-os' },
+        requestedBy: 'claude',
+      }),
+    );
+    for (const [name, act] of [
+      ['killSwitchScopes', () => fx.ops.killSwitchScopes()],
+      ['replacementPlan', () => fx.ops.replacementPlan('claude')],
+      ['hqReliabilityPosture', () => fx.ops.hqReliabilityPosture()],
+      ['commandCenterSummary', () => fx.ops.commandCenterSummary()],
+      ['founderInbox', () => fx.ops.founderInbox()],
+      ['getTaskContext', () => fx.ops.getTaskContext(created.task.id)],
+      ['lookupPrincipal', () => fx.ops.lookupPrincipal('founder')],
+    ] as [string, () => unknown][]) {
+      expect(rowsWritten(fx.db, act), name).toEqual({});
     }
   });
 });

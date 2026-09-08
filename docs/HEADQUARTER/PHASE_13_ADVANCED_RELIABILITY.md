@@ -301,7 +301,7 @@ that no longer has the disposition it claims fails it too.
 |---|---|
 | `approveTask` | an approval bound to a record HQ cannot stand behind would sit primed to run the moment safe mode clears. |
 | `acceptTruth` | the Founder's approval-authority, digest-bound, step-up-gated, one-shot acceptance of a truth record. Acceptance executes nothing — no task, approval row, claim or dispatch is touched — which is why this was a Medium rather than a High; it is refused anyway because an act the shipped sentence calls APPROVE must either be refused or be here in the other table with its reason. |
-| `claimNext` | a claim hands work to a worker. Refused as `safe_mode_engaged`, distinctly from `nothing_claimable`. |
+| `claimNext` | a claim hands work to a worker. Refused as `safe_mode_engaged`, distinctly from `nothing_claimable`. **And the refusal now lives at the CANONICAL boundary as well** (Wave 5 correction round ten, High 3). It used to live only here, in the wrapper, while `HeadquarterOperations.queue` is a `public readonly` field and `src/operator/queue.ts` contained zero occurrences of `safeMode` — so with safe mode genuinely latched, `ops.claimNext(...)` was refused and `ops.queue.claim(...)` SUCCEEDED, and a hostile reviewer ran the whole lifecycle through the delegate (`claim` → `start` → `heartbeat` → `complete`, task reaching `running`). `OperatorQueue.claim` now consults the latch first, through a `#private` gate installed by this facade and unreachable from any object a caller holds. Pinned by `queue-safe-mode-enforcement.test.ts`, including a hostile-patch case. |
 | `releaseKillSwitch` | the direction that lets work run again. |
 | `declareWorkerProvider` | it is what lets a worker claim provider-bound work at all, so it ADDS authority. |
 | `registerExecutionWorker` | creates a worker identity WITH its `allowedCapabilities`, straight into the table `#grantOf` reads at every enforcement point. Create-only, with no revoke path. |
@@ -343,7 +343,7 @@ that no longer has the disposition it claims fails it too.
 
 | Left available | Why |
 |---|---|
-| `createTask` | a queued task is a request that cannot execute: claiming it is refused, so nothing it carries can happen while safe mode stands. Refusing creation would stop a Founder recording the very work that fixes the store. |
+| `createTask` | a queued task is a request that cannot execute: claiming it is refused, so nothing it carries can happen while safe mode stands. Refusing creation would stop a Founder recording the very work that fixes the store. **This sentence was FALSE as written until round ten and is now true** (High 3): the claim refusal lived only in `claimNext`, and the same task was claimable through `ops.queue.claim` — so a queued task carried plenty that could happen. The refusal is now enforced in `OperatorQueue.claim` itself. |
 | `assignTask` | assignment narrows who MAY claim; the claim itself is refused. It removes an option, it never adds one. |
 | `routeTask` | advisory routing. `eligible` is computed from the capability registry and the directory allow-list, it changes no canonical state, and the claim it might inform is refused anyway. The only thing it can write is an evidence note saying a nomination source misbehaved. |
 | `denyTask` | the fail-safe direction. |
@@ -564,17 +564,21 @@ verified.**
 
 `verifyHqBackupFile` is read-only with respect to the CANDIDATE in the
 strongest available sense — the file is opened `O_RDONLY | O_NOFOLLOW` and
-never written, and no `-wal`/`-shm` is created beside it. Fifteen categorical
+never written, and no `-wal`/`-shm` is created beside it. Sixteen categorical
 refusals, never an exception: `path_not_absolute`, `path_not_normalized`,
 `path_missing`, `path_is_symlink`, `path_not_a_regular_file`,
 `path_not_readable`, `file_empty`, `file_too_large`,
 `file_has_multiple_links`, `sidecar_journal_present`,
 `candidate_is_the_live_database`, `verification_copy_failed`,
 `not_a_readable_sqlite_database`, `integrity_check_failed`,
-`not_an_hq_database`. **This sentence said "thirteen" and "ten of the thirteen"
-until round twelve (Low 3)**, and omitted `file_has_multiple_links` and
-`candidate_is_the_live_database` from its own list — two refusals this wave
-added without the paragraph naming them. Twelve of the fifteen are exercised
+`not_an_hq_database`, `would_latch_safe_mode`. **This sentence said "thirteen"
+and "ten of the thirteen" until round twelve (Low 3)**, and omitted
+`file_has_multiple_links` and `candidate_is_the_live_database` from its own
+list — two refusals this wave had added without the paragraph naming them. It
+went stale a third time within the same round, at the merge with the concurrent
+round-ten lane, which added `would_latch_safe_mode`: the new pin caught that
+drift rather than a reviewer having to, which is the whole point of pinning a
+count to its constant. Thirteen of the sixteen are exercised
 against real files on disk — a relative path, an unnormalized absolute one, a missing one, a
 directory, an empty file, a symlink, a file of prose, a corrupted SQLite image,
 a valid SQLite database that is simply somebody else's, and a genuine backup
@@ -802,6 +806,42 @@ folded.
 everything is fine while HQ has said otherwise about itself has been lied to,
 and that is the one thing this phase exists to prevent. The finding CATEGORY
 crosses; the detail — which names schema objects — does not.
+
+### The unauthenticated artifact IS a Founder-text publication surface
+
+Stated plainly here for the first time (Wave 5 correction round ten, NEW LOW).
+Everything above is about the `reliability` section, and it is accurate about
+that section. The artifact AS A WHOLE is a different question, and the answer
+is that it does carry Founder-typed text, in a file served with no
+authentication at all.
+
+The review named the task `title`. Measured at this head by writing a
+distinctive string into each field and searching the whole artifact, it is
+**four fields, not one** — the wider answer is recorded here rather than the
+narrower one that was reported:
+
+| Founder-typed field | Where it lands in `hq-snapshot.json` |
+|---|---|
+| `createTask` → `title` | `operations.data.<lane>[].title`, and folded into `commandCenter.data.attention.items[].summary` |
+| `createTask` → `project` | `operations.data.<lane>[].project` |
+| `denyTask` → `reason` | `operations.data.blocked[].blockReason`, `activity.data[].summary`, and the same `attention` summary |
+| `createTask` → `payload` | **nowhere.** Probed with the same method; it does not cross. |
+
+This is almost certainly intended, and it is why scanning these columns is
+load-bearing rather than tidy: `title`, `project` and `reason` are three of the
+columns a credential shape permanently bricked Founder routes through, and they
+are the same columns that reach the public artifact. It is also why the task
+PAYLOAD's carve-out from the credential scan is defensible — it is the one
+piece of caller text that is neither served to a Founder route nor published
+here, and its guard lives at the dispatch lane that would publish it.
+
+No behaviour is changed by this row. What changes is that the property is
+written down: **a task title, its project, and the reason a Founder gave for
+denying it are public.** Anyone composing one should know that, and any future
+field added beside them inherits the same question rather than the same
+silence. Pinned by `unauthenticated-founder-text.test.ts`, which writes a
+distinctive string into each of the four and asserts exactly this table — so
+the disclosure fails the suite if the behaviour changes in either direction.
 
 **That is true of the store-ABSENT branch too, and it was not (Wave 5
 High 5).** `reliabilitySummary()` returned a hard-coded
@@ -2592,16 +2632,43 @@ by reverting the fix, running the test, and restoring.
   boot=false [] assess=false release=ADMITTED`. It is one more deliberate act
   than the route that is now closed, and it is the same residual class as
   zeroing `PRAGMA user_version`.
-- **A declared ledger that is not `AUTOINCREMENT` contributes nothing to the
-  truncation check.** It has no `sqlite_sequence` row, so there is no mark to
-  contradict. This is stated rather than covered by a mark that would always
-  read zero. The five are `hq_memory`, `hq_mission_intents`,
-  `hq_mission_plan_items`, `hq_missions` and `hq_orchestration_runs` — NAMED
-  here since round seven, Medium 2, because the sentence that used to close this
-  bullet ("every ledger the check currently protects does have one") is a
-  tautology that reads as an all-clear. They are covered by
-  `regressedImmutableLedgers` since round seven, High 1; they were covered by
-  nothing before it.
+- **The five declared ledgers that are not `AUTOINCREMENT` are covered by the
+  COMMITMENT check rather than by the engine's high-water check, and before Wave
+  5 correction round seven they were covered by NEITHER.** Two lanes found this
+  independently — round seven, High 1, and round ten, Medium 4 — and both
+  measurements are kept, because they are different experiments on the same
+  hole. The row that stood here before either was a tautology: it said such a
+  ledger "contributes nothing", named neither the count nor the ledgers, and
+  closed with "every ledger the check currently protects does have one", which
+  reads as an all-clear. What it glossed over was a fail-OPEN hole against the
+  identical attack the other twenty-eight are protected from. The five are
+  `hq_memory`, `hq_mission_intents`, `hq_mission_plan_items`, `hq_missions` and
+  `hq_orchestration_runs`, out of thirty-three declared.
+  Executed against `ae4bf90` on `hq_mission_plan_items`, the ledger through
+  which a task's mission and its project ceiling are derived — drop the guards,
+  `DELETE`, put the guards back: `boot=false [] assess=false []
+  release=ADMITTED`, permanently. Measured again as a MATCHED PAIR by the other
+  lane, running the same three statements against one of the five and against a
+  control: erasing `hq_missions` gave `safeMode: false, blocking: []` and a FULL
+  assessment of `{}` with three committed missions gone, while erasing
+  `op_evidence` correctly gave `safeMode: true, blocking:
+  ['append_only_ledger_truncated']`.
+  `immutableLedgerMarks` is now driven by the DECLARATION rather than by a
+  `sqlite_sequence` scan — the mark it publishes was always `MAX(rowid)`; the
+  sequence row was only deciding which tables got one — and it reads through
+  `declaredLedgerIdentities`, which commits each ledger's row COUNT beside its
+  greatest rowid. So every declared ledger contributes a commitment and
+  `regressedImmutableLedgers` compares it. It is sound for exactly these tables
+  because all thirty-three declare `no_erase`, so `MAX(rowid)` on a declared
+  ledger only ever rises.
+  **The difference that remains, stated rather than smoothed over:**
+  `truncatedImmutableLedgers` measures a ledger against the ENGINE's own
+  high-water mark, which genuinely does not exist for the five, so their alarm
+  needs a prior healthy boot to have recorded a commitment first. Pinned by
+  `ledger-identity.test.ts` and by
+  `immutable-ledger-truncation-coverage.test.ts`, the second of which also fails
+  if a sixth non-`AUTOINCREMENT` ledger is declared without this row being
+  revisited.
 - **`DROP TABLE hq_integrity_checkpoints` is not a surviving ROUTE any more; it
   is a permanent lockout, and the operational half of that is the part that
   matters** (round twelve, Medium 4). This bullet priced it at "one extra
@@ -3542,8 +3609,10 @@ structure holding a view; both closed rather than disclosed, because "no call
 site reaches it today" is the reasoning the freeze census exists to stop anyone
 relying on.
 
-**Verification at the round-twelve head** (the whole matrix, all green, exit 0):
-`npm run test:hq` **187 files / 3381 tests** (up from `48dd026`'s 186 / 3357);
+**Verification at the round-twelve head, MERGED with the concurrent round-ten
+lane** (the whole matrix, all green, exit 0): `npm run test:hq` **191 files /
+3421 tests** (this lane alone was 187 / 3381 on top of `48dd026`'s 186 / 3357;
+the other lane's `e58b95c` brought the rest);
 root `npm test` **37 files / 569 passed + 3 pre-existing skips**; hq-host
 **23 / 222**; hq-server **2 / 20**; typechecks clean for
 `@factoryos/headquarter`, `@factoryos/hq-host` and `@factoryos/hq-server`;
@@ -3553,6 +3622,18 @@ against the accepted base `f1ce71c` touches `packages/server`, `packages/web`,
 `packages/shared`, `packages/config-mesob`, `packages/hq-host`, `apps`,
 `package.json` and `package-lock.json` not at all, and no test file was deleted
 or renamed. Zero new dependencies.
+
+**The merge kept both lanes and re-measured rather than re-asserted.** Three
+files conflicted. In `contracts/freeze.ts` and
+`test/frozen-constants-census.test.ts` both lanes had appended to the same
+region and both sides are kept whole. In this page the other lane had rewritten
+the non-`AUTOINCREMENT` bullet while this one rewrote the `DROP TABLE` bullet
+immediately after it; their rewrite and this correction are both kept. **One
+number moved because of the merge and the new pin is what caught it**: the other
+lane added a sixteenth backup refusal, `would_latch_safe_mode`, so the count
+corrected above from thirteen to fifteen went stale again inside the same round
+and is now sixteen, with thirteen exercised. That is the pin doing the job the
+absence of one had left to reviewers three times.
 
 **Each fix was verified to FAIL against `48dd026`** rather than merely to pass
 here, by checking the new tests out into a `git archive` of that head: 12

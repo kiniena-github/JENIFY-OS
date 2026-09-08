@@ -395,6 +395,15 @@ describe('HQ’s own commitment ledger is checked against itself', () => {
    * ledger has ever reached is recorded in the database header, which no
    * `sqlite_sequence` write can touch, so the very first boot after the wipe is
    * already blocking. Nothing is bought at all now.
+   *
+   * The MERGE of the two lanes is where this last sentence was re-measured
+   * rather than assumed. The round-ten lane's own version of this test still
+   * asserted `safeMode === false` on the first boot and priced the forgery at
+   * one clean boot, because at that head the header record did not exist. With
+   * both fixes composed the first boot is blocking, so that assertion is
+   * REPLACED by the stronger one below — the only expectation in this merge
+   * that moved, and it moved upward. Executed against the merged head before
+   * this sentence was written.
    */
   it('no longer sells even one clean process for the cheaper one-statement repair', () => {
     const fx = fileFixture();

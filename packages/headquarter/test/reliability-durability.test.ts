@@ -42,7 +42,7 @@ import {
   truncatedImmutableLedgers,
   verifyHqBackupFile,
 } from '../src/store/integrity.js';
-import { verifyEvidenceChain } from '../src/operator/evidence.js';
+import { ensureEvidenceGuards, verifyEvidenceChain } from '../src/operator/evidence.js';
 import { reliabilitySchemaPresent } from '../src/application/reliability-command.js';
 import { HeadquarterOperations } from '../src/application/service.js';
 import { HeadquarterStore } from '../src/store/headquarter.js';
@@ -1461,6 +1461,16 @@ describe('backup verification, against real bytes on disk', () => {
       const db = openHqDatabase(candidate);
       db.exec('CREATE TABLE IF NOT EXISTS hq_events (x TEXT)');
       db.exec('CREATE TABLE later_addition (x TEXT)');
+      // The append-only guards on `op_evidence`, which `openHqDatabase` alone
+      // does not install — every real HQ file has them, because every facade
+      // construction ensures them. Needed here since Wave 5 correction round
+      // ten (High 4): `verifyHqBackupFile` now runs HQ's OWN census over the
+      // copy, and a file whose audit log carries no immutability guards is
+      // refused `would_latch_safe_mode` rather than verified. That refusal is
+      // correct and is pinned in `backup-verification-census.test.ts`; what
+      // THIS test is about is the WAL sidecar, so the candidate is made a
+      // sound HQ file and the sidecar behaviour is what it still measures.
+      ensureEvidenceGuards(db);
       // WAL mode with no checkpoint: the newest table is in the sidecar.
       expect(fs.existsSync(`${candidate}-wal`)).toBe(true);
       expect(fs.statSync(`${candidate}-wal`).size).toBeGreaterThan(0);

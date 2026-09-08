@@ -75,6 +75,46 @@
  *   exists to withhold — a one-statement escape, executed before this sentence
  *   was written. The wrapper passes the view.
  *
+ * "The raw collection never escapes" is a property of the CALL SITES as much as
+ * of this module: the proxy target is the very object `deepFreeze` was handed,
+ * so a caller that named its collection before freezing it would still hold a
+ * mutable reference. Both of this package's frozen collections
+ * (`QUEUED_UNREACHABLE_STATUSES` in `contracts/events.ts`, `QUERY_STOPWORDS` in
+ * `application/search-command.ts`) construct the collection inline in the
+ * `deepFreeze(...)` argument, so nothing outside this module names one. That is
+ * stated rather than assumed, because it is the half a future call site could
+ * break without touching this file.
+ *
+ * ## Two lanes fixed this, and this is the one that shipped
+ *
+ * Round ten reached the same defect from two directions. The other lane replaced
+ * a frozen collection with a hand-built frozen VIEW OBJECT — no `[[SetData]]`
+ * slot at all, so the prototype spelling throws for the same reason it throws
+ * here. Its evidence, executed against the pre-fix head, is kept because it is
+ * what made the defect real rather than theoretical:
+ *
+ * ```
+ * own .clear()              -> threw
+ * Set.prototype.clear.call  -> SUCCEEDED (size 86 -> 0 on QUERY_STOPWORDS)
+ * Map.prototype.delete.call -> SUCCEEDED
+ * ```
+ *
+ * and it reached a gate rather than only a constant: emptying
+ * `QUEUED_UNREACHABLE_STATUSES` by prototype call flipped `assignTask` on a
+ * COMPLETED task from `refused: task_beyond_claiming` to ACCEPTED
+ * (`service.ts`'s `assignmentBarrier`). That consequence is pinned in
+ * `test/frozen-constants-census.test.ts`.
+ *
+ * The `Proxy` is what ships, because the view object closed the bypass at the
+ * cost of no longer BEING a collection: `deepFreeze(new Set(...)) instanceof
+ * Set` would have become false, and `live/redaction.ts`'s walker branches on
+ * `value instanceof Map` / `value instanceof Set` to reach a collection's
+ * entries at all. A frozen vocabulary would have fallen through to the
+ * own-property path and been walked as an empty object — a silent narrowing of
+ * the credential scan, traded for a bypass that the `Proxy` closes just as
+ * completely. Both lanes' assertions are kept and both pass against this
+ * mechanism.
+ *
  * ## Two holes in this helper itself, closed rather than disclosed
  *
  * Round twelve (Low 5) found both. Neither was reachable from this package —

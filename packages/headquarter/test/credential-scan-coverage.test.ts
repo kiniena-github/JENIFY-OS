@@ -22,6 +22,20 @@
  * The hand count is replaced by the enumeration below, so the claim cannot
  * drift again: every member of the facade that calls `missionText` must also
  * call the scan, computed from the source rather than asserted about it.
+ *
+ * **This file's predicate was HALF of the round-ten root cause, and it is
+ * corrected here rather than left as the second copy of the same mistake**
+ * (Wave 5 correction round ten, Medium 2). It asked
+ * `/assertNoCredentialShape\(/` over a member body — the identical
+ * per-METHOD boolean `facade-write-scan.test.ts` asked — so two independent
+ * derived assertions could not catch what either one missed, and three live
+ * outages sat underneath both. The per-PARAMETER derivation now lives in
+ * `facade-write-scan.test.ts`, which is the file that owns the "every write,
+ * every parameter" property; this file keeps the DIFFERENT property it was
+ * built for — that a LENGTH bound is never mistaken for a content check — and
+ * its predicate accepts either guard, because a member whose whole input goes
+ * through `callerTextRefusal` has scanned that text just as surely as one
+ * naming the field explicitly.
  */
 
 import fs from 'node:fs';
@@ -84,7 +98,7 @@ describe('every facade write that bounds caller text also scans it', () => {
       (member) => /missionText\(/.test(member.body) && member.name !== 'function missionText',
     );
     const unscanned = callers
-      .filter((member) => !/assertNoCredentialShape\(/.test(member.body))
+      .filter((member) => !/assertNoCredentialShape\(|callerTextRefusal\(/.test(member.body))
       .map((member) => `${member.name} @ service.ts:${member.line}`);
     // The whole point: named, not counted. A future write that bounds text and
     // forgets the scan is reported here by name.

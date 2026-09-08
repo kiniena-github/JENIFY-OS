@@ -95,6 +95,8 @@ import {
 import {
   GLOBAL_SCOPE,
   OperatorQueue,
+  SafeModeEngaged,
+  installQueueSafeModeGate,
   type OperatorTask,
   type PrivilegedQueueApi,
   type ReconcileDecision,
@@ -153,15 +155,31 @@ import { PROVIDERS, type ProviderId } from '../routing/providers.js';
  * rather than asserted by a comment, and a future tightening has to move the
  * disclosure with it.
  *
- * **Which writes it covers, exactly** (Wave 5 correction round seven, Medium 2).
- * The previous round said "every facade write" while `createTask`'s `title`
- * and `project`, `failTask`'s `reason` and `registerExecutionWorker`'s
- * `displayName` all reached storage unscanned — and each of those three was
- * executed into a PERMANENT `500` on Founder read routes (`title` →
- * `/state` + `/commandCenter`; `reason` → the same pair; `displayName` →
- * `/state` + `/workforce` + `/commandCenter`), because no HQ command can
- * rewrite those columns. The sentence is now true of the facade, with ONE
- * carve-out that is named rather than implied: `createTask`'s task PAYLOAD.
+ * **Which writes it covers, exactly — and this sentence has now been falsified
+ * three times, so it is DERIVED rather than asserted** (Wave 5 correction
+ * round seven, Medium 2; round ten, Medium 2 and NEW MEDIUM B).
+ *
+ * Round four said "every facade write" while `createTask`'s `title` and
+ * `project`, `failTask`'s `reason` and `registerExecutionWorker`'s
+ * `displayName` all reached storage unscanned. Round seven fixed those four,
+ * re-stated the sentence as "now true of the facade, with ONE carve-out", and
+ * was falsified three more times by execution:
+ * `registerExecutionWorker`'s `workerId`, `engageKillSwitch`'s `scope`, and
+ * `setIntelligenceBudget`'s `scopeId` together with
+ * `recordModelObservation`'s `providerId` and `modelId`. Each of the seven was
+ * executed into a PERMANENT `500` on a Founder read route, because no HQ
+ * command can rewrite those columns.
+ *
+ * The reason it kept being wrong was the enforcement, not the wording: both
+ * derived assertions asked `body.includes('assertNoCredentialShape')`, a
+ * BOOLEAN PER METHOD, so one scanned parameter credited every other parameter
+ * of the same method. The sentence is now made true by CONSTRUCTION rather
+ * than by inspection — `callerTextRefusal` below scans every string field of
+ * every facade write's input — and `facade-write-scan.test.ts` derives the
+ * coverage PER PARAMETER, naming any (method, parameter) pair that reaches
+ * neither guard. The ONE carve-out is named rather than implied and survives
+ * by construction rather than by exception: `createTask`'s task PAYLOAD is an
+ * object, not a string, so the whole-input scan does not reach it.
  * No control route serves a task payload — executed, and it bricked none while
  * the title bricked two — the queue applies the evidence log's heuristic to it
  * at `enqueue`, and the strict guard for it lives at the boundary that would
@@ -188,6 +206,83 @@ import { PROVIDERS, type ProviderId } from '../routing/providers.js';
  */
 function assertNoCredentialShape(fields: Record<string, unknown>): void {
   assertBrowserSafe(fields, 'stored_text');
+}
+
+/**
+ * EVERY string a facade write accepts, scanned before that write does anything
+ * else — the mechanism that makes the sentence above true of the code rather
+ * than asserted about it (Wave 5 correction round ten, Medium 2 and NEW
+ * MEDIUM B).
+ *
+ * ## Why a per-METHOD credit was the root cause
+ *
+ * The two derived assertions that were supposed to enforce the sentence both
+ * asked `body.includes('assertNoCredentialShape')` — a BOOLEAN PER METHOD. One
+ * scanned parameter therefore credited every OTHER parameter of the same
+ * method, and a curated `FREE_TEXT_PARAMETERS` vocabulary decided which
+ * parameters were looked at in the first place. Two independent misses stacked,
+ * and three live outages sat underneath a green suite of 3297 tests:
+ *
+ *  - `registerExecutionWorker` scanned `{ displayName, vendor }` and stored an
+ *    unscanned `workerId` straight into `hq_specialists.id`, permanently
+ *    `500`-ing `/state`, `/workforce` and `/commandCenter` — from a CREATE-ONLY
+ *    command with no removal path, reachable as shipped through
+ *    `cli/direct-order.ts --register-worker`;
+ *  - `engageKillSwitch` scanned `{ reason }` and passed an unscanned `scope`
+ *    to the privileged queue, bricking `/state`, `/commandCenter` and
+ *    `/commandCenterInbox`. Outside safe mode `releaseKillSwitch` with the
+ *    byte-exact scope clears it; UNDER safe mode `releaseKillSwitch` is refused
+ *    `safe_mode_engaged` while `engageKillSwitch` still accepted the value, so
+ *    there the outage had no remedy at all;
+ *  - `setIntelligenceBudget` scanned `{ note }` and `recordModelObservation`
+ *    scanned `{ note, basis }`, while `scopeId`, `providerId` and `modelId`
+ *    were bounded only by `isIdentifierSlug` — and that slug rule admits
+ *    `sk-…` and `ghp_…` verbatim. Both tables are INSERT-only, so one accepted
+ *    FACADE write permanently `500`-ed `GET /intelligence`.
+ *
+ * ## What is applied instead
+ *
+ * A whole-input scan at the top of every facade write, so coverage is a
+ * property of the CALL rather than of a vocabulary somebody has to remember to
+ * extend. `Object.entries` reaches every own enumerable field of the input
+ * object, which means a parameter ADDED to an input type in a future phase is
+ * scanned the day it is added, with nobody having to notice it.
+ *
+ * Only STRING-valued fields are scanned, and that is what keeps the one
+ * deliberate carve-out intact: `createTask`'s task PAYLOAD is a
+ * `Record<string, unknown>`, not a string, so it is not reached here — its
+ * guard stays at the boundary that would PUBLISH it (the dispatch lane), which
+ * two existing tests prove holds independently by writing a credential-shaped
+ * payload through `createTask` on purpose.
+ *
+ * `alreadyScanned` names the fields a method scans ITSELF, further down, with a
+ * message written for that field ("The approval note looks like it contains a
+ * credential…"). Those are skipped here so the specific refusal a Founder reads
+ * is still the one they used to read; they are covered, just not covered twice
+ * with a generic sentence in front of the specific one.
+ *
+ * `facade-write-scan.test.ts` derives the coverage from this call PER
+ * PARAMETER, so a string parameter that reaches neither this function nor an
+ * explicit scan is named there by method and by parameter.
+ */
+function callerTextRefusal(
+  // `object` rather than `Record<string, unknown>`: the callers hand in their
+  // own declared input types, which carry no index signature. Nothing is read
+  // off the shape — every field is reached through `Object.entries`.
+  fields: object,
+  alreadyScanned: readonly string[] = [],
+): OpsResult<never> | null {
+  const skip = new Set(alreadyScanned);
+  const strings: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (typeof value === 'string' && !skip.has(key)) strings[key] = value;
+  }
+  try {
+    assertNoCredentialShape(strings);
+  } catch (error) {
+    return fail('invalid_input', errorMessage(error));
+  }
+  return null;
 }
 
 /**
@@ -2765,6 +2860,15 @@ export class HeadquarterOperations {
         // happen after this constructor returns.
         (workerId) => this.#grantOf(workerId),
       );
+    // The safe-mode verdict, handed to the layer that actually owns the act of
+    // claiming (Wave 5 correction round ten, High 3). `#integrityReport` is a
+    // `#private` field of this class and the gate is a closure over `this`, so
+    // there is no property anywhere — on the queue, on its prototype, on this
+    // facade — that a caller can patch to change the answer. Installed for a
+    // SUPPLIED queue as well as a constructed one: a composition that hands in
+    // its own queue is exactly the composition the delegate route was reached
+    // through, and gates are OR-ed, so adding one can only ever refuse more.
+    installQueueSafeModeGate(this.queue, () => this.#integrityReport.safeMode);
     this.#queuePrivileged = granted;
     // The WRITE side of the worker → provider map lives here and nowhere else
     // (issue #200, Codex round-3 P1 #1). It is private: the only ways in are
@@ -3039,6 +3143,8 @@ export class HeadquarterOperations {
    * write H3 did not reach.
    */
   createTask(input: CreateTaskInput): OpsResult<CreatedTask> {
+    const unsafeCallerText = callerTextRefusal(input, ['project', 'title']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.capabilityId || !input.requestedBy) {
       return fail('invalid_input', 'capabilityId and requestedBy are required');
     }
@@ -3106,6 +3212,8 @@ export class HeadquarterOperations {
    * while safe mode stands, so a routing answer cannot become an act.
    */
   routeTask(taskId: string): OpsResult<TaskRouting> {
+    const unsafeCallerText = callerTextRefusal({ taskId });
+    if (unsafeCallerText) return unsafeCallerText;
     const task = this.queue.get(taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
     const cap = this.queue.capabilities.get(task.capabilityId);
@@ -3212,6 +3320,8 @@ export class HeadquarterOperations {
     assignedBy: string,
     rationale?: string,
   ): OpsResult<AssignmentIntent> {
+    const unsafeCallerText = callerTextRefusal({ taskId, workerId, assignedBy, rationale }, ['rationale']);
+    if (unsafeCallerText) return unsafeCallerText;
     const task = this.queue.get(taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
     try {
@@ -3285,6 +3395,8 @@ export class HeadquarterOperations {
    * mutation after this call.
    */
   approveTask(input: ApproveTaskInput): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     const task = this.queue.get(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
     const principal = this.#assertApprovalAuthority(input.founderId, 'approve');
@@ -3363,6 +3475,8 @@ export class HeadquarterOperations {
 
   /** Founder denial. Blocks the task with an immutable, reasoned record. */
   denyTask(input: DenyTaskInput): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal(input, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
     const task = this.queue.get(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
     const principal = this.#assertApprovalAuthority(input.founderId, 'deny');
@@ -3433,6 +3547,8 @@ export class HeadquarterOperations {
     leaseMs?: number,
     onlyTaskId?: string,
   ): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal({ workerId, capabilityId, onlyTaskId });
+    if (unsafeCallerText) return unsafeCallerText;
     const cap = this.queue.capabilities.get(capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${capabilityId} is disabled`);
@@ -3500,6 +3616,14 @@ export class HeadquarterOperations {
     try {
       claimed = this.queue.claim(workerId, capabilityId, leaseMs, onlyTaskId);
     } catch (error) {
+      // The canonical boundary's own safe-mode refusal, translated back to the
+      // typed code this method already answers with. Unreachable through this
+      // path — the `#safeModeRefusal` above answers first — and kept anyway,
+      // so a caller that reaches the queue by any route gets one refusal with
+      // one name (Wave 5 correction round ten, High 3).
+      if (error instanceof SafeModeEngaged) {
+        return fail('safe_mode_engaged', errorMessage(error));
+      }
       if (error instanceof ProviderBindingViolation) {
         return fail('provider_binding_mismatch', error.message, {
           taskId: error.taskId,
@@ -3520,6 +3644,8 @@ export class HeadquarterOperations {
    * `OperatorQueue.start()`.
    */
   startTask(taskId: string, workerId: string, fence: number): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal({ taskId, workerId });
+    if (unsafeCallerText) return unsafeCallerText;
     const human = this.#rejectHumanExecution(workerId, 'start work');
     if (human) return human;
     const assignability = this.#workers.assignability(workerId);
@@ -3541,6 +3667,8 @@ export class HeadquarterOperations {
   }
 
   heartbeat(taskId: string, workerId: string, fence: number, leaseMs?: number): OpsResult<null> {
+    const unsafeCallerText = callerTextRefusal({ taskId, workerId });
+    if (unsafeCallerText) return unsafeCallerText;
     try {
       this.queue.heartbeat(taskId, workerId, fence, leaseMs);
       return ok(null);
@@ -3571,6 +3699,8 @@ export class HeadquarterOperations {
     result: Record<string, unknown>,
     evidenceRefs: string[] = [],
   ): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal({ taskId, workerId });
+    if (unsafeCallerText) return unsafeCallerText;
     const existing = this.queue.get(taskId);
     if (!existing) return fail('unknown_task', `Unknown task: ${taskId}`);
     if (existing.reviewState === 'pending') {
@@ -3603,6 +3733,8 @@ export class HeadquarterOperations {
    * with no HQ command able to rewrite the column.
    */
   failTask(taskId: string, workerId: string, fence: number, reason: string): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal({ taskId, workerId }, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
     try {
       assertNoCredentialShape({ reason });
     } catch (error) {
@@ -3636,6 +3768,8 @@ export class HeadquarterOperations {
     verdict: 'pass' | 'fail',
     note = '',
   ): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal({ taskId, reviewerId }, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (verdict === 'fail' && !note) {
       return fail('invalid_input', 'A failed review requires a reason');
     }
@@ -3675,6 +3809,8 @@ export class HeadquarterOperations {
     by: string,
     note: string,
   ): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal({ taskId, by, note }, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!note) return fail('invalid_input', 'Reconciliation requires a note');
     try {
       assertNoCredentialShape({ note });
@@ -3738,6 +3874,8 @@ export class HeadquarterOperations {
     /** The task's status afterwards — `needs_approval`, or `blocked` if hostile. */
     status: ActivityStatus;
   }> {
+    const unsafeCallerText = callerTextRefusal({ taskId });
+    if (unsafeCallerText) return unsafeCallerText;
     const task = this.queue.get(taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
     try {
@@ -3771,6 +3909,8 @@ export class HeadquarterOperations {
    * caller told plainly why.
    */
   engageKillSwitch(scope: string, founderId: string, reason: string): OpsResult<null> {
+    const unsafeCallerText = callerTextRefusal({ scope, founderId }, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
     const principal = this.#assertApprovalAuthority(founderId, 'engage the kill switch');
     if (principal) return principal;
     try {
@@ -3783,6 +3923,8 @@ export class HeadquarterOperations {
   }
 
   releaseKillSwitch(scope: string, founderId: string): OpsResult<null> {
+    const unsafeCallerText = callerTextRefusal({ scope, founderId });
+    if (unsafeCallerText) return unsafeCallerText;
     const principal = this.#assertApprovalAuthority(founderId, 'release the kill switch');
     if (principal) return principal;
     // Phase 13, and the asymmetry is the point: ENGAGING a stop stays
@@ -3927,6 +4069,12 @@ export class HeadquarterOperations {
     kind: SystemEvidenceKind;
     payload: Record<string, unknown>;
   }): EvidenceEntry {
+    // The same whole-input scan every other facade write applies, raised as
+    // the exception this surface answers with rather than as an `OpsResult`
+    // refusal: `appendSystemEvidence` throws. `payload` is an object, so it
+    // is not reached — see `callerTextRefusal`.
+    const unsafeCallerText = callerTextRefusal(entry);
+    if (unsafeCallerText && !unsafeCallerText.ok) throw new Error(unsafeCallerText.error.message);
     this.#assertSystemEvidenceActor(entry.actor);
     // Named separately from the generic "not a system evidence kind" refusal.
     // An outcome kind is not an unknown string — it is a real kind this surface
@@ -4034,6 +4182,8 @@ export class HeadquarterOperations {
     providerId: string;
     founderId: string;
   }): OpsResult<WorkerProviderRecord> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     // Safe mode, FIRST and categorically (Wave 5 correction round three,
     // Medium A8). A provider declaration is what lets a worker claim
     // provider-bound work at all, so it ADDS authority — and `registerExecution
@@ -4146,6 +4296,8 @@ export class HeadquarterOperations {
     allowedCapabilities: readonly string[];
     founderId: string;
   }): OpsResult<WorkerDescriptor> {
+    const unsafeCallerText = callerTextRefusal(input, ['displayName', 'vendor']);
+    if (unsafeCallerText) return unsafeCallerText;
     // Safe mode, FIRST and categorically. This creates a worker identity WITH
     // its `allowedCapabilities`, straight into the table `#grantOf` reads at
     // every enforcement point — it ADDS AUTHORITY, and registration is
@@ -4256,6 +4408,8 @@ export class HeadquarterOperations {
    * reason. Removing a way to STOP something is never the safe answer.
    */
   revokeWorkerProvider(input: { workerId: string; founderId: string }): OpsResult<boolean> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     const principal = this.#assertApprovalAuthority(
       input.founderId,
       'revoke a worker execution provider',
@@ -4342,6 +4496,8 @@ export class HeadquarterOperations {
     reason: string;
     founderId: string;
   }): OpsResult<WorkerDescriptor> {
+    const unsafeCallerText = callerTextRefusal(input, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
     const refused = this.#assertApprovalAuthority(input.founderId, 'deactivate an execution worker');
     if (refused) return refused;
     const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
@@ -4537,6 +4693,8 @@ export class HeadquarterOperations {
   registerAiMember(
     input: RegisterMemberInput & { founderId: string },
   ): OpsResult<{ member: AiMember; warnings: string[]; enrichesExecutionWorker: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['displayName', 'modelId', 'modelVersion', 'providerId', 'toolMetadata']);
+    if (unsafeCallerText) return unsafeCallerText;
     const blocked = this.#safeModeRefusal('register an AI member');
     if (blocked) return blocked;
     const refused = this.#assertApprovalAuthority(input.founderId, 'register an AI member');
@@ -4611,6 +4769,8 @@ export class HeadquarterOperations {
     reason: string;
     founderId: string;
   }): OpsResult<{ member: AiMember; handoverRequired: MemberAssignment[] }> {
+    const unsafeCallerText = callerTextRefusal(input, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
     const refused = this.#assertApprovalAuthority(input.founderId, 'disable an AI member');
     if (refused) return refused;
     const registry = this.#aiMemberRegistry;
@@ -4684,6 +4844,8 @@ export class HeadquarterOperations {
     health: string;
     founderId: string;
   }): OpsResult<AiMember> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     const refused = this.#assertApprovalAuthority(input.founderId, "declare an AI member's health");
     if (refused) return refused;
     const registry = this.#aiMemberRegistry;
@@ -4757,6 +4919,8 @@ export class HeadquarterOperations {
     body: string;
     refs?: string[];
   }): OpsResult<{ messageId: string; containsActionLanguage: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['body']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.threadId || !input.author) {
       return fail('invalid_input', 'threadId and author are required');
     }
@@ -4788,6 +4952,8 @@ export class HeadquarterOperations {
     proposedBy: string;
     sourceMessageId?: string;
   }): OpsResult<MissionProposal> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.threadId || !input.capabilityId || !input.proposedBy) {
       return fail('invalid_input', 'threadId, capabilityId and proposedBy are required');
     }
@@ -4869,6 +5035,8 @@ export class HeadquarterOperations {
     project?: string;
     title?: string;
   }): OpsResult<CreatedTask> {
+    const unsafeCallerText = callerTextRefusal(input, ['project', 'title']);
+    if (unsafeCallerText) return unsafeCallerText;
     // Scanned HERE as well as inside `createTask`, deliberately. The two
     // fields are handed straight through, so today the delegated scan already
     // refuses before any write — but "this write is safe because the method it
@@ -4947,6 +5115,8 @@ export class HeadquarterOperations {
    * are refused. `note` is scanned before the first write.
    */
   rejectProposal(proposalId: string, by: string, note: string): OpsResult<MissionProposal> {
+    const unsafeCallerText = callerTextRefusal({ proposalId, by }, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     const proposal = this.getProposal(proposalId);
     if (!proposal) return fail('proposal_not_found', `Unknown proposal: ${proposalId}`);
     if (proposal.status !== 'proposed') {
@@ -5065,6 +5235,8 @@ export class HeadquarterOperations {
     /** Client dedupe hint — an INPUT to the derived key, never the key. */
     idempotencyKey?: string;
   }): OpsResult<{ mission: MissionRecord; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['acceptanceCriteria', 'constraints', 'instruction', 'objective', 'planItems', 'planSpecs', 'project', 'scope', 'title']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const title = missionText('title', input.title, MAX_MISSION_TITLE_LENGTH, true);
     if (!title.ok) return fail('invalid_input', title.message);
@@ -5397,6 +5569,8 @@ export class HeadquarterOperations {
     expectedStatus?: string;
     requestedBy: string;
   }): OpsResult<MissionRecord> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.missionId || !input.requestedBy) {
       return fail('invalid_input', 'missionId and requestedBy are required');
     }
@@ -5552,6 +5726,8 @@ export class HeadquarterOperations {
     supersedePlanItemSeqs?: number[];
     requestedBy: string;
   }): OpsResult<MissionRecord> {
+    const unsafeCallerText = callerTextRefusal(input, ['acceptanceCriteria', 'addPlanItems', 'addSpecs', 'amendment', 'constraints', 'objective', 'specifyPlanItems']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.missionId || !input.requestedBy) {
       return fail('invalid_input', 'missionId and requestedBy are required');
     }
@@ -5843,6 +6019,8 @@ export class HeadquarterOperations {
     taskId: string;
     requestedBy: string;
   }): OpsResult<MissionRecord> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.missionId || !input.requestedBy || !input.taskId) {
       return fail('invalid_input', 'missionId, planItemSeq, taskId and requestedBy are required');
     }
@@ -5972,6 +6150,8 @@ export class HeadquarterOperations {
     /** Resolved principal id. Set by the boundary, never read from a body. */
     requestedBy: string;
   }): OpsResult<OrchestrationReport> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.missionId || !input.requestedBy) {
       return fail('invalid_input', 'missionId and requestedBy are required');
     }
@@ -6440,6 +6620,8 @@ export class HeadquarterOperations {
     projectId: string | null;
     requestedBy: string;
   }): OpsResult<MissionRecord> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.missionId || !input.requestedBy) {
       return fail('invalid_input', 'missionId and requestedBy are required');
     }
@@ -6765,6 +6947,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ project: ProjectRecord; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['name', 'purpose', 'stream']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const name = missionText('name', input.name, MAX_PROJECT_NAME_LENGTH, true);
     if (!name.ok) return fail('invalid_input', name.message);
@@ -6856,6 +7040,8 @@ export class HeadquarterOperations {
     stream?: string | null;
     requestedBy: string;
   }): OpsResult<ProjectRecord> {
+    const unsafeCallerText = callerTextRefusal(input, ['name', 'purpose', 'stream']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.projectId || !input.requestedBy) {
       return fail('invalid_input', 'projectId and requestedBy are required');
     }
@@ -6953,6 +7139,8 @@ export class HeadquarterOperations {
     expectedStatus?: string;
     requestedBy: string;
   }): OpsResult<ProjectRecord> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.projectId || !input.requestedBy) {
       return fail('invalid_input', 'projectId and requestedBy are required');
     }
@@ -7174,6 +7362,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ product: ProductRecord; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['name', 'problem', 'summary', 'targetUsers']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     if (!input.projectId) return fail('invalid_input', 'projectId is required');
     if (!isProductType(input.productType)) {
@@ -7315,6 +7505,8 @@ export class HeadquarterOperations {
     expectedState?: string;
     requestedBy: string;
   }): OpsResult<ProductRecord> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.productId || !input.requestedBy) {
       return fail('invalid_input', 'productId and requestedBy are required');
     }
@@ -7445,6 +7637,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ product: ProductRecord; artifactId: string; version: number; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['locator', 'name', 'note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.productId || !input.requestedBy) {
       return fail('invalid_input', 'productId and requestedBy are required');
     }
@@ -7976,6 +8170,8 @@ export class HeadquarterOperations {
     actionId?: string;
     idempotencyKey?: string;
   }): OpsResult<{ run: RunRecord; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['label']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.taskId || !input.workerId) return fail('invalid_input', 'taskId and workerId are required');
     if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
     if (!isRunKind(input.runKind)) {
@@ -8156,6 +8352,8 @@ export class HeadquarterOperations {
     workerId: string;
     fence: number;
   }): OpsResult<{ run: RunRecord; correlationId: string; generation: number }> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.runId || !input.workerId) return fail('invalid_input', 'runId and workerId are required');
     if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
     if (!this.#reliabilityStorePresent) {
@@ -8262,6 +8460,8 @@ export class HeadquarterOperations {
     failureCategory?: RunFailureCategory;
     note?: string;
   }): OpsResult<{ run: RunRecord }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.runId || !input.workerId) return fail('invalid_input', 'runId and workerId are required');
     if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
     if (!isReportableRunOutcome(input.outcome)) {
@@ -8391,6 +8591,8 @@ export class HeadquarterOperations {
    * elsewhere is REPORTED as counts with the canonical path that resolves it.
    */
   recoverInterruptedRuns(input: { requestedBy: string; reason?: 'process_interrupted' | 'stale_lease' | 'provider_outage' | 'partial_attempt' | 'stale_fence' }): OpsResult<HqRecoveryReport> {
+    const unsafeCallerText = callerTextRefusal(input, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
     const gate = this.#assertApprovalAuthority(input.requestedBy, 'recover interrupted runs');
     if (gate) return gate;
     if (!this.#reliabilityStorePresent) {
@@ -8527,6 +8729,8 @@ export class HeadquarterOperations {
     note: string;
     requestedBy: string;
   }): OpsResult<{ run: RunRecord }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     const runId = input.runId?.trim() ?? '';
     if (!runId) return fail('invalid_input', 'runId is required');
     if (!isRunReconcileDecision(input.decision)) {
@@ -8644,6 +8848,8 @@ export class HeadquarterOperations {
    * `OpsResult`, against this module's own "refusals, not exceptions" rule.
    */
   assessHqIntegrity(input: { requestedBy: string }): OpsResult<HqIntegrityView> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     const refusedActor = this.#resolveReliabilityCommander(input.requestedBy, 'assess HQ store integrity');
     if (refusedActor) return refusedActor;
     const refusedCapability = this.#reliabilityCapabilityGate('assess HQ store integrity');
@@ -8786,6 +8992,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     note?: string;
   }): OpsResult<{ backup: BackupRecordView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['backupPath', 'note']);
+    if (unsafeCallerText) return unsafeCallerText;
     const backupPath = input.backupPath?.trim() ?? '';
     if (!backupPath) return fail('invalid_input', 'backupPath is required');
     if (backupPath.length > MAX_BACKUP_PATH_LENGTH) {
@@ -9844,6 +10052,8 @@ export class HeadquarterOperations {
     note?: string;
     idempotencyKey?: string;
   }): OpsResult<{ observation: ModelObservationRow; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['basis', 'note']);
+    if (unsafeCallerText) return unsafeCallerText;
     // The same fold as `recordIntelligenceCost`, so a registry observation and a
     // cost entry name a provider the same way and a Founder can write either
     // spelling.
@@ -10015,6 +10225,8 @@ export class HeadquarterOperations {
     setBy: string;
     note?: string;
   }): OpsResult<{ budget: BudgetRecord }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!isBudgetScope(input.scopeKind)) {
       return fail('invalid_input', `scopeKind must be one of: ${BUDGET_SCOPES.join(', ')}`);
     }
@@ -10705,6 +10917,8 @@ export class HeadquarterOperations {
     reviewedByTier?: IntelligenceTier;
     note?: string;
   }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.decisionId || !input.workerId) {
       return fail('invalid_input', 'decisionId and workerId are required');
     }
@@ -10831,6 +11045,8 @@ export class HeadquarterOperations {
     note?: string;
     idempotencyKey?: string;
   }): OpsResult<{ entry: CostEntryRecord; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['basis', 'modelId', 'note', 'providerId']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.workerId) return fail('invalid_input', 'workerId is required');
     if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
     // FOLDED into this lane's vocabulary before it is checked (Wave 5
@@ -11336,6 +11552,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ record: MemoryBrowserView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['body', 'project', 'related', 'so', 'sourceRefs', 'tags', 'title']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     if (!isMemoryKind(input.kind)) {
       return fail('invalid_input', `kind must be one of: ${MEMORY_KINDS.join(', ')}`);
@@ -11737,6 +11955,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ record: TruthRecordView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['statement']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     if (!isTruthEntityKind(input.entityKind)) {
       return fail('invalid_input', `entityKind must be one of: ${TRUTH_ENTITY_KINDS.join(', ')}`);
@@ -11982,6 +12202,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ verification: TruthVerificationView; record: TruthRecordView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['limitations']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const truthId = input.truthId?.trim() ?? '';
     if (!truthId) return fail('invalid_input', 'truthId is required');
@@ -12185,6 +12407,8 @@ export class HeadquarterOperations {
     note?: string;
     requestedBy: string;
   }): OpsResult<{ acceptance: TruthAcceptanceView; record: TruthRecordView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     const truthId = input.truthId?.trim() ?? '';
     if (!truthId) return fail('invalid_input', 'truthId is required');
     const gate = this.#assertApprovalAuthority(input.requestedBy, 'accept a truth record');
@@ -12670,6 +12894,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ action: ActionView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['target']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const taskId = input.taskId?.trim() ?? '';
     if (!taskId) return fail('invalid_input', 'taskId is required');
@@ -12932,6 +13158,8 @@ export class HeadquarterOperations {
    * about the approval, while its external-action twin was ungated.
    */
   authorizeAction(input: { actionId: string; workerId: string; fence: number; now?: Date }): OpsResult<{ action: ActionView }> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     const actionId = input.actionId?.trim() ?? '';
     if (!actionId) return fail('invalid_input', 'actionId is required');
     if (!input.workerId) return fail('invalid_input', 'workerId is required');
@@ -13031,6 +13259,8 @@ export class HeadquarterOperations {
     fence: number;
     now?: Date;
   }): OpsResult<{ action: ActionView; outcome: 'succeeded' | 'failed' | 'outcome_unknown' }> {
+    const unsafeCallerText = callerTextRefusal(input, ['message']);
+    if (unsafeCallerText) return unsafeCallerText;
     const actionId = input.actionId?.trim() ?? '';
     if (!actionId) return fail('invalid_input', 'actionId is required');
     if (!input.workerId) return fail('invalid_input', 'workerId is required');
@@ -13272,6 +13502,8 @@ export class HeadquarterOperations {
     note: string;
     requestedBy: string;
   }): OpsResult<{ action: ActionView }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     const actionId = input.actionId?.trim() ?? '';
     if (!actionId) return fail('invalid_input', 'actionId is required');
     if (!isActionReconcileDecision(input.decision)) {
@@ -13841,6 +14073,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ session: CollaborationSessionView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['purpose', 'title']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const missionId = input.missionId?.trim() ?? '';
     if (!missionId) return fail('invalid_input', 'missionId is required');
@@ -13947,6 +14181,8 @@ export class HeadquarterOperations {
     role: CollaborationRole;
     requestedBy: string;
   }): OpsResult<{ participant: ParticipantView; session: CollaborationSessionView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const sessionId = input.sessionId?.trim() ?? '';
     if (!sessionId) return fail('invalid_input', 'sessionId is required');
@@ -14095,6 +14331,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ contribution: ContributionView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['artifactRefs', 'content', 'reason']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const sessionId = input.sessionId?.trim() ?? '';
     if (!sessionId) return fail('invalid_input', 'sessionId is required');
@@ -15733,6 +15971,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ brief: BriefView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const refusedActor = this.#resolveFounderGateActor(
       input.requestedBy,
