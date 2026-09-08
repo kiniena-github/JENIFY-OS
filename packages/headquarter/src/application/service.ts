@@ -3985,7 +3985,28 @@ export class HeadquarterOperations {
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
-    this.#requirePrivilegedQueue().engageKillSwitch(scope, founderId, reason);
+    // The store's own refusal is REPORTED, never thrown (Wave 5 correction
+    // round fourteen, High 2). The engine guards that keep HQ's ledgers
+    // append-only raise `SqliteError` out of the driver, and a raw writer can
+    // put a declared ledger into a state where they raise on HQ's own append —
+    // round fourteen executed exactly that, and `engageKillSwitch` then threw
+    // `SqliteError: op_evidence is append-only` UNCAUGHT, so the Founder's stop
+    // button did not merely fail, it took the caller down with it. The write
+    // channel is closed at the guard now, and this is the second half of the
+    // same answer: whatever makes HQ's own store refuse an append, the Founder
+    // gets a refusal that says so and a process that is still running.
+    try {
+      this.#requirePrivilegedQueue().engageKillSwitch(scope, founderId, reason);
+    } catch (error) {
+      return fail(
+        'operator_rejected',
+        `HQ's own store refused the write that records the kill switch, so the switch is NOT engaged: ` +
+          `${errorMessage(error)}. Nothing but HQ appends to those ledgers and their guards refuse a ` +
+          `DELETE, so this is a file another writer has changed. Stop the workers by other means and ` +
+          `assess the store.`,
+        { scope },
+      );
+    }
     return ok(null);
   }
 
@@ -4001,7 +4022,20 @@ export class HeadquarterOperations {
     // likewise never refused here, for the same reason engaging is not.
     const safeMode = this.#safeModeRefusal('release the kill switch');
     if (safeMode) return safeMode;
-    this.#requirePrivilegedQueue().releaseKillSwitch(scope, founderId);
+    // Reported rather than thrown, for the reason `engageKillSwitch` gives —
+    // and here the direction is the reassuring one, so a throw would have been
+    // worse than useless: the caller could not tell "released" from "the store
+    // refused" without catching a driver error.
+    try {
+      this.#requirePrivilegedQueue().releaseKillSwitch(scope, founderId);
+    } catch (error) {
+      return fail(
+        'operator_rejected',
+        `HQ's own store refused the write that records the release, so the kill switch is STILL ` +
+          `engaged: ${errorMessage(error)}. Assess the store before releasing anything.`,
+        { scope },
+      );
+    }
     return ok(null);
   }
 
@@ -9008,67 +9042,89 @@ export class HeadquarterOperations {
     // verdict HQ does not act on.
     const privileged = this.#requirePrivilegedQueue();
     const verdictId = `verdict-${uuid()}`;
-    privileged.reserve(() => {
-      // Verdict, then its corroborating evidence entry, then the COMMITMENT —
-      // one reservation, so all three land together or not at all. The
-      // concurrent lane put the evidence append first so that a chain tip
-      // stored ON the verdict row would already include that entry; that
-      // mechanism is gone (see the boundary note on `recordIntegrityCheckpoint`)
-      // and the freshness it wanted is delivered by the checkpoint, which is
-      // written LAST and therefore commits to a tip that already carries this
-      // assessment's own entry.
-      if (this.#reliabilityStorePresent) {
-        appendIntegrityVerdict(this.#db, {
-          id: verdictId,
-          assessedAt: nowIso(),
-          depth: report.depth,
-          safeMode: report.safeMode,
-          findings,
-          processId: this.#processIdentity,
-          assessedBy: input.requestedBy,
+    try {
+      privileged.reserve(() => {
+        // Verdict, then its corroborating evidence entry, then the COMMITMENT —
+        // one reservation, so all three land together or not at all. The
+        // concurrent lane put the evidence append first so that a chain tip
+        // stored ON the verdict row would already include that entry; that
+        // mechanism is gone (see the boundary note on `recordIntegrityCheckpoint`)
+        // and the freshness it wanted is delivered by the checkpoint, which is
+        // written LAST and therefore commits to a tip that already carries this
+        // assessment's own entry.
+        if (this.#reliabilityStorePresent) {
+          appendIntegrityVerdict(this.#db, {
+            id: verdictId,
+            assessedAt: nowIso(),
+            depth: report.depth,
+            safeMode: report.safeMode,
+            findings,
+            processId: this.#processIdentity,
+            assessedBy: input.requestedBy,
+          });
+        }
+        privileged.appendEvidence({
+          actor: input.requestedBy,
+          kind: INTEGRITY_ASSESSED_EVIDENCE_KIND,
+          payload: {
+            // The verdict row this entry corroborates — the pair that makes
+            // `SAFE_MODE_STATEMENT`'s "only a fresh full assessment clears it"
+            // true rather than aspirational. Null when there is no ledger to
+            // record a verdict in, which `verdictRecorded` already says.
+            verdictId: this.#reliabilityStorePresent ? verdictId : null,
+            depth: report.depth,
+            safeMode: report.safeMode,
+            safeModeChanged: before !== report.safeMode,
+            findings,
+            // False on a handle whose FILE carries no verdict ledger — a
+            // database written before the Wave 5 correction. The verdict is then
+            // process-local and SAFE_MODE_STATEMENT says so; nothing pretends
+            // otherwise. It no longer says "or a read-only one", which was
+            // false: `#reliabilityStorePresent` is TRUE for a read-only handle
+            // over a modern file, so that case reached the append and threw
+            // rather than reporting anything. A read-only handle is refused
+            // above, before any of this runs (Wave 5 correction round five,
+            // Low 2).
+            verdictRecorded: this.#reliabilityStorePresent,
+            executable: false,
+          },
         });
-      }
-      privileged.appendEvidence({
-        actor: input.requestedBy,
-        kind: INTEGRITY_ASSESSED_EVIDENCE_KIND,
-        payload: {
-          // The verdict row this entry corroborates — the pair that makes
-          // `SAFE_MODE_STATEMENT`'s "only a fresh full assessment clears it"
-          // true rather than aspirational. Null when there is no ledger to
-          // record a verdict in, which `verdictRecorded` already says.
-          verdictId: this.#reliabilityStorePresent ? verdictId : null,
-          depth: report.depth,
-          safeMode: report.safeMode,
-          safeModeChanged: before !== report.safeMode,
-          findings,
-          // False on a handle whose FILE carries no verdict ledger — a
-          // database written before the Wave 5 correction. The verdict is then
-          // process-local and SAFE_MODE_STATEMENT says so; nothing pretends
-          // otherwise. It no longer says "or a read-only one", which was
-          // false: `#reliabilityStorePresent` is TRUE for a read-only handle
-          // over a modern file, so that case reached the append and threw
-          // rather than reporting anything. A read-only handle is refused
-          // above, before any of this runs (Wave 5 correction round five,
-          // Low 2).
-          verdictRecorded: this.#reliabilityStorePresent,
-          executable: false,
-        },
+        // The COMMITMENT, inside the same reservation and last, so its tip
+        // includes the evidence entry just appended and so it lands with the
+        // verdict or not at all. Only a CLEAN assessment commits: a checkpoint is
+        // HQ standing behind the record, and a blocking finding is HQ saying it
+        // cannot. Nothing is written when the chain has not advanced past what is
+        // already committed — see `recordIntegrityCheckpoint`.
+        if (!report.safeMode) {
+          recordIntegrityCheckpoint(this.#db, {
+            id: `checkpoint-${uuid()}`,
+            recordedAt: nowIso(),
+            processId: this.#processIdentity,
+            recordedBy: input.requestedBy,
+          });
+        }
       });
-      // The COMMITMENT, inside the same reservation and last, so its tip
-      // includes the evidence entry just appended and so it lands with the
-      // verdict or not at all. Only a CLEAN assessment commits: a checkpoint is
-      // HQ standing behind the record, and a blocking finding is HQ saying it
-      // cannot. Nothing is written when the chain has not advanced past what is
-      // already committed — see `recordIntegrityCheckpoint`.
-      if (!report.safeMode) {
-        recordIntegrityCheckpoint(this.#db, {
-          id: `checkpoint-${uuid()}`,
-          recordedAt: nowIso(),
-          processId: this.#processIdentity,
-          recordedBy: input.requestedBy,
-        });
-      }
-    });
+    } catch (error) {
+      // A verdict HQ could not record is a verdict HQ does not act on — that
+      // rule is older than this catch and is unchanged: `#integrityReport` is
+      // deliberately NOT assigned here, so a latch that was engaged stays
+      // engaged and one that was clear is not silently engaged by a failed
+      // write. What changes is that the caller is TOLD (Wave 5 correction round
+      // fourteen, High 2). This method used to throw the driver's own
+      // `SqliteError` uncaught, and round fourteen executed a single permitted
+      // `INSERT` that made it do so on an otherwise-clean store: the Founder's
+      // only route to clearing a latch answered with a crash rather than a
+      // refusal, and the unauthenticated snapshot CLI died with it.
+      return fail(
+        'operator_rejected',
+        `HQ assessed its own store but could NOT record the verdict, so nothing about safe mode has ` +
+          `changed: ${errorMessage(error)}. Nothing but HQ appends to those ledgers and their guards ` +
+          `refuse a DELETE, so this is a file another writer has changed. The assessment HQ reached ` +
+          `found ${findings.length === 0 ? 'nothing blocking' : findings.join(', ')}, and it is not ` +
+          `acted on because it is not on the record.`,
+        { findings },
+      );
+    }
     this.#integrityReport = report;
     return ok(this.#integrityView());
   }

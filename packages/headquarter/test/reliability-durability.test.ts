@@ -28,6 +28,7 @@ import {
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   HQ_INTEGRITY_FINDINGS,
   LEDGER_ROWID_GUARD,
+  LEDGER_ROWID_SEAT_GUARD,
   WRITE_ONCE_IDENTITY_TABLES,
   declaredIdentityGuardFor,
   REQUIRED_IMMUTABILITY_GUARDS,
@@ -581,12 +582,17 @@ describe('the engine-immutable inventory is checked against the live schema, not
       'trg_hq_mission_plan_items_no_replace',
       'trg_hq_mission_plan_items_no_relink',
       'trg_hq_mission_plan_items_no_respec',
-      // The UNIVERSAL guard, which every declared ledger carries whatever its
-      // base is (Wave 5 correction round thirteen, High 1). It is appended by
-      // `declaredGuardsFor` rather than listed per table precisely so a reduced
-      // base cannot omit it — the reduced base is what let this entry out of
-      // `no_rewrite`, and the rowid channel is not a column.
+      // The UNIVERSAL guards, which every declared ledger carries whatever its
+      // base is (Wave 5 correction round thirteen, High 1; round fourteen,
+      // High 1 and High 2). They are appended by `declaredGuardsFor` rather
+      // than listed per table precisely so a reduced base cannot omit them —
+      // the reduced base is what let this entry out of `no_rewrite`, and the
+      // rowid channel is not a column. There are TWO because the channel has
+      // two sides: `no_rowid_skip` bounds the rowid from above and
+      // `no_rowid_reseat` from below, and a bound with one side was the defect
+      // round fourteen closed.
       'trg_hq_mission_plan_items_no_rowid_skip',
+      'trg_hq_mission_plan_items_no_rowid_reseat',
     ]);
     // The rest are declared where they exist, and the census reads both.
     expect(declaredGuardsFor({
@@ -599,15 +605,21 @@ describe('the engine-immutable inventory is checked against the live schema, not
       'trg_hq_intel_budgets_no_replace',
       'trg_hq_intel_budgets_no_replace_unique',
       'trg_hq_intel_budgets_no_rowid_skip',
+      'trg_hq_intel_budgets_no_rowid_reseat',
     ]);
-    // And the universal guard is universal by CONSTRUCTION: it is on every
+    // And BOTH universal guards are universal by CONSTRUCTION: each is on every
     // entry's declaration, taken from the declaration itself rather than from
-    // any list written here.
-    expect(
-      ENGINE_IMMUTABLE_TABLES.filter(
-        (entry) => !declaredGuardsFor(entry).includes(`trg_${entry.triggerPrefix}_${LEDGER_ROWID_GUARD}`),
-      ).map((entry) => entry.table),
-    ).toEqual([]);
+    // any list written here. Enumerated over the constants rather than by
+    // naming one of them, so a third side of the channel — or a fourth — cannot
+    // be declared and then left out of this check.
+    for (const guard of [LEDGER_ROWID_GUARD, LEDGER_ROWID_SEAT_GUARD]) {
+      expect(
+        ENGINE_IMMUTABLE_TABLES.filter(
+          (entry) => !declaredGuardsFor(entry).includes(`trg_${entry.triggerPrefix}_${guard}`),
+        ).map((entry) => entry.table),
+        `${guard} must be declared on every declared ledger`,
+      ).toEqual([]);
+    }
     expect(
       ENGINE_IMMUTABLE_TABLES.filter((entry) => entry.secondaryGuards.length > 0).map(
         (entry) => entry.table,

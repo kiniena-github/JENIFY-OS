@@ -583,15 +583,67 @@ export const REQUIRED_IMMUTABILITY_GUARDS = Object.freeze([
 export const LEDGER_ROWID_GUARD = 'no_rowid_skip';
 
 /**
+ * The OTHER half of the same channel: the guard that refuses an INSERT at a
+ * rowid at or BELOW the ledger's greatest row (Wave 5 correction round
+ * fourteen, High 1 and High 2).
+ *
+ * `LEDGER_ROWID_GUARD` bounds the rowid from ABOVE only, and a bound with one
+ * side is the partial enumeration this correction round exists to close. Two
+ * live one-statement writes went through the open side, both measured at
+ * `8481269` through this package's own file fixture:
+ *
+ *  - **the mid-ledger deletion laundered back to a clean store.** Delete rowid
+ *    6 of an 11-row `hq_reliability_verdicts` with the guards temporarily gone
+ *    and the file is durably blocking — `regressed
+ *    ["hq_reliability_verdicts"]`, structural `safeMode true`. ONE further
+ *    PERMITTED `INSERT` at the freed rowid, nothing dropped and every guard in
+ *    place, put it back to `{rows:11, top:11}` and every reading to
+ *    `missingGuards [] regressed [] truncated []`, structural `safeMode false`.
+ *    Four statements to a completely clean store, against three for a finding
+ *    that stands — the inversion this module forbids.
+ *  - **the rowid `-1` plant that bricked HQ's own appends.** In a `BEFORE
+ *    INSERT` trigger an auto-assigned rowid reads as the integer `-1` on this
+ *    engine (measured, not assumed — see `ledgerRowidGuardDdl`), so a row
+ *    planted AT rowid -1 makes `no_replace`'s `EXISTS (… WHERE seq = NEW.seq)`
+ *    true for every append that follows. Executed on `op_evidence`: the plant
+ *    was ACCEPTED with no trigger dropped, the census read
+ *    `missingGuards [] regressed [] truncated []` and structural `safeMode
+ *    false`, and then `engageKillSwitch` and `assessHqIntegrity` BOTH threw
+ *    `SqliteError: op_evidence is append-only`. One permitted statement took
+ *    the Founder's own stop button away while every integrity reading said the
+ *    store was clean.
+ *
+ * **Why a second trigger rather than a wider clause on the first.** The bound
+ * that closes both is "the row that landed is the ledger's greatest, and it is
+ * at least 1", and neither half can be asserted BEFORE the insert: an omitted
+ * AUTOINCREMENT key presents as `-1` there, which is a value a caller can also
+ * spell, so there is no `BEFORE` spelling that separates "the engine will
+ * choose" from "the caller chose -1". `overclaimGuardDdl` met exactly this and
+ * moved to `AFTER INSERT` for exactly this reason. The upper bound cannot move
+ * with it — after the insert, `sqlite_sequence` has already been raised to the
+ * caller's own rowid, so the engine's pre-insert allocation is no longer
+ * recoverable — so the two bounds live in two triggers, at the two timings each
+ * one needs. `RAISE(ABORT)` in an `AFTER INSERT` trigger rolls the statement
+ * back: the row does not persist, and the surrounding transaction survives.
+ *
+ * Declared in `declaredGuardsFor` beside `LEDGER_ROWID_GUARD`, and for the same
+ * reason: a per-table list standing in for "every declared ledger" is the
+ * defect class, so the set is complete BY CONSTRUCTION.
+ */
+export const LEDGER_ROWID_SEAT_GUARD = 'no_rowid_reseat';
+
+/**
  * Every guard name the schema declares on one listed table. The BASE guards —
  * the trio, or the reduced `requiredGuards` set where an entry declares one —
- * plus that entry's own, plus the universal rowid guard.
+ * plus that entry's own, plus the two universal rowid guards (the bound from
+ * above and the bound from below — see `LEDGER_ROWID_SEAT_GUARD`).
  */
 export function declaredGuardsFor(entry: EngineImmutableTable): string[] {
   return [
     ...(entry.requiredGuards ?? REQUIRED_IMMUTABILITY_GUARDS),
     ...entry.secondaryGuards,
     LEDGER_ROWID_GUARD,
+    LEDGER_ROWID_SEAT_GUARD,
   ].map((guard) => `trg_${entry.triggerPrefix}_${guard}`);
 }
 
@@ -856,8 +908,14 @@ export const SAFE_MODE_STATEMENT =
   'EVERY declared ledger this file carries, how many rows it holds and the greatest row it reaches — in a ' +
   'separate append-only ledger, and a record that contradicts a commitment recorded outside it is blocking ' +
   'however consistent that record has been made to look. A row removed from the MIDDLE of a ledger is ' +
-  'blocking too, and stays blocking however much HQ appends afterwards, because the gap it leaves in the ' +
-  'rows is never filled. A commitment that claims more than the file held when it was written is refused ' +
+  'blocking too, and stays blocking however much HQ appends afterwards, because HQ never writes back ' +
+  'into the gap it leaves: a declared ledger refuses an INSERT at any row position the engine would not ' +
+  'itself have allocated — past the end of the ledger, or back inside it at a freed position, or below ' +
+  'the first — so the gap is not filled and the rows HQ committed at or below its own recorded mark ' +
+  'cannot be made up again. That is a bound on writes HQ still guards. A writer that first removes the ' +
+  'guard can refill the gap, and a refilled gap is not distinguishable from a ledger nothing touched, ' +
+  'so HQ says that rather than promising a permanence it does not have. ' +
+  'A commitment that claims more than the file held when it was written is refused ' +
   'where it is written — every column of it that any check reads, including the hash it names for the ' +
   'chain and the position it is written at — so no APPEND to that ledger, on its own, can make HQ ' +
   'condemn a store that is intact. That is a bound on that one ledger and not a claim about the file: a ' +
@@ -2054,6 +2112,15 @@ function overclaimGuardDdl(db: HqDatabase): string {
     // reseat probes run once with both guards live and once with
     // `trg_hq_integrity_checkpoints_no_rowid_skip` dropped inside a rolled-back
     // SAVEPOINT, so this clause is shown to refuse on its own.
+    //
+    // Round fourteen brought the bound from below to the other 32 as well
+    // (`LEDGER_ROWID_SEAT_GUARD`), and this clause is STILL kept and still not
+    // subsumed: the seat guard refuses a rowid below the ledger's greatest,
+    // where this one refuses any rowid that is not the ledger's row COUNT — the
+    // stricter relation, and the exact one `elidedCommitmentLedgerRows` reads
+    // on this table. A ledger that legitimately carried a hole would satisfy
+    // the seat guard and fail this one, which is correct here and would be a
+    // false alarm anywhere else.
     `NEW.seq <> (SELECT COUNT(*) FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE})`,
   ];
   if (tableIsPresent(db, 'op_evidence')) {
@@ -2275,14 +2342,28 @@ function ensureLedgerRowsColumn(db: HqDatabase): void {
  * **The defect it closes.** `no_replace` fires only on a COLLIDING rowid, so an
  * ordinary `INSERT` naming an explicit rowid ABOVE the ledger's current maximum
  * was a write every declared ledger's guards deliberately permitted. It grows
- * `MAX(rowid) - COUNT(*)` exactly as removing a row from the middle does, and
- * `committedLedgerGaps` cannot tell the two apart from the file alone: after a
- * mid-ledger deletion of k rows followed by m appends the ledger reads
- * `rows + m - k` / `top + m`, and after one append at a rowid d above the top it
- * reads `rows + 1` / `top + d`. Both raise the gap and neither leaves any other
- * trace, so no read-time rule can separate them — which is why this is closed
- * where the write happens rather than where it is read, exactly as
- * `overclaimGuardDdl` closed the over-claim.
+ * `MAX(rowid) - COUNT(*)` exactly as removing a row from the middle does, so
+ * `committedLedgerGaps` reports both under one name: after a mid-ledger
+ * deletion of k rows followed by m appends the ledger reads `rows + m - k` /
+ * `top + m`, and after one append at a rowid d above the top it reads
+ * `rows + 1` / `top + d`.
+ *
+ * **The sentence that used to stand here — that the two are "indistinguishable
+ * from the file alone, at any later moment, so nothing this reader could do
+ * would separate them" — was FALSE, and a reviewer disproved it by execution**
+ * (Wave 5 correction round fourteen, High 1). They are separated exactly, by a
+ * predicate over data HQ already commits: `COUNT(*) WHERE rowid <= committed
+ * top`, against the committed row count. A ledger HQ only appends to holds
+ * exactly its committed rows at or below its committed top for ever after, so
+ * a REMOVAL below that mark lowers the count and an append ABOVE it, at any
+ * rowid whatever, does not. `committedRemovalsBelowMark` is that reader; it
+ * does not fire on a hole that legitimately pre-dated the commitment, and it
+ * does not separate a refilled hole from an untampered ledger — which is said
+ * there in those words rather than implied away a second time.
+ *
+ * The channel is still closed where the WRITE happens, and that is now a choice
+ * with a reason instead of a claim that no alternative existed: the write guard
+ * also refuses the refill, which no read-time predicate can see.
  *
  * Executed against `237fc76` on a real file through this package's own fixture:
  * one `INSERT` took `hq_reliability_verdicts` from `{rows:4, top:4}` to
@@ -2326,40 +2407,104 @@ function ensureLedgerRowsColumn(db: HqDatabase): void {
  * GUARD is cleared by ONE Founder assessment of the file as it then stands,
  * because re-creating a trigger really does repair the file's guard set.
  *
- * **What this bound does NOT cover, and what covers it on the one ledger where
- * it matters** (recorded at the round-thirteen merge, where two lanes closed
- * this channel independently off the same base and both are kept). This clause
- * bounds the rowid from ABOVE only: `NEW.rowid > 1 + MAX(top, sequence)`. A
- * rowid at or below the top that collides with nothing — a hole, rowid 0, or
- * the `-1` the engine spells for an omitted AUTOINCREMENT key — passes it, and
- * on a ledger with no hole such a write raises `COUNT(*)` without raising
- * `MAX(rowid)`. That is not a widened gap, so it is invisible to
- * `committedLedgerGaps`; it IS read by `elidedCommitmentLedgerRows`, which runs
- * on `hq_integrity_checkpoints` alone, and on that one ledger the over-claim
- * guard's `NEW.seq <> (SELECT COUNT(*) …)` identity clause refuses it. The two
- * clauses are therefore complements rather than duplicates, and neither was
- * dropped in favour of the other: this one is the broader (33 ledgers by
- * construction, and the only bound on the other 32), that one is the stricter
- * on the ledger whose row count is itself read. Both are pinned —
- * `ledger-rowid-guard.test.ts` for this one, `commitment-overclaim.test.ts` for
- * that one, each with the other's guard removed so neither pin can pass on the
- * other's work.
+ * **What this bound does NOT cover, and what does** (recorded at the
+ * round-thirteen merge, where two lanes closed this channel independently off
+ * the same base and both are kept; corrected in round fourteen, where the
+ * uncovered half turned out to be live on 30 of the 33). This clause bounds the
+ * rowid from ABOVE only: `NEW.rowid > 1 + MAX(top, sequence)`. A rowid at or
+ * below the top that collides with nothing — a hole, rowid 0, or the `-1` the
+ * engine spells for an omitted AUTOINCREMENT key — passes it, and on a ledger
+ * with no hole such a write raises `COUNT(*)` without raising `MAX(rowid)`.
+ * That is not a widened gap, so it is invisible to `committedLedgerGaps`.
+ *
+ * Round thirteen answered that on ONE ledger: `elidedCommitmentLedgerRows` runs
+ * on `hq_integrity_checkpoints` alone, and there the over-claim guard's
+ * `NEW.seq <> (SELECT COUNT(*) …)` identity clause refuses it. The other 32
+ * were silent, which is the finding round fourteen executed — including on
+ * `hq_reliability_verdicts`, the safe-mode latch ledger, and
+ * `hq_reliability_run_events`, the ledger `RUN_RETRY_STATEMENT` rests on. The
+ * bound from below is now a guard of its own on all 33
+ * (`LEDGER_ROWID_SEAT_GUARD`), so the three clauses are complements and none
+ * was dropped in favour of another: this one is the only bound from above,
+ * the seat guard is the only bound from below outside the commitment ledger,
+ * and the over-claim clause is the stricter one on the ledger whose row count
+ * is itself read. All three are pinned — `ledger-rowid-guard.test.ts` for the
+ * two here, `commitment-overclaim.test.ts` for that one, each with the others'
+ * guards removed so no pin can pass on another's work.
  */
 function ledgerRowidGuardDdl(db: HqDatabase, table: string, triggerPrefix: string): string {
   // The engine's own allocation for the next row: `MAX(rowid) + 1`, or the
   // AUTOINCREMENT counter + 1 where one exists and stands higher. Both terms
   // are read at INSERT time, so the bound tracks the ledger rather than the
   // moment the trigger was written.
-  const sequenceTerm = tableIsPresent(db, 'sqlite_sequence')
-    ? `, COALESCE((SELECT seq FROM sqlite_sequence WHERE name = '${table}'), 0)`
-    : '';
-  // NULL for an auto-assigned rowid and -1 in some engine builds; both compare
-  // false against the bound, so an ordinary append never reaches the RAISE.
+  //
+  // **The two-term form is emitted ONLY when there are two terms** (Wave 5
+  // correction round fourteen, Low 1). SQLite's `MAX` is the scalar function
+  // with two or more arguments and the AGGREGATE with one, and an aggregate in
+  // a trigger's `WHEN` clause is not a compile error — the `CREATE TRIGGER`
+  // succeeds and every INSERT afterwards fails `misuse of aggregate function
+  // MAX()`, which on a declared ledger means HQ stops writing. Executed rather
+  // than reasoned about. It is not reachable on a real HQ file, because
+  // `sqlite_sequence` is created by the first AUTOINCREMENT table, survives
+  // dropping the last one and cannot itself be dropped; it was latent, and it
+  // is closed rather than left to the next schema that has no AUTOINCREMENT
+  // table at all.
+  const rowsTerm = `COALESCE((SELECT MAX(rowid) FROM "${table}"), 0)`;
+  const bound = tableIsPresent(db, 'sqlite_sequence')
+    ? `MAX(${rowsTerm}, COALESCE((SELECT seq FROM sqlite_sequence WHERE name = '${table}'), 0))`
+    : rowsTerm;
+  // An auto-assigned rowid reads as the INTEGER -1 here, deterministically on
+  // this engine — measured in `ledger-rowid-guard.test.ts` against a probe
+  // trigger, not inferred (Wave 5 correction round fourteen, Low 3; the comment
+  // that used to stand here said "NULL … and -1 in some engine builds"). -1
+  // compares false against this bound, so an ordinary append never reaches the
+  // RAISE — and -1 is exactly the value that made the `no_replace` bricking of
+  // High 2 work, which is why the SEAT guard below refuses a landed rowid under
+  // 1 rather than this one trying to spell the difference before the fact.
   return (
     `CREATE TRIGGER trg_${triggerPrefix}_${LEDGER_ROWID_GUARD}\n` +
     `BEFORE INSERT ON "${table}"\n` +
-    `WHEN NEW.rowid > 1 + MAX(COALESCE((SELECT MAX(rowid) FROM "${table}"), 0)${sequenceTerm})\n` +
+    `WHEN NEW.rowid > 1 + ${bound}\n` +
     `BEGIN SELECT RAISE(ABORT, '${table} rowids are contiguous'); END;`
+  );
+}
+
+/**
+ * The bound from BELOW — see `LEDGER_ROWID_SEAT_GUARD` for the two writes it
+ * closes and for why it is a second trigger at a second timing.
+ *
+ * Two clauses, and each is total over everything a caller can spell:
+ *
+ *  - `NEW.rowid < 1` refuses a row planted at 0 or at a negative rowid. AFTER
+ *    the insert `NEW.rowid` is the rowid the row ACTUALLY took, so the engine's
+ *    own allocation — always at least 1 — never meets it, and the `-1` a caller
+ *    supplies explicitly always does.
+ *  - `NEW.rowid <> (SELECT MAX(rowid) FROM t)` refuses a row that did not land
+ *    at the ledger's top: a hole left by a removal, or any other rowid below
+ *    it. The subquery includes the row just inserted, so a legitimate append —
+ *    which the engine places above every row in the table, including after a
+ *    burned AUTOINCREMENT counter — always satisfies it.
+ *
+ * It takes no reading of `sqlite_sequence` and therefore inherits none of that
+ * table's writability: a raw writer that inflates the counter can still make
+ * the engine allocate a high rowid, and the row it then appends is still the
+ * ledger's greatest, so this guard neither fires on it nor is defeated by it.
+ * That channel is the standing, separately disclosed `sqlite_sequence`
+ * residual, unchanged by this guard in either direction.
+ *
+ * **What it does NOT close, stated rather than implied.** A writer that removes
+ * this trigger, refills the hole and re-creates it pays three statements and
+ * leaves a ledger whose rows, greatest rowid and gap are all exactly what HQ
+ * committed. No predicate over the file separates that from an untampered
+ * ledger — `regressedImmutableLedgers` says so in its own words, with the
+ * worked case — and this guard does not claim to.
+ */
+function ledgerRowidSeatGuardDdl(table: string, triggerPrefix: string): string {
+  return (
+    `CREATE TRIGGER trg_${triggerPrefix}_${LEDGER_ROWID_SEAT_GUARD}\n` +
+    `AFTER INSERT ON "${table}"\n` +
+    `WHEN NEW.rowid < 1 OR NEW.rowid <> (SELECT MAX(rowid) FROM "${table}")\n` +
+    `BEGIN SELECT RAISE(ABORT, '${table} rowids are append-only'); END;`
   );
 }
 
@@ -2390,6 +2535,8 @@ export function ensureLedgerRowidGuards(db: HqDatabase): void {
     try {
       db.exec(`DROP TRIGGER IF EXISTS trg_${entry.triggerPrefix}_${LEDGER_ROWID_GUARD}`);
       db.exec(ledgerRowidGuardDdl(db, entry.table, entry.triggerPrefix));
+      db.exec(`DROP TRIGGER IF EXISTS trg_${entry.triggerPrefix}_${LEDGER_ROWID_SEAT_GUARD}`);
+      db.exec(ledgerRowidSeatGuardDdl(entry.table, entry.triggerPrefix));
     } catch {
       // See the docstring: a guard HQ could not install is a finding at the
       // next census, never a failed construction.
@@ -3070,6 +3217,74 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
 }
 
 /**
+ * The declared ledgers that have lost rows from BELOW their committed mark —
+ * the reading that separates a removal from a planted row (Wave 5 correction
+ * round fourteen, High 1).
+ *
+ * **Why it exists.** `regressedImmutableLedgers` names a ledger when its rows,
+ * its greatest rowid or its gap contradict what HQ committed, and its GAP term
+ * fires identically for two very different acts: a row removed from the middle,
+ * and a row planted above the top. The module used to justify closing that only
+ * at the write with a sentence saying the two are "indistinguishable from the
+ * file alone, at any later moment" — which was false, and was disproved by
+ * execution. They differ in a quantity HQ already commits:
+ *
+ * ```
+ * committed {rows:10, top:10}
+ *   A  mid-delete(k=1) + 3 appends   rows 12  top 13  gap 1  COUNT(rowid<=10)= 9
+ *   B  one append at rowid 13        rows 11  top 13  gap 2  COUNT(rowid<=10)=10
+ *   C  mid-delete then REFILL        rows 10  top 10  gap 0  COUNT(rowid<=10)=10
+ *   U  untampered                    rows 10  top 10  gap 0  COUNT(rowid<=10)=10
+ * ```
+ *
+ * A ledger HQ only appends to never writes at or below a rowid it has already
+ * committed, so the rows it holds there can only ever go DOWN, and only by a
+ * removal. That separates A from B exactly.
+ *
+ * **What it does not do, said plainly rather than left to be found again.** It
+ * does not separate C from U: a hole that is refilled restores the count as
+ * well as the gap, and nothing in the file distinguishes the refilled row from
+ * the one it replaced. C is closed at the WRITE instead
+ * (`LEDGER_ROWID_SEAT_GUARD`), which is why that guard exists rather than this
+ * reader being asked to carry the whole channel. It also never fires on a hole
+ * that legitimately pre-dated the commitment — the committed row count already
+ * counted the hole — so it cannot fabricate a finding on a file HQ has merely
+ * migrated.
+ *
+ * **Cost.** One `COUNT(*)` with a rowid range per named ledger, and it is
+ * called ONLY when `regressedImmutableLedgers` has already named at least one —
+ * which is never on a healthy store. It therefore adds nothing to the per-boot
+ * statement counts `STRUCTURAL_STATEMENT_BASE` states, and that is asserted in
+ * `integrity-statement-truth.test.ts` rather than claimed here.
+ */
+export function committedRemovalsBelowMark(db: HqDatabase, tables: readonly string[]): string[] {
+  const committed = committedLedgerIdentities(db);
+  const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
+  const removed: string[] = [];
+  for (const table of tables) {
+    // The name is checked against the frozen declaration before it reaches any
+    // statement text: this reader is handed a list, and a list is never a
+    // licence to interpolate.
+    if (!declared.has(table)) continue;
+    const mark = committed[table];
+    if (!mark || mark.top <= 0 || mark.rows <= 0) continue;
+    try {
+      const row = db
+        .prepare(`SELECT COUNT(*) AS held FROM "${table}" WHERE rowid <= ?`)
+        .get(mark.top) as { held: unknown } | undefined;
+      const held = Number(row?.held);
+      // Fail CLOSED on an unreadable answer, the rule this module follows
+      // everywhere: an engine that cannot count the rows of a ledger HQ has
+      // committed about is not evidence that the rows are there.
+      if (!Number.isInteger(held) || held < mark.rows) removed.push(table);
+    } catch {
+      removed.push(table);
+    }
+  }
+  return removed.sort();
+}
+
+/**
  * HQ's OWN commitment ledger, checked for rows that have been elided IN PLACE.
  *
  * **The cheapest surviving forgery did not need to drop this table at all**
@@ -3622,18 +3837,38 @@ export function structuralIntegrity(
   // gone BACKWARDS is a fact about the file as it now stands, so it is reported
   // however many restarts have happened — see `regressedImmutableLedgers`.
   const regressed = regressedImmutableLedgers(db);
+  // WHICH of the two acts the gap term reports, separated rather than blurred
+  // (Wave 5 correction round fourteen, High 1). The detail used to tell the
+  // Founder a named ledger held "fewer rows … or a gap where a row used to be"
+  // whichever had happened, including when nothing had been removed at all.
+  // Computed only when there is already a finding, so it costs a healthy store
+  // nothing — see `committedRemovalsBelowMark`.
+  const removals = regressed.length > 0 ? committedRemovalsBelowMark(db, regressed) : [];
+  const planted = regressed.filter((table) => !removals.includes(table));
   const regressionDetail =
     regressed.length > 0
       ? ` ${regressed.length} declared ledger(s) no longer stand as HQ's own durable checkpoint ` +
         `records them — fewer rows, a lower greatest row, or a wider gap between the greatest row and ` +
         `the number of rows held: ${regressed.join(', ')}. None of those can happen while HQ is the ` +
         `only writer: the guards refuse a DELETE, and they refuse an INSERT at a row position the ` +
-        `engine would not itself have allocated. So those tables were DROPPED and are back empty, or ` +
+        `engine would not itself have allocated — above the end of a ledger or back inside it. So ` +
+        `those tables were DROPPED and are back empty, or ` +
         `rows were removed from them, or a row was written into one at a position HQ never allocated — ` +
         `each with the guards temporarily gone. A row removed from the MIDDLE leaves the rest of the ` +
-        `ledger where it was and is reported here for the gap it leaves, which later appends do not ` +
-        `fill; so is a row inserted past the end, which opens the same gap without removing anything. ` +
-        `Re-creating a ledger does not bring back what it held.`
+        `ledger where it was and is reported here for the gap it leaves; so is a row inserted past the ` +
+        `end, which opens the same gap without removing anything. Those two are told apart by counting ` +
+        `the rows a ledger still holds at or below the greatest row HQ committed for it, which a ` +
+        `removal lowers and an append never touches: ` +
+        (removals.length > 0
+          ? `rows are MISSING from below HQ's committed mark in ${removals.join(', ')}`
+          : `no ledger here is missing rows from below HQ's committed mark`) +
+        (planted.length > 0
+          ? `, and ${planted.join(', ')} still hold(s) every row HQ committed, so what changed there is ` +
+            `a row written at a position HQ never allocated rather than a removal`
+          : ``) +
+        `. That reading does not separate a hole that was REFILLED from a ledger nothing touched; the ` +
+        `refill is refused where it is written instead. Re-creating a ledger does not bring back what ` +
+        `it held.`
       : '';
   // The COMMITMENT LEDGER'S OWN invariant (Wave 5 correction round six,
   // Medium 1). Every check above measures some other ledger AGAINST the

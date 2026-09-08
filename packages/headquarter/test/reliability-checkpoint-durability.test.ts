@@ -131,10 +131,13 @@ describe('the evidence log commits to a witness that does not live inside it', (
           }
         ).n,
         'the guards are back, so the as-found census has nothing to report',
-        // FOUR since Wave 5 correction round thirteen (High 1): the universal
-        // rowid guard joined the trio on every declared ledger, and this
-        // forgery replays the triggers it captured, so it replays four.
-      ).toBe(4);
+        // FIVE since Wave 5 correction round fourteen (High 1 and High 2):
+        // round thirteen's universal rowid guard joined the trio on every
+        // declared ledger (four), and round fourteen added the second half of
+        // that channel — the bound from BELOW — so a declared ledger now
+        // carries five. This forgery replays the triggers it captured, so it
+        // replays whatever the schema declares.
+      ).toBe(5);
       // And the durable commitment catches it anyway. The answer is the FIRST
       // committed length the shortened log no longer reaches — the same shape
       // of answer every other chain check gives, "the log stops being true

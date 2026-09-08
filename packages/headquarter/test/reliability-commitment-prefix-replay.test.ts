@@ -224,12 +224,13 @@ describe('rolling the commitment ledger back to a PREFIX of itself is blocking',
       expect(committed).toBe(before);
 
       const statements = replayPrefix(raw, HQ_INTEGRITY_CHECKPOINT_TABLE, 1);
-      // The whole act: one DROP, seven DDL objects — the table, its index and
-      // its five guards, the fourth being the concurrent lane's overclaim guard
-      // and the fifth the universal rowid guard round thirteen added — and one
-      // row put back. The price is counted from the replay itself rather than
+      // The whole act: one DROP, eight DDL objects — the table, its index and
+      // its six guards, the fourth being the concurrent lane's overclaim guard,
+      // the fifth the universal rowid guard round thirteen added and the sixth
+      // the bound from BELOW that round fourteen added beside it — and one row
+      // put back. The price is counted from the replay itself rather than
       // asserted, so it moves when the schema does.
-      expect(statements).toBe(9);
+      expect(statements).toBe(10);
 
       // The four checks the attack was aimed at have nothing to say — which is
       // exactly why it worked — and the header mark does.
