@@ -424,7 +424,14 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = deepFree
     table: 'hq_missions',
     triggerPrefix: 'hq_missions',
     requiredGuards: ['no_erase', 'no_replace'],
-    secondaryGuards: [],
+    // `no_reidentify` is a guard, not a convenience (Wave 5 correction round
+    // thirteen, High 3). The reduced base above says what is write-once is the
+    // row's EXISTENCE and its IDENTITY — and until this round only the first
+    // half was enforced, because `no_replace` is `BEFORE INSERT` and
+    // `no_rewrite` is deliberately absent. One raw `UPDATE hq_missions SET id`
+    // then made `#canonicalTaskScopes`' inner join match nothing and unbound
+    // the task from its mission ceiling, silently at both integrity depths.
+    secondaryGuards: ['no_reidentify'],
   },
   { table: 'hq_orchestration_runs', triggerPrefix: 'hq_orch_runs', secondaryGuards: [] },
   { table: 'hq_orchestration_run_items', triggerPrefix: 'hq_orch_run_items', secondaryGuards: [] },
@@ -569,6 +576,82 @@ export function declaredGuardsFor(entry: EngineImmutableTable): string[] {
     ...entry.secondaryGuards,
     LEDGER_ROWID_GUARD,
   ].map((guard) => `trg_${entry.triggerPrefix}_${guard}`);
+}
+
+/**
+ * A table whose ROW IDENTITY other tables are joined to by value, and which is
+ * NOT an append-only ledger.
+ *
+ * The second half of Wave 5 correction round thirteen's High 3. The first half
+ * — `hq_missions` — is a declared ledger and carries its identity guard as a
+ * `secondaryGuards` entry. `op_tasks` is not: tasks are legitimately updated on
+ * almost every column (claim, lease, result, review state, approval, block
+ * reason), so it can never carry `no_rewrite` and it is not append-only. What
+ * IS write-once about it is its `id`, and nothing in this repository has ever
+ * updated one.
+ *
+ * That mattered by execution: `hq_mission_plan_items.task_id` is the only link
+ * from a task to its mission, and it names the task BY ID. One raw
+ * `UPDATE op_tasks SET id = …` — no DDL, no row-count change, silent at both
+ * integrity depths — leaves every plan item naming a task that no longer
+ * exists, so the mission AND project halves of the budget derivation both come
+ * back empty and the ceiling stops binding. It is the same primitive as the
+ * mission one, on the other end of the same link, and closing one without the
+ * other would have been the partial enumeration this round exists to stop.
+ */
+export interface WriteOnceIdentityTable {
+  /** The table. */
+  table: string;
+  /** The prefix its guard is named under. */
+  triggerPrefix: string;
+  /** The column that is write-once. */
+  column: string;
+}
+
+/**
+ * Every table outside `ENGINE_IMMUTABLE_TABLES` whose identity column is
+ * write-once, frozen at module scope for the reason that list is frozen: this
+ * is on the enforcement path of `append_only_guard_missing` and it is public
+ * package API, so `WRITE_ONCE_IDENTITY_TABLES.length = 0` would otherwise empty
+ * the census.
+ */
+export const WRITE_ONCE_IDENTITY_TABLES: readonly WriteOnceIdentityTable[] = Object.freeze(
+  [Object.freeze({ table: 'op_tasks', triggerPrefix: 'op_tasks', column: 'id' })].map((entry) =>
+    Object.freeze(entry),
+  ),
+);
+
+/** The one guard name each write-once identity declares. */
+export function declaredIdentityGuardFor(entry: WriteOnceIdentityTable): string {
+  return `trg_${entry.triggerPrefix}_no_reidentify`;
+}
+
+/**
+ * Install the write-once identity guards. Called from the facade constructor
+ * beside the other ensures and AFTER the as-found census, for the same reason
+ * every other guard is installed there: a dropped guard is reported before it
+ * is repaired.
+ *
+ * `IF NOT EXISTS` rather than dropped and re-created, because the guard's text
+ * is fixed — it reads no schema — so there is nothing for a rebuild to track.
+ */
+export function ensureWriteOnceIdentityGuards(db: HqDatabase): void {
+  if (db.readonly) return;
+  for (const entry of WRITE_ONCE_IDENTITY_TABLES) {
+    if (!tableIsPresent(db, entry.table)) continue;
+    try {
+      // Neither name is interpolated from anything a row carries: both come out
+      // of the frozen literal above.
+      db.exec(
+        `CREATE TRIGGER IF NOT EXISTS ${declaredIdentityGuardFor(entry)}\n` +
+          `BEFORE UPDATE OF "${entry.column}" ON "${entry.table}"\n` +
+          `BEGIN SELECT RAISE(ABORT, '${entry.table} ${entry.column} is write-once'); END;`,
+      );
+    } catch {
+      // A guard HQ could not install is a finding at the next census, never a
+      // failed construction — the rule every other ensure here follows.
+    }
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -902,6 +985,17 @@ export function missingImmutabilityGuards(db: HqDatabase): string[] {
     for (const name of declaredGuardsFor(entry)) {
       if (!triggers.has(name)) missing.push(name);
     }
+  }
+  // The write-once IDENTITY guards on tables that are not append-only ledgers
+  // (Wave 5 correction round thirteen, High 3). They are censused here rather
+  // than in a second place, because the module's own rule is that a guard
+  // nothing checks is a guard that can go missing quietly — and the finding
+  // they raise is the same one for the same reason: an engine guarantee the
+  // schema declares is not on this file.
+  for (const entry of WRITE_ONCE_IDENTITY_TABLES) {
+    if (!tables.has(entry.table)) continue;
+    const name = declaredIdentityGuardFor(entry);
+    if (!triggers.has(name)) missing.push(name);
   }
   return missing.sort();
 }

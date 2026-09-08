@@ -316,6 +316,20 @@ CREATE TRIGGER IF NOT EXISTS trg_hq_missions_no_replace
 BEFORE INSERT ON hq_missions
 WHEN EXISTS (SELECT 1 FROM hq_missions WHERE id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'hq_missions identity is write-once'); END;
+
+-- And the guard that makes the sentence above TRUE of an UPDATE, which it was
+-- not (Wave 5 correction round thirteen, High 3). no_replace is BEFORE INSERT,
+-- so it says nothing about a raw UPDATE hq_missions SET id -- and hq_missions
+-- declares a REDUCED base precisely because status, project_id and updated_at
+-- legitimately move, so no_rewrite does not stand here either. The consequence
+-- was executed: one UPDATE, no DDL, no row-count change and a clean
+-- structuralIntegrity, and the task's mission ceiling stopped binding --
+-- governedBy lost the mission, permittedTiers widened from one to all five,
+-- budgetDecision went blocked -> within_ceiling, and a refused critical_review
+-- write was accepted. Nothing in this repository ever updates a mission's id.
+CREATE TRIGGER IF NOT EXISTS trg_hq_missions_no_reidentify
+BEFORE UPDATE OF id ON hq_missions
+BEGIN SELECT RAISE(ABORT, 'hq_missions identity is write-once'); END;
 `;
 
 /**

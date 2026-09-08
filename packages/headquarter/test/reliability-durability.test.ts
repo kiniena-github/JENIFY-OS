@@ -28,8 +28,11 @@ import {
   HQ_INTEGRITY_CHECKPOINT_TABLE,
   HQ_INTEGRITY_FINDINGS,
   LEDGER_ROWID_GUARD,
+  WRITE_ONCE_IDENTITY_TABLES,
+  declaredIdentityGuardFor,
   REQUIRED_IMMUTABILITY_GUARDS,
   ensureLedgerRowidGuards,
+  ensureWriteOnceIdentityGuards,
   SAFE_MODE_BLOCKING_FINDINGS,
   declaredGuardsFor,
   establishedImmutableTables,
@@ -388,9 +391,24 @@ describe('the engine-immutable inventory is checked against the live schema, not
     // there" was untrue whenever the phase also added a table. Asserting the
     // LIVE trigger set equals the union of the declarations closes it in the
     // direction that matters: a new guarded table is now a test failure.
+    //
+    // EXTENDED, not relaxed, in Wave 5 correction round thirteen (High 3). The
+    // schema gained a second declared class — write-once IDENTITY guards on
+    // tables that are legitimately updated and are therefore not append-only
+    // ledgers, `op_tasks` being the only member. The assertion is still that
+    // the live trigger set EQUALS the union of the DECLARATIONS; the union just
+    // has two terms now, so a guard on a table nobody declared is still a test
+    // failure, in either class.
     const liveTriggers = triggers.map((row) => row.name).sort();
-    const declaredTriggers = ENGINE_IMMUTABLE_TABLES.flatMap((entry) => declaredGuardsFor(entry)).sort();
+    const declaredTriggers = [
+      ...ENGINE_IMMUTABLE_TABLES.flatMap((entry) => declaredGuardsFor(entry)),
+      ...WRITE_ONCE_IDENTITY_TABLES.map((entry) => declaredIdentityGuardFor(entry)),
+    ].sort();
     expect(liveTriggers).toEqual(declaredTriggers);
+    // And the two classes are disjoint: an identity guard on a table that is
+    // also a declared ledger would be declared twice and censused twice.
+    const ledgerTables = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
+    expect(WRITE_ONCE_IDENTITY_TABLES.filter((entry) => ledgerTables.has(entry.table))).toEqual([]);
     db.close();
   });
 
@@ -1493,6 +1511,10 @@ describe('backup verification, against real bytes on disk', () => {
       // HQ file carries it because every facade construction installs it, and a
       // copy that does not is correctly refused `would_latch_safe_mode`.
       ensureLedgerRowidGuards(db);
+      // And the write-once identity guards, for the same reason (round
+      // thirteen, High 3): the census covers them, so a copy that lacks one is
+      // refused rather than verified.
+      ensureWriteOnceIdentityGuards(db);
       // WAL mode with no checkpoint: the newest table is in the sidecar.
       expect(fs.existsSync(`${candidate}-wal`)).toBe(true);
       expect(fs.statSync(`${candidate}-wal`).size).toBeGreaterThan(0);
