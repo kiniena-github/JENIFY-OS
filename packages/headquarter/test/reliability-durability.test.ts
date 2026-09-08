@@ -2219,9 +2219,17 @@ describe('the page’s count of the backup guard’s refusals is the constant’
     const driven = exercised();
     const notDriven = BACKUP_REFUSAL_REASONS.filter((reason) => !driven.includes(reason));
 
-    const pairs = [
-      ...page.matchAll(/(\w+) of the (\w+)\s+(?:are exercised|backup path protections)/g),
-    ];
+    // Any `"<number word> of the <number word>"` whose sentence goes on to say
+    // those refusals are exercised. Written as a general sweep rather than as
+    // the two phrasings this page happens to use today: the concurrent
+    // round-thirteen lane changed one of them from "backup path protections" to
+    // "backup refusals" while raising both constants, and a regex written
+    // around a phrasing would have stopped reading it.
+    const pairs = [...page.matchAll(/(\w+) of the (\w+)\b/g)].filter((pair) => {
+      if (NUMBER_WORDS[pair[1]!.toLowerCase()] === undefined) return false;
+      if (NUMBER_WORDS[pair[2]!.toLowerCase()] === undefined) return false;
+      return /exercis/i.test(page.slice(pair.index!, pair.index! + 200));
+    });
     expect(pairs.length, 'the page must state the exercised/total pair at least once').toBeGreaterThan(
       0,
     );

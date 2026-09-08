@@ -4552,6 +4552,16 @@ Medium and 8 Low. This section records what was reproduced at the MERGED head
 (`237fc76`, which already carried rounds ten to twelve), what changed, and what
 is disclosed instead — priced by execution, never by estimate.
 
+This section was written against `237fc76` and then MERGED with a concurrent
+round-thirteen lane (`7d3581a`) that had run off the same base. Nothing was
+discarded in either direction: that lane's empty-key poison fix to
+`committedLedgerGaps`, its `db.pragma` instrument correction (which moved
+`STRUCTURAL_STATEMENT_BASE` from 44 to 48) and its seventeenth backup refusal all
+stand, and every figure THIS lane states was re-measured at the merged head
+rather than carried forward. Where both lanes touched one sentence — Phase 14's
+HIGH H2 row and this page's backup-count sentence — the merged text carries both
+corrections.
+
 **The class behind every High of this round, and of the three rounds before
 it**: a partial enumeration standing in for the complete one. `missionText(`
 call sites for "stores caller text"; eighteen curated parameter names for
@@ -4712,23 +4722,34 @@ taken on trust:
   list the finding names is gone. Not a defect at this head.
 - **MEDIUM 2** — the served depth statement's "46 statements". The served
   sentence quotes no total at all now; it interpolates
-  `STRUCTURAL_STATEMENT_BASE` (44 = 33 identity reads + 11 fixed reads) and
-  states the seek term as a rule, with 44 + 2 = 46 and 44 + 4 = 48 both explained
-  as the two files' totals. `integrity-statement-truth.test.ts` pins it against
-  instrumented counts on two files with different seek terms and parses the
-  numbers back out of the prose: changing the constant from 44 to 45 in a scratch
-  copy fails two of its tests. Not a defect at this head.
+  `STRUCTURAL_STATEMENT_BASE` and states the seek term as a rule, with both
+  worked totals explained rather than one shipped as "the" cost.
+  `integrity-statement-truth.test.ts` pins it against instrumented counts on two
+  files with different seek terms and parses every number back out of the prose.
+  At the head this section was first written the constant was 44 (33 + 11); the
+  CONCURRENT round-thirteen lane merged in beside this one then found the
+  instrument itself blind to the four `db.pragma()` reads the served sentence
+  names in its own first clause, so the fixed term is 15 and the constant is
+  **48** (33 + 15), with 48 + 2 = 50 and 48 + 4 = 52 as the two files' totals.
+  Re-verified at the MERGED head rather than carried forward: changing the
+  constant from 48 to 49 in a scratch copy fails three of that file's tests.
+  Not a defect at this head.
 
 ### MEDIUM 3, MEDIUM 4 and MEDIUM 5 — a stale count and three unpinned defences
 
-- **MEDIUM 3.** `BACKUP_REFUSAL_REASONS` holds SIXTEEN reasons, and round
-  twelve's pin already reads one sentence on this page and compares it. A SECOND
-  sentence claimed `ten` exercised of `thirteen` total, and went on saying so
-  after the constant moved, because no regex reached it. The
-  sentence is corrected to "thirteen of the sixteen", and the pin now sweeps
-  EVERY `"<number word> of the <number word>"` on this page whose sentence is
-  about these refusals and checks BOTH halves of each. Reverting the sentence in
-  a scratch copy fails it.
+- **MEDIUM 3.** Round twelve's pin already reads ONE sentence on this page and
+  compares it to `BACKUP_REFUSAL_REASONS`. A SECOND sentence stating the same
+  pair claimed `ten` exercised of `thirteen` total, and went on saying so after
+  the constant moved, because no regex reached it. The sentence is corrected and
+  the sweep is generalised: every `"<number word> of the <number word>"` on this
+  page whose sentence goes on to say those refusals are exercised is now checked
+  in BOTH halves, rather than the one phrasing the regex was written around.
+  That generality earned itself immediately — the CONCURRENT round-thirteen lane
+  merged in beside this one raised the vocabulary to SEVENTEEN, moved the
+  exercised count to FOURTEEN and re-worded the sentence from "backup path
+  protections" to "backup refusals", which a phrasing-bound regex would have
+  stopped reading. Re-verified at the merged head: writing `ten of the seventeen`
+  in a scratch copy fails the sweep, naming the pair it read.
 - **MEDIUM 4.** `return seq` on an unparseable payload, in `verifyEvidenceChain`.
   Mutated to `continue` it left 3425 tests green and turned a Founder assessment
   that reported `evidence_chain_broken` into a clean one. Pinned in
