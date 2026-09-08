@@ -174,12 +174,28 @@ import { PROVIDERS, type ProviderId } from '../routing/providers.js';
  * derived assertions asked `body.includes('assertNoCredentialShape')`, a
  * BOOLEAN PER METHOD, so one scanned parameter credited every other parameter
  * of the same method. The sentence is now made true by CONSTRUCTION rather
- * than by inspection — `callerTextRefusal` below scans every string field of
- * every facade write's input — and `facade-write-scan.test.ts` derives the
- * coverage PER PARAMETER, naming any (method, parameter) pair that reaches
- * neither guard. The ONE carve-out is named rather than implied and survives
- * by construction rather than by exception: `createTask`'s task PAYLOAD is an
- * object, not a string, so the whole-input scan does not reach it.
+ * than by inspection — `callerTextRefusal` below scans every own field of
+ * every facade write's input, of whatever type — and `facade-write-scan.test.ts`
+ * derives the coverage PER PARAMETER, naming any (method, parameter) pair that
+ * reaches neither guard.
+ *
+ * **"Every STRING field" was the eighth spelling of the same mistake, and it
+ * was falsified by execution twice more** (Wave 5 correction round eleven,
+ * Medium 1). `Object.entries` reached every field, and the filter beside it
+ * then kept only `typeof value === 'string'` — so a `string[]` was enumerated
+ * by neither half of the derivation and scanned by neither guard. Executed
+ * against the previous head: `submitResult(..., ['sk-…'])` ACCEPTED, the value
+ * permanent in `op_evidence.payload`; `postMissionMessage({ refs: ['sk-…'] })`
+ * ACCEPTED, the value permanent in `hq_chat_messages.refs`. Neither bricked a
+ * route today, which is the definition of the latent half of this class rather
+ * than a defence of it. The type filter is gone: `assertNoCredentialShape`
+ * already walks arrays and nested objects to depth 64, so the whole input goes
+ * to it and the CLASS closes rather than the two instances.
+ *
+ * The ONE carve-out is now named at its call site rather than implied by a
+ * type filter: `createTask` passes `['payload']` as `deliberatelyUnscanned`,
+ * and `facade-write-scan.test.ts` DERIVES that list from the source and
+ * asserts there is exactly one of them.
  * No control route serves a task payload — executed, and it bricked none while
  * the title bricked two — the queue applies the evidence log's heuristic to it
  * at `enqueue`, and the strict guard for it lives at the boundary that would
@@ -248,12 +264,19 @@ function assertNoCredentialShape(fields: Record<string, unknown>): void {
  * object, which means a parameter ADDED to an input type in a future phase is
  * scanned the day it is added, with nobody having to notice it.
  *
- * Only STRING-valued fields are scanned, and that is what keeps the one
- * deliberate carve-out intact: `createTask`'s task PAYLOAD is a
- * `Record<string, unknown>`, not a string, so it is not reached here — its
- * guard stays at the boundary that would PUBLISH it (the dispatch lane), which
- * two existing tests prove holds independently by writing a credential-shaped
- * payload through `createTask` on purpose.
+ * EVERY own field is scanned, of whatever type, and the one deliberate
+ * carve-out is named rather than typed around (Wave 5 correction round eleven,
+ * Medium 1). It used to read only `typeof value === 'string'`, which kept
+ * `createTask`'s `Record<string, unknown>` payload out by accident — and kept
+ * `submitResult`'s `evidenceRefs` and `postMissionMessage`'s `refs` out by the
+ * same accident, both of which were executed into permanent append-only rows.
+ * `assertNoCredentialShape` walks arrays and nested objects itself, so handing
+ * it the whole input closes the class; `createTask` names `payload` in
+ * `deliberatelyUnscanned`, where the exemption is visible, reasoned at the
+ * call site, and derived by `facade-write-scan.test.ts`. Its guard stays at
+ * the boundary that would PUBLISH it (the dispatch lane), which two existing
+ * tests prove holds independently by writing a credential-shaped payload
+ * through `createTask` on purpose.
  *
  * `alreadyScanned` names the fields a method scans ITSELF, further down, with a
  * message written for that field ("The approval note looks like it contains a
@@ -271,14 +294,24 @@ function callerTextRefusal(
   // off the shape — every field is reached through `Object.entries`.
   fields: object,
   alreadyScanned: readonly string[] = [],
+  /**
+   * The fields this method DELIBERATELY does not scan here, each of which must
+   * carry its reason at the call site and be named in
+   * `facade-write-scan.test.ts`, which derives the carve-out list from these
+   * literals rather than trusting a sentence about them.
+   *
+   * There is exactly one, `createTask.payload`, and the count is asserted from
+   * the source rather than written down.
+   */
+  deliberatelyUnscanned: readonly string[] = [],
 ): OpsResult<never> | null {
-  const skip = new Set(alreadyScanned);
-  const strings: Record<string, unknown> = {};
+  const skip = new Set([...alreadyScanned, ...deliberatelyUnscanned]);
+  const scanned: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(fields)) {
-    if (typeof value === 'string' && !skip.has(key)) strings[key] = value;
+    if (!skip.has(key)) scanned[key] = value;
   }
   try {
-    assertNoCredentialShape(strings);
+    assertNoCredentialShape(scanned);
   } catch (error) {
     return fail('invalid_input', errorMessage(error));
   }
@@ -728,6 +761,7 @@ import {
   RUN_RECONCILE_DECISIONS,
   RUN_RETRY_STATEMENT,
   appendIntegrityVerdict,
+  assessHqBackupCandidate,
   backupRecordKey,
   backupRowToView,
   classifyInterruptedRun,
@@ -3143,7 +3177,19 @@ export class HeadquarterOperations {
    * write H3 did not reach.
    */
   createTask(input: CreateTaskInput): OpsResult<CreatedTask> {
-    const unsafeCallerText = callerTextRefusal(input, ['project', 'title']);
+    // `payload` is the ONE piece of caller text a facade write deliberately
+    // does not scan here, and it is now NAMED rather than surviving because
+    // the scan happened to read only string fields (Wave 5 correction round
+    // eleven, Medium 1). No control route serves a task payload — probed
+    // across every shipped route — the queue applies the evidence log's own
+    // heuristic to it at `enqueue`, and the strict guard for it lives at the
+    // boundary that would PUBLISH it: the dispatch lane, which refuses to open
+    // an issue carrying one. `claude-dispatch.test.ts` and
+    // `dispatch-durable-label.test.ts` write a credential-shaped payload
+    // through here ON PURPOSE to prove that guard holds independently, so
+    // scanning it here would delete a defence-in-depth proof rather than add
+    // one. `facade-write-scan.test.ts` derives this list from the source.
+    const unsafeCallerText = callerTextRefusal(input, ['project', 'title'], ['payload']);
     if (unsafeCallerText) return unsafeCallerText;
     if (!input.capabilityId || !input.requestedBy) {
       return fail('invalid_input', 'capabilityId and requestedBy are required');
@@ -3699,7 +3745,16 @@ export class HeadquarterOperations {
     result: Record<string, unknown>,
     evidenceRefs: string[] = [],
   ): OpsResult<OperatorTask> {
-    const unsafeCallerText = callerTextRefusal({ taskId, workerId });
+    // `evidenceRefs` is here because the derivation that was supposed to
+    // guarantee it was blind to `string[]` (Wave 5 correction round eleven,
+    // Medium 1). It was enumerated by neither half of
+    // `facade-write-scan.test.ts` and reached by neither guard beside it:
+    // `callerTextRefusal({ taskId, workerId })` read own STRING fields, and
+    // `assertNoCredentialShape(result)` scans the RESULT. Executed against the
+    // previous head, `submitResult(..., ['sk-…'])` was ACCEPTED and the value
+    // landed in `op_evidence.payload` — `ENGINE_IMMUTABLE_TABLES[0]`, with
+    // `no_erase` and `no_rewrite`, so the row is permanent.
+    const unsafeCallerText = callerTextRefusal({ taskId, workerId, evidenceRefs });
     if (unsafeCallerText) return unsafeCallerText;
     const existing = this.queue.get(taskId);
     if (!existing) return fail('unknown_task', `Unknown task: ${taskId}`);
@@ -9034,6 +9089,13 @@ export class HeadquarterOperations {
     // clean close, so between runs the live file verified perfectly.
     const verification = verifyHqBackupFile(backupPath, {
       liveDatabasePath: typeof this.#db.name === 'string' ? this.#db.name : null,
+      // HQ's OWN full assessment of the copy, which `store/` cannot compute
+      // alone (Wave 5 correction round eleven, High 1). A module import, not a
+      // property on any object a caller holding `HeadquarterOperations` can
+      // reach: an enforcement input may not travel through a patchable
+      // delegate, which is the same rule `#verifyEvidenceChainFromStore`
+      // follows.
+      assessCandidate: assessHqBackupCandidate,
     });
     if (!verification.verified) {
       return fail(

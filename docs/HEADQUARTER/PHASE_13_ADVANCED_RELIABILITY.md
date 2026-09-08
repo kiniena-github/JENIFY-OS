@@ -373,6 +373,23 @@ that no longer has the disposition it claims fails it too.
 | `recordVerifiedBackup` | the act that preserves a recovery point while the store is untrusted. Same gate, same flag. |
 | `proposeAction` | a proposal is a request, not an authorization, and it reaches nothing; `authorizeAction` and `executeAction` are both refused. |
 
+**The residual this table does not cover, recorded rather than implied** (Wave 5
+correction round eleven, Low 3). Both tables enumerate `HeadquarterOperations`
+and the canonical boundary underneath it. `OperatorQueue` is also exported from
+`@factoryos/headquarter/operator`, and constructing a SECOND one directly over
+the same database handle — `new OperatorQueue(db, …)` — produces a queue whose
+constructor installs no safe-mode gate, and it claims freely under a genuine
+latch (executed: `-> CLAIMED fd36da5a… fence 1`). It is out of reach of a caller
+who holds only `HeadquarterOperations`: `#db` is `#private` on both, so the
+handle cannot be taken from the facade, and `ops.queue.claim` — the delegate the
+round-ten High 3 closed — is gated. What is left is a caller who already has the
+database handle, which is the same authority as opening the file, and against
+that authority no in-process gate is a boundary. It is NOT closed by a check in
+`OperatorQueue`'s own constructor, deliberately: the facade constructs its queue
+during its own construction, and a constructor that threw under a latch would
+make `assessHqIntegrity` — the only act that clears safe mode — unreachable on
+exactly the file that needs it.
+
 
 ### When it is assessed, and the cost of each
 
@@ -564,36 +581,66 @@ verified.**
 
 `verifyHqBackupFile` is read-only with respect to the CANDIDATE in the
 strongest available sense — the file is opened `O_RDONLY | O_NOFOLLOW` and
-never written, and no `-wal`/`-shm` is created beside it. Sixteen categorical
+never written, and no `-wal`/`-shm` is created beside it. Seventeen categorical
 refusals, never an exception: `path_not_absolute`, `path_not_normalized`,
 `path_missing`, `path_is_symlink`, `path_not_a_regular_file`,
 `path_not_readable`, `file_empty`, `file_too_large`,
 `file_has_multiple_links`, `sidecar_journal_present`,
 `candidate_is_the_live_database`, `verification_copy_failed`,
 `not_a_readable_sqlite_database`, `integrity_check_failed`,
-`not_an_hq_database`, `would_latch_safe_mode`. **This sentence said "thirteen"
-and "ten of the thirteen" until round twelve (Low 3)**, and omitted
-`file_has_multiple_links` and `candidate_is_the_live_database` from its own
-list — two refusals this wave had added without the paragraph naming them. It
-went stale a third time within the same round, at the merge with the concurrent
-round-ten lane, which added `would_latch_safe_mode`: the new pin caught that
-drift rather than a reviewer having to, which is the whole point of pinning a
-count to its constant. Thirteen of the sixteen are exercised
-against real files on disk — a relative path, an unnormalized absolute one, a missing one, a
-directory, an empty file, a symlink, a file of prose, a corrupted SQLite image,
-a valid SQLite database that is simply somebody else's, and a genuine backup
+`not_an_hq_database`, `would_latch_safe_mode`,
+`candidate_census_unavailable`. Fourteen of the seventeen are exercised against
+real files on disk — a relative path, an unnormalized absolute one, a missing
+one, a directory, an empty file, a symlink, a hard link to another name, the
+live database at its own path, a file of prose, a corrupted SQLite image,
+a valid SQLite database that is simply somebody else's, a genuine backup
 with a `-wal` dropped beside it (twice over: as a dropped sidecar, and as a
 live un-checkpointed WAL database whose newest table exists only in the
-sidecar), a file carrying a second hard link, and the live database itself
-offered back as its own backup. The three that are NOT exercised are named
-below, and both counts are now pinned against `BACKUP_REFUSAL_REASONS` in
-`reliability-durability.test.ts`, so neither can drift again.
-`file_too_large` is NOT exercised: it would mean writing a
-two-gigabyte file in a test, and a bound asserted by reading the constant
-rather than by crossing it is stated here as what it is. `path_not_readable`
-and `verification_copy_failed` are likewise not exercised — both need a
-filesystem HQ cannot read or write, which a test that must pass on any
-developer's machine cannot arrange honestly.
+sidecar), a file whose own record would latch safe mode, and a call that
+supplies no assessor at all. `file_too_large` is NOT exercised: it would mean
+writing a two-gigabyte file in a test, and a bound asserted by reading the
+constant rather than by crossing it is stated here as what it is.
+`path_not_readable` and `verification_copy_failed` are likewise not exercised —
+both need a filesystem HQ cannot read or write, which a test that must pass on
+any developer's machine cannot arrange honestly.
+
+> **Correction (Wave 5 correction rounds eleven and twelve — MEDIUM 2 in one
+> lane, Low 3 in the other; both lanes found it independently and both pins are
+> kept).** The three numbers above were stale in three places and NO test pinned
+> any of them. The list said "Thirteen" and "ten of the thirteen" while
+> `BACKUP_REFUSAL_REASONS` held sixteen, and it omitted
+> `file_has_multiple_links`, `candidate_is_the_live_database` and
+> `would_latch_safe_mode` from its own enumeration — each added by an earlier
+> round of this same wave, each with the count left behind. It then went stale
+> AGAIN inside the correction itself: one lane re-derived the sentence against a
+> constant of sixteen at the same time as the other added
+> `candidate_census_unavailable`, taking the real length to seventeen, and the
+> merge of the two lanes is what caught that — which is the whole point of
+> pinning a count to its constant rather than to a reviewer's memory. Two
+> derived pins now stand over this paragraph: `backup-refusal-vocabulary.test.ts`
+> derives the count word, the enumeration and the exercised/not-exercised split
+> from `BACKUP_REFUSAL_REASONS` and from the test directory, and
+> `reliability-durability.test.ts` independently re-derives both counts and
+> requires every unexercised reason to be excused here by name. Neither sweep
+> counts a reason that appears only in a file whose job is to COUNT reasons: a
+> name written down in order to be asserted about is not an exercise of it, and
+> a census that counted itself would have reported all seventeen as exercised.
+
+> **Correction (Wave 5 correction round eleven, HIGH 1).** `verifyHqBackupFile`
+> ran HQ's census as `structuralIntegrity(db)` with NO options, so the standing
+> verdict the candidate records ABOUT ITSELF was never read and the evidence
+> log's links were never walked. Executed: a file whose boot had recorded
+> `safe_mode=1 ["append_only_guard_missing"]`, its guard since re-created by
+> HQ's own ensure pass, verified `{ verified: true, refusals: [],
+> integrityVerdict: 'ok' }` while the same bytes opened live gave
+> `safeMode: true`; and a copy whose `op_evidence` payload was rewritten in
+> place at a seq behind the last checkpoint commitment verified `ok` too.
+> `recordVerifiedBackup` certified both into the INSERT-only register. Both
+> inputs live above `store/` — the verdict ledger in `application/`, the
+> whole-log verifier in `operator/` — so they now arrive through a REQUIRED
+> `assessCandidate` injection (`assessHqBackupCandidate`), the same shape
+> `fullIntegrity` uses for `verifyEvidenceChain`; an assessment that could not
+> run is `candidate_census_unavailable` rather than a pass.
 
 > **Correction (Wave 5 review, HIGH finding 3 / Medium 3 — both correction
 > lanes found it independently).** The digest and the checks were statements
@@ -966,11 +1013,12 @@ timing-only concurrency tests. What was built:
 - **A real file.** Engine immutability (UPDATE, DELETE, and both REPLACE-on-
   unique-index paths on all four tables — `hq_reliability_verdicts` included),
   the tamper that engages safe mode, the evidence-chain break, the restart that
-  no longer clears a verdict, and ten of the thirteen backup path protections
+  no longer clears a verdict, and fourteen of the seventeen backup refusals
   are all exercised against a real database in a real temporary directory. The
   three that are not (`file_too_large`, `path_not_readable`,
   `verification_copy_failed`) are named in "Backup and restore" with the reason,
-  rather than counted as if they were.
+  rather than counted as if they were — and the split is derived by
+  `backup-refusal-vocabulary.test.ts` rather than counted by hand.
 - **A real restore.** Backed up, verified, copied, verified again, opened as a
   working HQ, and the run read back out of the copy.
 
@@ -2605,7 +2653,7 @@ by reverting the fix, running the test, and restoring.
 | **HIGH 1** — the surviving witness ledger could be EMPTIED with no finding at any depth | Round five left `hq_integrity_checkpoints` as the only external witness for the evidence chain, protected by triggers only — and `operator/evidence.ts` already documented that a trigger dropped and re-created before the next boot is never observed missing. Three statements (`DROP TRIGGER ..._no_erase; DELETE FROM hq_integrity_checkpoints;` re-create) emptied it: both readers (`regressedImmutableLedgers`, `contradictedChainCommitment`) read the very rows deleted, so they returned `[]` and `null`. Executed — seed, one warm boot, attack, coherently rebuild `op_evidence` two committed entries short: boot `safeMode=false []`, full assessment `safeMode=false []`, `releaseKillSwitch` **ADMITTED**, no restart and no further Founder act. `sqlite_sequence.hq_integrity_checkpoints` still read 2 against 0 rows present, and nothing looked at it. | `truncatedImmutableLedgers` generalises the one comparison that already worked: `verifyEvidenceChain` has always checked `MAX(seq)` against `sqlite_sequence` for `op_evidence`, and that is why tail truncation is caught. It now runs over EVERY declared AUTOINCREMENT ledger, as `MAX(rowid)` versus the engine's own high-water mark, in `structuralIntegrity` — so both depths, at every construction, one b-tree seek per ledger. New blocking finding `append_only_ledger_truncated`; the finding vocabulary is 7 and the blocking list is 4. |
 | **HIGH 2** — the same pattern made `RUN_RETRY_STATEMENT` false | `RUN_RETRY_STATEMENT` ships on every reliability view: "An interrupted attempt ... is NEVER retried automatically." Executed: open a run, take attempt generation 1, second attempt correctly refused; then empty `hq_reliability_run_events` the same three ways → boot clean, full assessment clean, **attempt ADMITTED at generation 1**. The guard this module calls "the single most load-bearing secondary guard in the schema" was back in place and reserved nothing, because its rows were gone. | The same one rule. The doc's residual for this ledger was written only about forged APPENDS, which is precisely the claim the erasure defeated. |
 | **HIGH 3** — budget-ceiling nullification, fourth route | Phase 14 finding; see `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md`. | Two append-only columns holding EVERY derived scope, not one of N. |
-| **HIGH 4** — `recordVerifiedBackup({note})` permanently bricked `GET /api/hq/control/reliability` | `service.ts` used `missionText('note', ...)` with NO credential scan, in a method the shipped claim covers BY NAME ("every facade write that stores caller text goes through `assertNoCredentialShape` — 29 call sites"). Executed with a real verified backup file: `GET /reliability` 200 → `recordVerifiedBackup({note:'ghp_...'})` ACCEPTED → `GET /reliability` **500 forever**; `DELETE`/`UPDATE` on `hq_reliability_backups` both refused as append-only; still 500 after a restart. This was the round-four H3 defect left standing at a write site the sweep missed. | The scan is applied, with a refusal message that says why the register cannot take it back. A static audit now shows every one of the 29 methods that call `missionText` carrying a scan; `assertNoCredentialShape` has 32 call sites. |
+| **HIGH 4** — `recordVerifiedBackup({note})` permanently bricked `GET /api/hq/control/reliability` | `service.ts` used `missionText('note', ...)` with NO credential scan, in a method the shipped claim covers BY NAME ("every facade write that stores caller text goes through `assertNoCredentialShape` — 29 call sites"). Executed with a real verified backup file: `GET /reliability` 200 → `recordVerifiedBackup({note:'ghp_...'})` ACCEPTED → `GET /reliability` **500 forever**; `DELETE`/`UPDATE` on `hq_reliability_backups` both refused as append-only; still 500 after a restart. This was the round-four H3 defect left standing at a write site the sweep missed. | The scan is applied, with a refusal message that says why the register cannot take it back. The coverage is DERIVED rather than counted: `credential-scan-coverage.test.ts` enumerates every member that calls `missionText` and names any that does not also scan, and `facade-write-scan.test.ts` derives the same property per (method, parameter) pair. **The second of the two hand counts that stood here was stale by round eleven (Low 4): "29 `missionText` methods" is still exactly right — measured again at that head — but "`assertNoCredentialShape` has 32 call sites" had been 47 for several rounds, and is 48 after this one.** The number is removed rather than re-counted, because a present-tense count in a historical correction cell is a claim about the code that nothing checks; the two derived assertions are what the sentence now rests on. |
 | **HIGH 5** — `MAX_SCAN_DEPTH = 64` was fail-OPEN and the module claimed the opposite | `redaction.ts` said the depth bound and the cycle set are "both fail-CLOSED ... they stop the walk descending, they never stop a finding being raised". `JSON.stringify` has no depth limit, so stopping the walk IS stopping the finding. Executed through `proposeAction`, which applies BOTH scans and whose own comment says the payload "is stored permanently and handed verbatim to an adapter": depth 60–63 refused, **depth 64 and beyond ACCEPTED and the credential stored**, and the strict scan on the response stopped at 64 too, so `GET /api/hq/control/actions` served it rather than failing. | Reaching the bound now THROWS `BrowserSafetyError`: HQ refuses what it cannot read in full. The cycle set still returns silently, and the comment now says why the two are different — `seen` stops at a value already READ, `depth` stops at one that has NOT been. |
 | **MEDIUM 1** — `regressedImmutableLedgers` shipped load-bearing and covered by NO test | Mutating its body to `const regressed: string[] = []` passed the FULL suite (166/3192). Its only two assertions were `toEqual([])` on healthy files — no-false-positive checks that can only pass. | A hostile test that drops a declared ledger, lets HQ re-create it empty, restarts TWICE and proves the finding survives with `tablesAbsent`, `missingImmutabilityGuards` and `truncatedImmutableLedgers` all empty — so only the checkpoint's committed mark can answer. Verified to fail against the mutated body. |
 | **MEDIUM 2** — the round-four seam's pinning assertion was vacuous | Deleting `\|\| schemaEnsuredMarkBeforeMigration(db) === true` from `migrationRestoredImmutableTables` passed the FULL suite. The assertion carrying an 8-line comment about the round-four RECONCILIATION was `expect(finding!.detail).toContain('op_evidence')` — and the same detail already lists the missing GUARDS `trg_op_evidence_no_erase/_no_replace/_no_rewrite`, so it matched regardless. | The assertion is now on `observeImmutabilityAsFound(db).tablesAbsent`, which is the list that reconciliation actually produces. Verified: with the clause deleted, the test fails on that line. |
@@ -3122,7 +3170,7 @@ false alarm for a false reassurance is not a fix. The evasion is pinned in
   rule reaches `integrity.ts` — the served string, the module header and the
   docblock above `STRUCTURAL_STATEMENT_BASE` — and stops there. Executed:
   changing "52 statements executed per pass" in the bullet above to "61" leaves
-  the whole suite at 191 files / 3434 tests passed. Disclosed at its price, with
+  the whole suite at 193 files / 3451 tests passed. Disclosed at its price, with
   the cheapest close named, in the merge section at the end of this page.
 
 ### One residual RE-PRICED downwards at this head
@@ -3994,9 +4042,13 @@ Three of them carried no conflict marker at all.
 
 ### Verification at the merged head
 
-All green, exit 0, run in this worktree.
+All green, exit 0, run in this worktree. **This table describes `5126ffe`** —
+the merge of the two lanes named in its own column headings, not the head this
+page currently sits at; the later reconciliation section below re-measures every
+row against the head that carries both that work AND the other round-eleven
+lane's.
 
-| Check | Round eleven (`46f409b`) | Round twelve (`ba13d99`) | Merged |
+| Check | Round eleven (`46f409b`) | Round twelve (`ba13d99`) | Merged (`5126ffe`) |
 |---|---|---|---|
 | `npm run test:hq` | 190 files / 3401 tests | 191 files / 3421 tests | **191 files / 3425 tests** |
 | repo-wide `*.test.ts` files | 252 | 253 | **253** |
@@ -4047,6 +4099,142 @@ by being read here. The cheapest close is a doc parse-back of the same shape as
 a number out of this page and compares it to a constant. That is a separate,
 scoped change with its own review, not something to fold into a reconciliation
 whose rule is that nothing is discarded and nothing new is invented.
+
+## The reconciliation of the two round-eleven lanes with round twelve
+
+Three lanes ran off `e58b95c`. Two of them have already been reconciled with
+each other above (`46f409b` + `ba13d99` → `5126ffe`). This section records the
+merge of that result with the THIRD lane — the round eleven that closed the
+backup verdict's missing half, the `string[]` blind spot in the caller-text
+scan, the refusal-vocabulary count, and two holes in the frozen-collection view
+— and it re-measures every row rather than carrying either parent's numbers
+forward.
+
+**Nothing was discarded.** Every finding, test, guard and correction from both
+parents is in the merged head. Two files conflicted textually and one
+measurement conflicted semantically; all three were resolved by shipping the
+stronger guarantee and keeping the other side's assertions passing against it.
+
+### The three seams, and how each was resolved
+
+1. **`contracts/freeze.ts` — the nested-collection repoint.** Both lanes edited
+   the same four lines. One made the proxy target a PRIVATE COPY of the argument
+   (`new Set(argument)` / `new Map(argument)` with the argument's own property
+   descriptors carried over), so a caller that named its collection before
+   freezing it can no longer reach the view through the reference it kept, and
+   returned `constructor` UNBOUND so `view.constructor === Set` reads as it does
+   on a real collection. The other made a collection at a property that can be
+   neither reconfigured nor rewritten a LOAD-TIME REFUSAL instead of a silent
+   skip, and added `HANDED_OUT` so `deepFreeze` is idempotent. **Both ship, and
+   the refusal is what replaced the skip**: the one lane's `if (… configurable
+   || … writable)` guard SILENTLY left the frozen object holding the raw
+   collection, which is precisely the escape the other lane executed, so the
+   loud `TypeError` strictly subsumes it and the silent branch is gone. The
+   repoint itself now writes to the private copy rather than to the caller's
+   object, which neither lane alone had to decide. Re-executed at the merged
+   head: every prototype-spelled mutator refuses (`Set.prototype.clear/add/
+   delete.call`, `Map.prototype.set/delete/clear.call`, `Reflect.apply`, `bind`,
+   `getPrototypeOf(...).clear.call`) and so does every direct one; `instanceof
+   Set`/`Map`, `Object.isFrozen`, `[object Set]`, `size`, `has`, iteration,
+   spread, `Array.from`, `constructor` identity and `forEach`'s third argument
+   (the view, never the target) all behave as they did; a retained reference
+   emptied to `size 0` leaves the view at `size 2`; the sealed-property case
+   throws; and `deepFreeze(view) === view`.
+2. **This page's backup-refusal paragraph.** One lane re-derived it against a
+   constant of sixteen; the other had added `candidate_census_unavailable`,
+   taking the real length to seventeen. The constant wins: the paragraph states
+   seventeen, names all of them, and states the exercised split, and BOTH lanes'
+   derived pins now stand over it — one deriving the count word, the enumeration
+   and the split from `BACKUP_REFUSAL_REASONS` and the test directory, the other
+   independently re-deriving both counts and requiring every unexercised reason
+   to be excused here by name. Neither lane's pin was dropped in favour of the
+   other's.
+3. **The exercised-refusal sweep, which the merge itself falsified.** The two
+   pins measure the same property by scanning the test directory, and putting
+   them in one tree broke that measurement: one lane's census file names
+   `file_too_large`, `path_not_readable` and `verification_copy_failed` as
+   quoted literals in order to ASSERT that they are unexercised, and the other
+   lane's sweep counted those literals as exercise — reporting all seventeen as
+   driven, including a refusal that would need a two-gigabyte file no test
+   writes. One lane had already reasoned about exactly this hazard for COMMENTS
+   and stripped them; the merge is where it appears in code. Both sweeps now
+   skip the files whose job is to count refusals, which is stated in
+   `REFUSAL_CENSUS_FILES` rather than left implicit. No assertion on either side
+   was weakened: both now measure the one real property and both pass.
+
+Everything else auto-merged and was re-read rather than trusted:
+`store/integrity.ts` (both lanes changed it heavily — the required
+`assessCandidate` injection, `BackupVerification.chainVerified` and
+`candidate_census_unavailable` all survive intact beside the duplicate-key
+over-claim clauses, `STRUCTURAL_STATEMENT_BASE` and the re-derived cost
+sentence), `test/frozen-constants-census.test.ts` (both lanes appended; all four
+new cases coexist), `test/reliability-durability.test.ts`, `live/redaction.ts`
+and `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md` (one lane removed a running
+call-site count that had gone stale every round; the other corrected the residual
+`UPDATE` that did not reproduce as written — different paragraphs, both kept).
+
+### Verification at the reconciled head
+
+All green, exit 0, run in this worktree. The parents' figures are as those lanes
+recorded them; the merged column is measured here.
+
+| Check | Round eleven (backup verdict lane) | `5126ffe` | Reconciled |
+|---|---|---|---|
+| `npm run test:hq` | 192 files / 3414 tests | 191 files / 3425 tests | **193 files / 3442 tests** |
+| `typecheck @factoryos/headquarter` | clean | clean | **clean** |
+| `@factoryos/hq-host` test + typecheck | 23 / 222, clean | 23 / 222, clean | **23 / 222**, clean |
+| `@factoryos/hq-server` test + typecheck | 2 / 20, clean | 2 / 20, clean | **2 / 20**, clean |
+| root `npm test` | 37 / 569 + 3 skips | 37 / 569 + 3 skips | **37 / 569 + 3 pre-existing skips** |
+| `npm run build:site` | 10 pages | 10 pages | **10 pages** + `hq-snapshot.json` |
+| `npm run build` web initial JS | 215.66 kB / 69.22 kB gzip | same | **215.66 kB / 69.22 kB gzip** |
+
+Repo-wide, measured at the reconciled head with one stated method — `git grep
+-oh -P "(?<![A-Za-z0-9_$.])it\(" -- '*.test.ts'` — **255 test files and 4042
+`it(` declarations**, against 254 / 4014 and 253 / 4025 for the two parents by
+that same command. The earlier table above counted `it(` a different way and its
+figures are not comparable to these; the command is written out here so the
+number can be re-run rather than believed.
+
+No test file from either parent is missing, **no file has fewer `it(`
+declarations than it had in either parent** (enumerated file by file, not
+compared in total), and no exported symbol from either parent is absent.
+Nothing was deleted, renamed, skipped, weakened or narrowed; no `.skip` /
+`.only` / `.todo` / `xit` / `xdescribe` was added. The diff against the accepted
+base `f1ce71c` touches `packages/server`, `packages/web`, `packages/shared`,
+`packages/config-mesob`, `packages/hq-host`, `apps`, `package.json` and
+`package-lock.json` not at all.
+
+Both lanes' headline guarantees were re-executed at this head rather than
+carried over. The four `sk-…` command arguments are refused `invalid_input`
+naming the exact field (`workerId`, `scope`, `scopeId`, `providerId`) and their
+legitimate forms all succeed; `submitResult(..., ['sk-…'])` and
+`postMissionMessage({refs:['sk-…']})` are refused at `evidenceRefs[0]` and
+`refs[0]` while ordinary arrays of a PR URL, a doc path and Amharic text land;
+`/state`, `/workforce`, `/command-center` and `/intelligence` all answer `200`
+before those refused writes, after them, and after a real restart of the same
+file. An honest backup verifies `{verified: true, refusals: [], chainVerified:
+true, integrityVerdict: 'ok'}` with its sha256 byte-identical before and after
+and no sidecar created; a backup carrying a standing blocking verdict and one
+whose evidence payload was rewritten behind the last checkpoint both come back
+`{verified: false, refusals: ['would_latch_safe_mode']}`; a call supplying no
+assessor is `candidate_census_unavailable`. Under a genuine
+`append_only_guard_missing` latch, `ops.claimNext` refuses `safe_mode_engaged`
+and `ops.queue.claim` throws, while `assessHqIntegrity`, `engageKillSwitch` and
+`hqReliabilityPosture` stay available. All five non-AUTOINCREMENT declared
+ledgers — `hq_memory`, `hq_mission_intents`, `hq_mission_plan_items`,
+`hq_missions`, `hq_orchestration_runs` — are enumerated from the file's own
+schema rather than listed by hand, and a healthy restart, a `VACUUM INTO` and a
+`.backup()` each report `safeMode: false`. The credential-scan availability set
+— English, Amharic, Arabic, Devanagari, Turkish, French and Vietnamese prose,
+emoji, a URL, a sha256, a UUID, base64, an absolute path, NBSP, U+2009 and an en
+dash — is accepted in every one of its sixteen members.
+
+**The residual disclosed above stands unchanged**, and so does the one this
+merge inherits from the third lane: `new OperatorQueue(db, …)` over the same
+handle installs no safe-mode gate, and a constructor gate is still the wrong
+fix, because the facade builds its queue during its own construction and a
+throwing constructor would make `assessHqIntegrity` — the only act that clears
+safe mode — unreachable on exactly the file that needs it.
 
 ## Wave 5 correction round thirteen — a shipped detector defeated permanently at ONE permitted `INSERT`, and a cost clause wrong a fourth time because the instrument was blind to the term
 
@@ -4197,19 +4385,27 @@ the table above, in the residual bullet, and in `integrity.ts`.
 ### LOW 1 — a test docblock's count was stale by one
 
 `reliability-durability.test.ts`'s docblock said `BACKUP_REFUSAL_REASONS` "holds
-fifteen … Twelve are exercised". The constant holds **16** and **13** are
-exercised, which is what the page correctly says. No assertion was ever
+fifteen … Twelve are exercised". At `237fc76` the constant held **16** with
+**13** exercised, which is what the page correctly said. No assertion was ever
 unpinned — they all derive from the constant — but a false sentence in a test
 file is the same artifact as a false sentence in a served string. The docblock is
 corrected, and its two numbers are now parsed back out of the file itself and
 compared to the constant and to the sweep, so the next addition to the vocabulary
 fails a test rather than leaving a fourth stale sentence behind.
 
+**The new pin earned itself immediately, at the merge below.** The concurrent
+round-eleven lane added `candidate_census_unavailable` and a census file the
+sweep has to exclude, taking the constant to **17** and the exercised set to
+**14**. The corrected docblock went stale a THIRD time in as many merges — and
+this time a test failed instead of a reviewer having to notice, which is the
+whole point. The numbers above describe `237fc76`; the merged head's are 17
+and 14, asserted rather than written down.
+
 ### LOW 2 — this wave's heaviest real-file tests were still at the 5 s default
 
 `reliability-crash-recovery.test.ts` had no explicit deadline anywhere while
 three of its tests `spawnSync` a real child `node` process against a file-backed
-SQLite database. Measured with the whole package running in parallel:
+SQLite database. Measured over two full runs with the whole package in parallel:
 **825–1137 ms** for those three, against the **361 ms** test that actually failed
 CI #552 with `Test timed out in 5000ms`. This is a residual of the previous
 round's timeout remediation rather than a false claim in it — that fix's claims
@@ -4223,10 +4419,10 @@ many where a hang is the real signal.
 
 **The other nine tests in that file are deliberately left at the default** and
 that is stated rather than quietly done: they use the same file-backed fixture,
-spawn no child process, and measure 129–186 ms under the same parallel load.
+spawn no child process, and measure 113–186 ms over the same two runs.
 **`decide-routing-cli.test.ts` is measured and deliberately NOT changed here**:
 its slowest test (`treats an unrecognised value as unknown rather than as a clean
-answer`) runs 1393 ms at the same 5 s default. It is a different subsystem and
+answer`) runs 1393 ms and 1410 ms over those two runs, at the same 5 s default. It is a different subsystem and
 not this round's finding, so it is recorded for whoever picks it up rather than
 folded into a commit that did not measure the rest of that file.
 
@@ -4261,29 +4457,58 @@ parse-back rule reaches `integrity.ts` — the served string, the module header
 and the docblock above `STRUCTURAL_STATEMENT_BASE` — and stops there. Executed at
 THIS head rather than quoted from the round that first disclosed it: changing
 "52 statements executed per pass" in the residual bullet above to "61 statements
-executed per pass" and running the whole suite gives **191 files / 3434 tests
+executed per pass" and running the whole suite gives **193 files / 3451 tests
 passed**, unchanged. The figure is wrong and nothing fails. It is disclosed at
 that price; the cheapest close is a doc parse-back of the same shape as
 `reliability-durability.test.ts`'s backup-refusal count pin, and it is a separate
 scoped change rather than something to fold into a correction round.
 
-### Verification at this head
+### The merge with the round-eleven third lane, which landed on `origin` while this round was in progress
 
-All green, exit 0, run in this worktree on top of `237fc768e55ae50fab3deda87276ff3c56d34ff4`.
+This round was built on `237fc768e55ae50fab3deda87276ff3c56d34ff4`. `origin`
+moved to `582c2398dd8c081762c90a6c05550a2ab49f3051` before the work was
+finished — the reconciliation recorded in the section immediately above — so
+this work was committed first and then MERGED with it: a true merge, both
+parents, nothing discarded. Two files conflicted textually and both were
+resolved by composing rather than choosing.
 
-| Check | Round twelve merge (`237fc76`) | This head |
-|---|---|---|
-| `npm run test:hq` | 191 files / 3425 tests | **191 files / 3434 tests** |
-| `typecheck @factoryos/headquarter` | clean | clean |
-| `@factoryos/hq-host` test + typecheck | 23 / 222, clean | **23 / 222**, clean |
-| `@factoryos/hq-server` test + typecheck | 2 / 20, clean | **2 / 20**, clean |
-| root `npm test` (`@factoryos/server`) | 37 / 569 + 3 skips | **37 / 569 + 3 pre-existing skips** |
-| `npm run build:site` | 10 pages | **10 pages** + `hq-snapshot.json` |
-| `npm run build` web initial JS | 215.66 kB / 69.22 kB gzip | **215.66 kB / 69.22 kB gzip** |
+ - `reliability-durability.test.ts`'s docblock. Both lanes rewrote the same
+   paragraph, and both were right about different things: the other lane removed
+   the free-standing figures and recorded that the constant had reached
+   seventeen, this one added a pin that reads the paragraph's own numbers back
+   out and compares them. Both are kept — and the pin FAILED on the first run
+   after the merge, because the other lane's new census file changes the
+   exercised set from thirteen to **fourteen**. It was corrected by measurement,
+   which is the pin doing exactly the job it was written for.
+ - `PHASE_13_ADVANCED_RELIABILITY.md`. Two new sections appended at the same
+   place; both kept, the other lane's first because it describes the head this
+   round builds on.
 
-The nine tests added here were also run against `237fc76` itself, with the source
-untouched: **9 failed**. Nothing was deleted, renamed, skipped, weakened or
-narrowed; no `.skip` / `.only` / `.todo` / `xit` / `xdescribe` was added, and no
-`as any`, `@ts-expect-error` or `eslint-disable` appears in an added line. Zero
-new dependencies. The diff touches `packages/headquarter/` and
-`docs/HEADQUARTER/` only.
+`integrity.ts` merged without conflict: the other lane's changes are in the
+backup-verification vocabulary near the end of the file, this round's are in the
+module header, the cost constant, the over-claim guard and the two commitment
+readers.
+
+### Verification at the merged head
+
+All green, exit 0, run in this worktree.
+
+| Check | Round twelve merge (`237fc76`) | `origin` (`582c239`) | This merged head |
+|---|---|---|---|
+| `npm run test:hq` | 191 files / 3425 tests | 193 files / 3442 tests | **193 files / 3451 tests** |
+| `typecheck @factoryos/headquarter` | clean | clean | clean |
+| `@factoryos/hq-host` test + typecheck | 23 / 222, clean | 23 / 222, clean | **23 / 222**, clean |
+| `@factoryos/hq-server` test + typecheck | 2 / 20, clean | 2 / 20, clean | **2 / 20**, clean |
+| root `npm test` (`@factoryos/server`) | 37 / 569 + 3 skips | 37 / 569 + 3 skips | **37 / 569 + 3 pre-existing skips** |
+| `npm run build:site` | 10 pages | 10 pages | **10 pages** + `hq-snapshot.json` |
+| `npm run build` web initial JS | 215.66 kB / 69.22 kB gzip | same | **215.66 kB / 69.22 kB gzip** |
+
+The nine tests added by this round were also run against BOTH parent heads with
+the source untouched: **9 failed against `237fc76`** (the eight behavioural pins
+plus the docblock pin, the latter spliced into that head's own prose rather than
+copied whole, because a pin that reads its own file's docblock passes when the
+file is copied with it) and **8 failed against `582c239`**. Nothing was deleted,
+renamed, skipped, weakened or narrowed; no `.skip` / `.only` / `.todo` / `xit` /
+`xdescribe` was added, and no `as any`, `@ts-expect-error` or `eslint-disable`
+appears in an added line. Zero new dependencies. This round's own diff touches
+`packages/headquarter/` and `docs/HEADQUARTER/` only.

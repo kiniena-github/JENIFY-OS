@@ -123,27 +123,28 @@ function crashAfter(
  * and a shared runner under load stretches process spawn far more than it
  * stretches an in-process query.
  *
- * Measured on this machine with the whole package running in parallel:
- * 825-1137 ms for these three, the slowest being the `outcome_unknown`
- * classification at 1137 ms (882 ms with the file run alone). 60 s is ~53x that
- * slowest observed run, which is the same headroom the other two files carry.
+ * Measured on this machine over two full runs with the whole package in
+ * parallel: 825-1137 ms for these three, the slowest single observation being
+ * the `outcome_unknown` classification at 1137 ms (882 ms with the file run
+ * alone). 60 s is ~53x that slowest observed run, which is the same headroom the
+ * other two files carry.
  *
  * **The other nine tests in this file are deliberately left at the default**,
  * and that is stated rather than quietly done. They use the same file-backed
- * fixture but spawn no child process, and they measure 129-186 ms under the same
- * parallel load — well under the 361 ms that failed. Widening the deadline to
+ * fixture but spawn no child process, and they measure 113-186 ms over the same
+ * two runs — well under the 361 ms that failed. Widening the deadline to
  * every test that touches a file would give up the signal a hang carries in the
  * ones that are genuinely fast.
  *
  * Per test rather than a package-wide `testTimeout`: raising the global default
- * would relax the deadline for all 3427 tests in this package, including the
+ * would relax the deadline for all 3451 tests in this package, including the
  * many where a hang is the real signal. Only the harness deadline changes here;
  * every assertion is untouched.
  *
  * **A sibling residual, measured and deliberately not changed here.**
- * `decide-routing-cli.test.ts` carries a 1393 ms test (`treats an unrecognised
- * value as unknown rather than as a clean answer`, measured under the same
- * parallel load) at the same 5 s default. It is a different subsystem and not
+ * `decide-routing-cli.test.ts` carries a ~1.4 s test (`treats an unrecognised
+ * value as unknown rather than as a clean answer`, 1393 ms and 1410 ms over the
+ * same two parallel runs) at the same 5 s default. It is a different subsystem and not
  * this correction's finding, so it is recorded here for whoever picks it up
  * rather than folded into a commit that did not measure the rest of that file.
  */
