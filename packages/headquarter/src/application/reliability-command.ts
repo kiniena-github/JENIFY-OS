@@ -54,6 +54,7 @@ import { createHash } from 'node:crypto';
 import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { canonicalJson } from '../operator/approvals.js';
+import { evidenceEntryLinkStands } from '../operator/evidence.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import {
   INTEGRITY_ASSESSMENT_DEPTHS,
@@ -486,6 +487,24 @@ export function ensureReliabilitySchema(db: HqDatabase): void {
   db.exec(RELIABILITY_DDL);
 }
 
+/**
+ * **The verdict ledger carries NO chain-tip columns, and that is a decision
+ * rather than an omission** (Wave 5 round-four/round-five reconciliation).
+ *
+ * The concurrent round-four lane made every verdict commit to the evidence
+ * chain's tip (`evidence_tip_seq` / `evidence_tip_hash`, added by ALTER) and
+ * read the strongest of them back with `MAX(evidence_tip_seq)`. That answered
+ * the same question the checkpoint ledger answers — "how far did the audit log
+ * reach, according to a record kept outside it" — and it is the one of the two
+ * that could be argued past: appending to this ledger is exactly the write its
+ * trio permits, so a writer that rewrote `op_evidence` into a LONGER coherent
+ * forgery could append one verdict row committing to the forged tip and the
+ * `MAX` would select it, retiring the genuine commitment behind it.
+ * `contradictedChainCommitment` checks EVERY commitment ever recorded, so the
+ * same appended row adds a satisfied row and removes nothing. One mechanism
+ * survives, the fail-closed one; see `store/integrity.ts`.
+ */
+
 /** True when this file carries the Phase 13 ledger — observation, never migration. */
 export function reliabilitySchemaPresent(db: HqDatabase): boolean {
   return (
@@ -757,6 +776,24 @@ export function integrityVerdictLedgerPresent(db: HqDatabase): boolean {
 export const INTEGRITY_ASSESSED_EVIDENCE_KIND = 'hq_integrity_assessed';
 
 /**
+ * The kind of evidence entry the boot observation appends when an
+ * engine-immutable LEDGER was absent from the file HQ was handed.
+ *
+ * Separate from the verdict, and unconditional on one (Wave 5 correction round
+ * four, Medium M3). A verdict is a judgement HQ is currently making and is
+ * SUPERSEDED by the next full assessment — which is how a latch is ever
+ * cleared. "A ledger HQ declares was not in this file" is not a judgement, it
+ * is a fact about what was found, and a fact belongs in the append-only log
+ * that outlives the latch. Without it, a dropped ledger observed at boot was
+ * cleared by the next assessment with nothing anywhere recording that rows had
+ * gone missing.
+ *
+ * Payload carries declared TABLE NAMES only — this package's own closed list —
+ * so the entry can never become a channel for stored content.
+ */
+export const IMMUTABLE_LEDGER_ABSENT_EVIDENCE_KIND = 'hq_immutable_ledger_absent';
+
+/**
  * Is this verdict row CORROBORATED by the hash-chained evidence log?
  *
  * `assessHqIntegrity` and the construction-time observation each write the
@@ -770,16 +807,27 @@ export const INTEGRITY_ASSESSED_EVIDENCE_KIND = 'hq_integrity_assessed';
  */
 function verdictIsCorroborated(db: HqDatabase, verdictId: string): boolean {
   try {
-    const row = db
+    const rows = db
       .prepare(
-        `SELECT 1 AS ok FROM op_evidence
+        `SELECT seq FROM op_evidence
           WHERE kind = ?
             AND json_valid(payload)
             AND json_extract(payload, '$.verdictId') = ?
-          LIMIT 1`,
+          ORDER BY seq`,
       )
-      .get(INTEGRITY_ASSESSED_EVIDENCE_KIND, verdictId) as { ok: number } | undefined;
-    return row !== undefined;
+      .all(INTEGRITY_ASSESSED_EVIDENCE_KIND, verdictId) as { seq: unknown }[];
+    // The entry must be a genuine LINK in the chain, not merely a row with the
+    // right two fields (Wave 5 correction round four, Medium M1). It used to be
+    // enough to match `kind` plus a `json_extract` of the payload, and the boot
+    // pass is structural and never verifies the chain — so ONE clean verdict row
+    // plus ONE forged corroborating row, needing no valid hash whatsoever,
+    // cleared a latched safe mode and re-admitted `releaseKillSwitch` while the
+    // chain was genuinely broken. Executed, and it is why `SAFE_MODE_STATEMENT`
+    // no longer claims more than this check delivers.
+    return rows.some((row) => {
+      const seq = Number(row.seq);
+      return Number.isInteger(seq) && evidenceEntryLinkStands(db, seq);
+    });
   } catch {
     // No evidence log to corroborate against is not corroboration. Fail closed:
     // an uncorroborated CLEAR does not clear.
@@ -1266,7 +1314,10 @@ export const BACKUP_RECORD_STATEMENT =
   'contentDigest is computed BY HQ over the exact bytes it opened and checked, so it pins what was verified. ' +
   'Those are the same bytes throughout, by construction: the candidate is opened once, and its bytes are ' +
   'hashed and copied to a scratch file in one pass, and integrity_check and the schema census then run ' +
-  'against that copy — so the path is never resolved a second time. A candidate carrying a -wal, -shm or ' +
+  'against that copy — so nothing the path names after the open can change what was verified. The path IS ' +
+  'read again before that open (an lstat, a realpath and three sidecar lstats), because the refusals those ' +
+  'checks make are about the PATH; what the digest and the checks come from is one descriptor, opened once. ' +
+  'A candidate carrying a -wal, -shm or ' +
   '-journal sidecar is refused rather than verified, because SQLite would read the sidecar together with ' +
   'the main file and the digest covers only the file; so is one that is a hard link to another name, ' +
   'because a file some other name can still be written through is not a snapshot. verified means these ' +

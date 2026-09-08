@@ -82,7 +82,6 @@ import {
   type ApprovalRejection,
 } from '../operator/approvals.js';
 import {
-  assertNoSecretLikeContent,
   ensureEvidenceGuards,
   verifyEvidenceChain,
   type EvidenceEntry,
@@ -109,6 +108,36 @@ import {
 } from '../operator/provider-binding.js';
 import { assertBrowserSafe } from '../live/redaction.js';
 import { PROVIDERS, type ProviderId } from '../routing/providers.js';
+
+/**
+ * The credential scan EVERY facade write applies to caller-supplied text.
+ *
+ * One function, and it is the SAME function the read boundary uses. That
+ * identity is the whole point (Wave 5 correction round four, High H3): the two
+ * boundaries used to be different checks, and the write side was the weaker
+ * one. `assertNoSecretLikeContent` is an `api_key: value` heuristic, so
+ * `sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345`, `ghp_...`, `-----BEGIN RSA PRIVATE
+ * KEY-----` and `Bearer ...` were all STORED as a run label or a decision
+ * label — and `control-api.ts`'s `safe()` then applied the strict, shape-based
+ * `assertBrowserSafe` to every response. The rows are append-only, so
+ * `GET /api/control/reliability` and `GET /api/control/intelligence` returned
+ * `500 internal` on every subsequent read, FOREVER, and no `DELETE`/`UPDATE`
+ * could take the row back out. One accepted write permanently bricked two
+ * Founder read routes.
+ *
+ * An asymmetric pair like that is the defect, not the individual check: any
+ * text a write accepts and a read refuses is a permanent outage waiting to be
+ * typed. So the strict scan is applied HERE, at every write, and a value that
+ * could never be served is refused before it is stored rather than after.
+ *
+ * The scan is strictly stronger than the one it replaces —
+ * `assertBrowserSafe` applies the shape rules AND then the same
+ * `assertNoSecretLikeContent` heuristic — so nothing that used to be refused is
+ * now accepted.
+ */
+function assertNoCredentialShape(fields: Record<string, unknown>): void {
+  assertBrowserSafe(fields, 'stored_text');
+}
 
 /**
  * The only actors an in-process system lane may append evidence under.
@@ -562,6 +591,7 @@ import {
   isRunFailureCategory,
   isRunKind,
   isRunReconcileDecision,
+  IMMUTABLE_LEDGER_ABSENT_EVIDENCE_KIND,
   INTEGRITY_ASSESSED_EVIDENCE_KIND,
   standingIntegrityVerdict,
   loadBackupRecords,
@@ -2614,6 +2644,14 @@ export class HeadquarterOperations {
     this.#immutableLedgersRestoredAtBoot = Object.freeze(
       restoredImmutableTables(db, immutabilityAsFound.tablesAbsent),
     );
+    // The DURABLE commitment HQ recorded about its own audit log is read INSIDE
+    // `structuralIntegrity`, not injected here (`contradictedChainCommitment`).
+    // The concurrent lane's answer to the same question passed the breach in as
+    // a value computed from the verdict ledger; that mechanism is gone and this
+    // one survives — see the boundary note on `recordIntegrityCheckpoint`. The
+    // property that mattered is unchanged: the cheap pass pays one indexed
+    // lookup, so a `DROP TABLE op_evidence` plus a rebuild is caught at BOOT and
+    // not only inside a Founder assessment.
     this.#integrityReport = structuralIntegrity(db, {
       guardsMissingAsFound: immutabilityAsFound.guardsMissing,
       immutableTablesAbsentAsFound: this.#immutableLedgersRestoredAtBoot,
@@ -2781,6 +2819,59 @@ export class HeadquarterOperations {
     // reservation, one immediate transaction" property is unchanged, and it
     // lands an evidence entry beside the row rather than a silent one.
     this.#recordBootIntegrityVerdictIfBlocking(recordedVerdict);
+    // The ledger LOSS itself, recorded durably in the audit log even when a
+    // blocking verdict already stands (Wave 5 correction round four, Medium
+    // M3). `assessHqIntegrity` deliberately assesses the file as it NOW stands
+    // and is the only latch-clearing path, so without this a dropped ledger
+    // observed at boot was cleared by the next assessment with nothing
+    // anywhere recording that rows had gone missing. The verdict says a
+    // guard was absent; only this says WHICH ledger disappeared.
+    this.#recordImmutableLedgerLoss(immutabilityAsFound.tablesAbsent, db);
+  }
+
+  /**
+   * Append an evidence entry naming the engine-immutable ledgers this file did
+   * NOT carry, whenever any were absent as it was found.
+   *
+   * Unconditional on the standing verdict, and that is the correction: the
+   * verdict path below records at most one row and only when nothing blocking
+   * already stands, so on a database already in safe mode a SECOND ledger
+   * could be dropped and re-created empty with nothing recording it at all. A
+   * Founder full assessment then cleared the latch — correctly, because the
+   * file as it then stands is sound — and the fact that an audit ledger had
+   * been destroyed survived nowhere.
+   *
+   * It is an EVIDENCE entry rather than a verdict, deliberately: a verdict is a
+   * judgement HQ is currently making, and this is a fact about what was found.
+   * Facts belong in the append-only log, and the log outlives the latch.
+   */
+  #recordImmutableLedgerLoss(tablesAbsent: readonly string[], db: HqDatabase): void {
+    if (tablesAbsent.length === 0) return;
+    if (db.readonly) return;
+    if (!this.#queuePrivileged) return;
+    const privileged = this.#queuePrivileged;
+    // Only the ones HQ's own schema has since re-created, exactly as the
+    // structural pass counts them: an honestly older file reports nothing.
+    const restored = restoredImmutableTables(db, tablesAbsent);
+    if (restored.length === 0) return;
+    try {
+      privileged.reserve(() => {
+        privileged.appendEvidence({
+          actor: this.#processIdentity,
+          kind: IMMUTABLE_LEDGER_ABSENT_EVIDENCE_KIND,
+          payload: {
+            // Declared TABLE NAMES only — this package's own closed list — so
+            // the entry can never become a channel for stored content.
+            tables: restored,
+            observedAtConstruction: true,
+            executable: false,
+          },
+        });
+      });
+    } catch {
+      // A construction that cannot write its observation must still construct.
+      // The finding still stands in `#integrityReport` and still refuses.
+    }
   }
 
   /**
@@ -2799,22 +2890,18 @@ export class HeadquarterOperations {
     const verdictId = `verdict-${uuid()}`;
     try {
       privileged.reserve(() => {
-        appendIntegrityVerdict(this.#db, {
-          id: verdictId,
-          assessedAt: nowIso(),
-          depth: this.#integrityReport.depth,
-          safeMode: true,
-          findings,
-          processId: this.#processIdentity,
-          assessedBy: this.#processIdentity,
-        });
+        // The evidence entry and the verdict land inside ONE reservation, so
+        // the pair can never half-exist. No checkpoint is written here by
+        // design: this path only runs when the boot verdict is BLOCKING, and a
+        // checkpoint is HQ standing behind the record — see
+        // `recordIntegrityCheckpoint`.
         privileged.appendEvidence({
           actor: this.#processIdentity,
           kind: INTEGRITY_ASSESSED_EVIDENCE_KIND,
           payload: {
             // The row this entry corroborates. `standingIntegrityVerdict` will
-            // not let a CLEAR verdict clear without it, and the pair lands
-            // inside ONE reservation so it can never half-exist.
+            // not let a CLEAR verdict clear without it, and it must be a
+            // genuine LINK in the chain — not merely a row carrying the id.
             verdictId,
             depth: this.#integrityReport.depth,
             safeMode: true,
@@ -2823,6 +2910,15 @@ export class HeadquarterOperations {
             observedAtConstruction: true,
             executable: false,
           },
+        });
+        appendIntegrityVerdict(this.#db, {
+          id: verdictId,
+          assessedAt: nowIso(),
+          depth: this.#integrityReport.depth,
+          safeMode: true,
+          findings,
+          processId: this.#processIdentity,
+          assessedBy: this.#processIdentity,
         });
       });
     } catch {
@@ -3137,7 +3233,7 @@ export class HeadquarterOperations {
     // anywhere.
     if (input.note !== undefined) {
       try {
-        assertNoSecretLikeContent({ note: input.note });
+        assertNoCredentialShape({ note: input.note });
       } catch {
         return fail(
           'invalid_input',
@@ -3192,7 +3288,7 @@ export class HeadquarterOperations {
     // one: a different guard would reopen the gap from the other side, where
     // this check passes and the append still throws.
     try {
-      assertNoSecretLikeContent({ reason: input.reason });
+      assertNoCredentialShape({ reason: input.reason });
     } catch {
       return fail(
         'invalid_input',
@@ -4071,7 +4167,7 @@ export class HeadquarterOperations {
     const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
     if (!reason.ok) return fail('invalid_input', reason.message);
     try {
-      assertNoSecretLikeContent({ reason: reason.value });
+      assertNoCredentialShape({ reason: reason.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -4131,7 +4227,7 @@ export class HeadquarterOperations {
     if (!rationale.ok) return fail('invalid_input', rationale.message);
     if (rationale.value) {
       try {
-        assertNoSecretLikeContent({ rationale: rationale.value });
+        assertNoCredentialShape({ rationale: rationale.value });
       } catch (error) {
         return fail('invalid_input', errorMessage(error));
       }
@@ -4420,7 +4516,7 @@ export class HeadquarterOperations {
     const actor = this.#resolveActor(input.proposedBy, 'raise a mission proposal');
     if (!actor.ok) return actor;
     try {
-      assertNoSecretLikeContent(input.payload);
+      assertNoCredentialShape(input.payload);
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -4758,7 +4854,7 @@ export class HeadquarterOperations {
     // payloads are Founder input headed for storage, so they are scanned on
     // exactly the same terms.
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         title: title.value,
         objective: objective.value,
         scope: scope.value,
@@ -5039,7 +5135,7 @@ export class HeadquarterOperations {
     }
     if (note) {
       try {
-        assertNoSecretLikeContent({ note });
+        assertNoCredentialShape({ note });
       } catch (error) {
         return fail('invalid_input', errorMessage(error));
       }
@@ -5215,7 +5311,7 @@ export class HeadquarterOperations {
     }
 
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         amendment: amendment.value,
         objective: objective.value,
         constraints: constraints.value,
@@ -6370,7 +6466,7 @@ export class HeadquarterOperations {
     if (refusedCapability) return refusedCapability;
     // Everything that will be PERSISTED is scanned before anything is written.
     try {
-      assertNoSecretLikeContent({ name: name.value, purpose: purpose.value, stream: stream.value });
+      assertNoCredentialShape({ name: name.value, purpose: purpose.value, stream: stream.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -6492,7 +6588,7 @@ export class HeadquarterOperations {
     if (nextStream !== current.stream) changed.push('stream');
     if (changed.length === 0) return ok(current);
     try {
-      assertNoSecretLikeContent({ name: nextName, purpose: nextPurpose, stream: nextStream });
+      assertNoCredentialShape({ name: nextName, purpose: nextPurpose, stream: nextStream });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -6595,7 +6691,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({ note });
+      assertNoCredentialShape({ note });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -6802,7 +6898,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         name: name.value,
         problem: problem.value,
         targetUsers: targetUsers.value,
@@ -6956,7 +7052,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({ note });
+      assertNoCredentialShape({ note });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -7072,7 +7168,7 @@ export class HeadquarterOperations {
     const product = this.#productRecordFromStore(input.productId);
     if (!product) return fail('unknown_product', `Unknown product: ${input.productId}`);
     try {
-      assertNoSecretLikeContent({ name: name.value, locator: locator.value, note: note.value });
+      assertNoCredentialShape({ name: name.value, locator: locator.value, note: note.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -7576,9 +7672,18 @@ export class HeadquarterOperations {
     const label = missionText('label', input.label, MAX_RUN_LABEL_LENGTH, true);
     if (!label.ok) return fail('invalid_input', label.message);
     try {
-      assertNoSecretLikeContent({ label: label.value });
+      assertNoCredentialShape({ label: label.value });
     } catch {
-      return fail('invalid_input', 'The run label looks like it contains a credential; nothing was recorded.');
+      // The message names what was actually checked (Wave 5 correction round
+      // four, Low L2). It used to say "looks like it contains a credential"
+      // over a check that only recognised an `api_key: value` assignment, so a
+      // caller told a bare `sk-...` had been shape-detected when it had been
+      // stored. It is shape-detected NOW, and the wording can say so.
+      return fail(
+        'invalid_input',
+        'The run label matches a known credential shape, or names a credential holder; a label is stored ' +
+          'permanently and served on the Founder reliability route, so nothing was recorded.',
+      );
     }
     if (!this.#reliabilityStorePresent) {
       return fail('invalid_input', 'run ledger unavailable on this database handle');
@@ -7857,7 +7962,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value ?? '' });
+      assertNoCredentialShape({ note: note.value ?? '' });
     } catch {
       return fail('invalid_input', 'The run note looks like it contains a credential; nothing was recorded.');
     }
@@ -8108,7 +8213,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, true);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value });
+      assertNoCredentialShape({ note: note.value });
     } catch {
       return fail('invalid_input', 'The reconciliation note looks like it contains a credential; nothing was recorded.');
     }
@@ -8243,6 +8348,14 @@ export class HeadquarterOperations {
       // convenience surface — the Wave 5 High. See the field's note.
       verifyEvidenceChain: this.#verifyEvidenceChainFromStore,
       reliabilitySchemaPresent: this.#reliabilityStorePresent,
+      // The durable commitment is checked HERE too, and needs no argument: the
+      // full pass runs `structuralIntegrity` beneath it, which reads
+      // `contradictedChainCommitment` directly. This is the only path that
+      // clears a latch, so a log that cannot satisfy what HQ recorded about it
+      // has to be visible to it, or a Founder assessment would clear a verdict
+      // about a destroyed audit log (Wave 5 correction round four, High H1;
+      // round five, High 1).
+      //
       // The one as-found observation an assessment may NOT clear (Wave 5
       // correction round five, Medium 1). Guards are deliberately omitted above
       // because HQ re-creating a trigger genuinely repairs the file's guard set
@@ -8265,6 +8378,14 @@ export class HeadquarterOperations {
     const privileged = this.#requirePrivilegedQueue();
     const verdictId = `verdict-${uuid()}`;
     privileged.reserve(() => {
+      // Verdict, then its corroborating evidence entry, then the COMMITMENT —
+      // one reservation, so all three land together or not at all. The
+      // concurrent lane put the evidence append first so that a chain tip
+      // stored ON the verdict row would already include that entry; that
+      // mechanism is gone (see the boundary note on `recordIntegrityCheckpoint`)
+      // and the freshness it wanted is delivered by the checkpoint, which is
+      // written LAST and therefore commits to a tip that already carries this
+      // assessment's own entry.
       if (this.#reliabilityStorePresent) {
         appendIntegrityVerdict(this.#db, {
           id: verdictId,
@@ -8710,10 +8831,40 @@ export class HeadquarterOperations {
           // canonical-truth answer rather than a second store that can drift
           // from it. The stored columns stay as recorded attribution and
           // measure nothing.
+          // CANONICAL membership UNION the attribution HQ itself recorded on
+          // the entry (Wave 5 correction round four, High H2).
+          //
+          // The canonical half alone was fail-OPEN in the one direction that
+          // matters. `#canonicalTaskScopes` answers "every mission this task
+          // belongs to NOW", so breaking the link erased the SPEND from the
+          // ceiling it had exhausted: `blocked, observed 5000` became
+          // `within_ceiling, observed 0`, and the previously refused write was
+          // then RECORDED. Three routes reached it — a supported facade call
+          // (`assignMissionToProject({projectId: null})` by a principal holding
+          // only `hq.mission_command`), a raw `UPDATE hq_mission_plan_items SET
+          // mission_id`, and `DELETE FROM hq_missions` — and none of them was a
+          // finding anywhere.
+          //
+          // `mission_id` and `project_id` on this row are HQ-DERIVED, never
+          // caller-supplied (`recordIntelligenceCost` writes them from
+          // `#canonicalTaskScopes`), and the row is append-only. So the union
+          // is monotone and unforgeable: once HQ has filed a spend under a
+          // mission, no later relinking can take it out of that mission's
+          // measurement, and no caller can put it into another's.
+          //
+          // The column still holds ONE of N missions, which is why the
+          // canonical half stays: it is what lets a task linked to a second
+          // mission accumulate against that mission's ceiling too.
           case 'mission':
-            return canonicalOf(entry.taskId).missionIds.includes(scope.scopeId);
+            return (
+              canonicalOf(entry.taskId).missionIds.includes(scope.scopeId) ||
+              entry.missionId === scope.scopeId
+            );
           case 'project':
-            return canonicalOf(entry.taskId).projectIds.includes(scope.scopeId);
+            return (
+              canonicalOf(entry.taskId).projectIds.includes(scope.scopeId) ||
+              entry.projectId === scope.scopeId
+            );
           // The provider scope is measured against the task's canonical
           // BINDING, never against the caller-supplied column. On a bound task
           // the two are equal by enforcement (`provider_binding_mismatch`); on
@@ -8723,6 +8874,15 @@ export class HeadquarterOperations {
           // Spend HQ cannot attribute to a provider is spend that measures no
           // provider ceiling.
           case 'provider': {
+            // The binding HQ RECORDED on the entry, union the one the payload
+            // carries now. `provider_bound` is HQ's own statement, written at
+            // record time and append-only, so a later `UPDATE op_tasks SET
+            // payload` cannot move already-recorded spend out of the ceiling
+            // that governed it — which it could while this read went to the
+            // mutable payload alone (Wave 5 correction round four, High H2
+            // route (c)). An entry HQ could not attribute measures no provider
+            // ceiling, exactly as before.
+            if (entry.providerBound && entry.providerId === scope.scopeId) return true;
             const bound = boundProviderOf(entry.taskId);
             return bound != null && bound === scope.scopeId;
           }
@@ -8782,6 +8942,44 @@ export class HeadquarterOperations {
    * HQ links a task to either. A task linked to no plan item belongs to no
    * mission, which is answered as the empty list rather than as "unconstrained".
    */
+  /**
+   * The mission, project and provider scopes HQ has already ATTRIBUTED spend
+   * from this task to — read off its own append-only cost entries.
+   *
+   * Not a second authority store and not a second truth: every one of these
+   * columns was written by HQ from the canonical record at the moment the entry
+   * was recorded (`recordIntelligenceCost` derives them; no caller supplies
+   * one), and the rows can never be updated or deleted. So this answers a
+   * different question from `#canonicalTaskScopes` — "whose ceiling has this
+   * work already been charged against", rather than "whose ceiling applies to
+   * it now" — and a ceiling that has been charged does not stop applying
+   * because a link was later broken.
+   */
+  #recordedScopesForTask(taskId: string): {
+    missionIds: string[];
+    projectIds: string[];
+    providerIds: string[];
+  } {
+    if (!this.#intelligenceStorePresent) return { missionIds: [], projectIds: [], providerIds: [] };
+    const missionIds = new Set<string>();
+    const projectIds = new Set<string>();
+    const providerIds = new Set<string>();
+    for (const entry of this.#costEntriesFromStore()) {
+      if (entry.taskId !== taskId) continue;
+      if (entry.missionId) missionIds.add(entry.missionId);
+      if (entry.projectId) projectIds.add(entry.projectId);
+      // Only a binding HQ VOUCHED for. A caller-declared provider on an
+      // unbound task is an attribution claim, not a scope — the same rule
+      // `#entriesForScope` applies to the measurement.
+      if (entry.providerBound) providerIds.add(normalizeProviderId(entry.providerId));
+    }
+    return {
+      missionIds: [...missionIds].sort(),
+      projectIds: [...projectIds].sort(),
+      providerIds: [...providerIds].sort(),
+    };
+  }
+
   #canonicalTaskScopes(taskId: string): { missionIds: string[]; projectIds: string[] } {
     if (!this.#missionStorePresent) return { missionIds: [], projectIds: [] };
     const rows = this.#db
@@ -8869,9 +9067,42 @@ export class HeadquarterOperations {
       latestBudgetFor(budgets, { scopeKind, scopeId, window }) != null;
     const canonical = this.#canonicalTaskScopes(taskId);
     const boundProvider = this.#taskBoundProvider(taskId);
+    // Every scope this task has ALREADY SPENT UNDER, taken from HQ's own
+    // append-only attribution on its cost entries (Wave 5 correction round
+    // four, High H2).
+    //
+    // `#canonicalTaskScopes` answers "which ceilings apply to this task NOW",
+    // and that alone was fail-open: breaking the mission link dropped the
+    // exhausted ceiling out of the governing set entirely, so a refused write
+    // became a recorded one. Route (a) needed no raw SQL at all — a principal
+    // holding `hq.mission_command`, without approval authority and without
+    // `hq.intelligence_command`, called
+    // `assignMissionToProject({ projectId: null })` and the project ceiling
+    // stopped governing. That same principal raising the ceiling directly is
+    // correctly REFUSED, which is what made the route a bypass rather than an
+    // authority.
+    //
+    // A scope a task has spent under continues to govern it. The attribution
+    // is HQ-derived and the rows are append-only, so this can only ever ADD
+    // constraints — it is monotone in the fail-closed direction, and no caller
+    // can name a scope here any more than before.
+    const spentUnder = this.#recordedScopesForTask(taskId);
     const candidates: { kind: BudgetScope; id: string; from: GoverningBudgetScope['derivedFrom'] }[] = [
-      ...canonical.missionIds.map((id) => ({ kind: 'mission' as const, id, from: 'task_mission' as const })),
-      ...canonical.projectIds.map((id) => ({ kind: 'project' as const, id, from: 'task_project' as const })),
+      ...[...new Set([...canonical.missionIds, ...spentUnder.missionIds])].map((id) => ({
+        kind: 'mission' as const,
+        id,
+        from: 'task_mission' as const,
+      })),
+      ...[...new Set([...canonical.projectIds, ...spentUnder.projectIds])].map((id) => ({
+        kind: 'project' as const,
+        id,
+        from: 'task_project' as const,
+      })),
+      ...spentUnder.providerIds.map((id) => ({
+        kind: 'provider' as const,
+        id,
+        from: 'task_bound_provider' as const,
+      })),
       // Folded into THIS lane's vocabulary, which is what makes the two
       // vocabularies actually one (Wave 5 correction round three, High B2). The
       // canonical binding is `CLAUDE`; every budget scope id, cost entry column
@@ -8887,7 +9118,13 @@ export class HeadquarterOperations {
           ]
         : []),
     ];
+    const seenCandidates = new Set<string>();
     for (const candidate of candidates) {
+      // The live binding and a recorded one can name the same provider; a scope
+      // may be derived once and only once.
+      const key = `${candidate.kind}\u001f${candidate.id}`;
+      if (seenCandidates.has(key)) continue;
+      seenCandidates.add(key);
       for (const window of BUDGET_WINDOWS) {
         if (!has(candidate.kind, candidate.id, window)) continue;
         scopes.push({
@@ -9127,7 +9364,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
+      assertNoCredentialShape({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
     } catch {
       return fail('invalid_input', 'The note or basis looks like it contains a credential; nothing was recorded.');
     }
@@ -9280,7 +9517,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value ?? '' });
+      assertNoCredentialShape({ note: note.value ?? '' });
     } catch {
       return fail('invalid_input', 'The note looks like it contains a credential; nothing was recorded.');
     }
@@ -9529,9 +9766,15 @@ export class HeadquarterOperations {
     const label = missionText('label', input.label, MAX_DECISION_LABEL_LENGTH, true);
     if (!label.ok) return fail('invalid_input', label.message);
     try {
-      assertNoSecretLikeContent({ label: label.value });
+      assertNoCredentialShape({ label: label.value });
     } catch {
-      return fail('invalid_input', 'The decision label looks like it contains a credential; nothing was recorded.');
+      // See `openRun`'s label refusal: the same asymmetry, the same fix, and
+      // the same corrected wording (Wave 5 correction round four, H3 / L2).
+      return fail(
+        'invalid_input',
+        'The decision label matches a known credential shape, or names a credential holder; a label is ' +
+          'stored permanently and served on the Founder intelligence route, so nothing was recorded.',
+      );
     }
     if (!input.workerId) return fail('invalid_input', 'workerId is required');
     if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
@@ -10087,7 +10330,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
+      assertNoCredentialShape({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
     } catch {
       return fail('invalid_input', 'The note or basis looks like it contains a credential; nothing was recorded.');
     }
@@ -10322,10 +10565,11 @@ export class HeadquarterOperations {
       this.#db
         .prepare(
           `INSERT INTO hq_intel_cost_entries
-             (id, task_id, mission_id, project_id, decision_id, provider_id, model_id, provenance,
+             (id, task_id, mission_id, project_id, decision_id, provider_id, provider_bound, model_id,
+              provenance,
               amount_minor_units, currency, unit_kind, units_observed, basis, occurred_at, recorded_at,
               recorded_by, note, entry_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -10334,6 +10578,12 @@ export class HeadquarterOperations {
           canonicalScopes.projectIds[0] ?? null,
           decisionId,
           providerId,
+          // HQ's OWN statement about the caller's attribution claim, taken from
+          // the canonical binding read a few lines above and enforced equal to
+          // `providerId` when it exists. Written once, on an append-only row,
+          // so a later payload rewrite cannot change what was true (Wave 5
+          // correction round four, High H2 route (c) / Medium M6).
+          boundProvider != null ? 1 : 0,
           modelId,
           cost.fact.provenance,
           cost.fact.amountMinorUnits,
@@ -10415,10 +10665,22 @@ export class HeadquarterOperations {
    * projection, converts no currency and invents no confidence.
    */
   intelligenceAnalytics(): IntelligenceAnalyticsView {
+    // The SAME canonical derivation the ceilings are measured against, so the
+    // Founder's report and the ceiling that blocked a write can never disagree
+    // about whose spend it was (Wave 5 correction round four, Medium M5 / M6).
+    const memo = new Map<string, { missionIds: string[]; projectIds: string[] }>();
     return summarizeIntelligenceAnalytics({
       decisions: this.#listDecisionRecordsFromStore(),
       costs: this.#costEntriesFromStore(),
       observations: this.#observationsFromStore(),
+      canonicalScopesOf: (taskId: string) => {
+        let value = memo.get(taskId);
+        if (!value) {
+          value = this.#canonicalTaskScopes(taskId);
+          memo.set(taskId, value);
+        }
+        return value;
+      },
     });
   }
 
@@ -10594,7 +10856,7 @@ export class HeadquarterOperations {
     // Everything that will be PERSISTED is scanned before anything is written
     // (the store scans again — deliberate defense in depth, not redundancy).
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         title: title.value,
         body: body.value,
         project: project.value,
@@ -10976,7 +11238,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({ statement: statement.value });
+      assertNoCredentialShape({ statement: statement.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -11187,7 +11449,7 @@ export class HeadquarterOperations {
     if (refusedCapability) return refusedCapability;
     if (!this.#truthStorePresent) return fail('invalid_input', 'truth store unavailable on this database handle');
     try {
-      assertNoSecretLikeContent({ limitations: limitations.value });
+      assertNoCredentialShape({ limitations: limitations.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -11348,7 +11610,7 @@ export class HeadquarterOperations {
     if (!note.ok) return fail('invalid_input', note.message);
     if (note.value) {
       try {
-        assertNoSecretLikeContent({ note: note.value });
+        assertNoCredentialShape({ note: note.value });
       } catch {
         return fail(
           'invalid_input',
@@ -11844,7 +12106,7 @@ export class HeadquarterOperations {
     // as a field — which the JSON encoding hides from the first pattern. The
     // payload is stored permanently and handed verbatim to an adapter.
     try {
-      assertNoSecretLikeContent(input.payload);
+      assertNoCredentialShape(input.payload);
       assertBrowserSafe(input.payload, 'payload');
       assertBrowserSafe({ target: target.value }, 'target');
     } catch {
@@ -12432,7 +12694,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_ACTION_NOTE_LENGTH, true);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value });
+      assertNoCredentialShape({ note: note.value });
     } catch {
       return fail('invalid_input', 'The reconciliation note looks like it contains a credential; nothing was recorded.');
     }
@@ -13013,7 +13275,7 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'collaboration store unavailable on this database handle');
     }
     try {
-      assertNoSecretLikeContent({ title: title.value, purpose: purpose.value });
+      assertNoCredentialShape({ title: title.value, purpose: purpose.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -13309,7 +13571,7 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'collaboration store unavailable on this database handle');
     }
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         content: content.value,
         artifactRefs: artifactRefs.value,
         reason: handoff?.reason ?? null,

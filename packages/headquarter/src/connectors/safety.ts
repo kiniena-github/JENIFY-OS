@@ -12,6 +12,8 @@
  * serialized into an index record, a problem message, or a log line.
  */
 
+import { deepFreeze } from '../contracts/freeze.js';
+
 /** Named patterns so a refusal can say what it matched without echoing it. */
 const SECRET_PATTERNS: Array<{ label: string; pattern: RegExp }> = [
   { label: 'github-token', pattern: /\bgh[pousr]_[A-Za-z0-9]{16,}\b/ },
@@ -105,7 +107,7 @@ export function sanitizeText(raw: unknown, maxLength = 500): string {
  * text. Kept as its own constant so the connector layer does not depend on
  * the UI package.
  */
-export const LINKABLE_SCHEMES = ['https:'] as const;
+export const LINKABLE_SCHEMES = deepFreeze(['https:'] as const);
 
 export interface LocatorCheck {
   /** Sanitized locator. Empty when the input was unusable. */

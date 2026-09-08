@@ -23,15 +23,17 @@
  * entry. `source` must name the thing actually read.
  */
 
+import { deepFreeze } from '../contracts/freeze.js';
+
 /** Where a snapshot section's data genuinely came from. */
 export type SourceMode = 'live' | 'reconstructed' | 'sample';
 
 /** Display labels, kept next to the vocabulary so the UI cannot invent its own. */
-export const SOURCE_MODE_LABELS: Record<SourceMode, string> = {
+export const SOURCE_MODE_LABELS: Record<SourceMode, string> = deepFreeze({
   live: 'LIVE',
   reconstructed: 'RECONSTRUCTED',
   sample: 'SAMPLE',
-};
+});
 
 export interface Provenance {
   mode: SourceMode;

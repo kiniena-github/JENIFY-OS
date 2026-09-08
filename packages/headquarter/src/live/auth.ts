@@ -52,6 +52,7 @@
  */
 
 import type { HumanPrincipal, HumanPrincipalPort } from '../application/principals.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 /* ------------------------------------------------------------------ */
 /* The account, as the host resolved it                                */
@@ -152,7 +153,7 @@ export interface ControlRequest {
  * it is the marker recording how much is known about the caller, and a client
  * that could set it could upgrade its own trust level.
  */
-export const CLIENT_IDENTITY_KEYS: readonly string[] = [
+export const CLIENT_IDENTITY_KEYS: readonly string[] = deepFreeze([
   'principalId',
   'principal',
   'founderId',
@@ -171,7 +172,7 @@ export const CLIENT_IDENTITY_KEYS: readonly string[] = [
   'permissions',
   'sessionToken',
   'token',
-];
+]);
 
 export type ClientIdentityScan = { ok: true } | { ok: false; key: string };
 
@@ -218,7 +219,7 @@ export function scanForClientIdentity(body: unknown, depth = 0): ClientIdentityS
 /* Origin / CSRF                                                       */
 /* ------------------------------------------------------------------ */
 
-export const STATE_CHANGING_METHODS: readonly string[] = ['POST', 'PUT', 'PATCH', 'DELETE'];
+export const STATE_CHANGING_METHODS: readonly string[] = deepFreeze(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 export type OriginRejection =
   | 'origin_missing'
@@ -588,7 +589,7 @@ export type FounderResolution =
   | { ok: false; reason: FounderDenial; message: string };
 
 /** HTTP status each denial maps to. Anything authenticated-but-refused is 403. */
-export const FOUNDER_DENIAL_STATUS: Readonly<Record<FounderDenial, number>> = {
+export const FOUNDER_DENIAL_STATUS: Readonly<Record<FounderDenial, number>> = deepFreeze({
   unauthenticated: 401,
   founder_map_unconfigured: 403,
   founder_map_malformed: 403,
@@ -596,7 +597,7 @@ export const FOUNDER_DENIAL_STATUS: Readonly<Record<FounderDenial, number>> = {
   not_founder: 403,
   principal_unknown: 403,
   principal_inactive: 403,
-};
+});
 
 export interface FounderResolutionDeps {
   sessions: SessionResolverPort;
@@ -699,7 +700,7 @@ export const STEP_UP_MAX_SESSION_AGE_MS = 5 * 60_000;
  * A denial is never an authorization and is never step-up-gated: making it
  * harder to STOP something than to allow it would be exactly backwards.
  */
-export const STEP_UP_RISK_CLASSES: readonly string[] = ['founder_gate', 'destructive'];
+export const STEP_UP_RISK_CLASSES: readonly string[] = deepFreeze(['founder_gate', 'destructive']);
 
 export type StepUpFailure =
   | 'step_up_required'

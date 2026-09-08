@@ -10,6 +10,7 @@ import type { ActivityEvent, ActivityStatus } from '../contracts/events.js';
 import type { WorkerDescriptor } from '../contracts/workers.js';
 import type { TaskState } from './model.js';
 import { eventProject } from './model.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 export interface FounderDashboard {
   now: TaskState[];
@@ -20,7 +21,7 @@ export interface FounderDashboard {
 }
 
 /** Dashboard bucket per status. review_failed/review_passed are active work; outcome_unknown demands attention. */
-export const DASHBOARD_BUCKET: Record<ActivityStatus, keyof FounderDashboard | 'done'> = {
+export const DASHBOARD_BUCKET: Record<ActivityStatus, keyof FounderDashboard | 'done'> = deepFreeze({
   queued: 'next',
   assigned: 'now',
   running: 'now',
@@ -30,7 +31,7 @@ export const DASHBOARD_BUCKET: Record<ActivityStatus, keyof FounderDashboard | '
   outcome_unknown: 'blocked',
   needs_approval: 'waitingForFounder',
   completed: 'done',
-};
+});
 
 export function founderDashboard(states: TaskState[], todayUtcDate: string): FounderDashboard {
   const dashboard: FounderDashboard = { now: [], doneToday: [], blocked: [], waitingForFounder: [], next: [] };

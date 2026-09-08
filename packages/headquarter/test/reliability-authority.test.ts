@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { assertBrowserSafe } from '../src/live/redaction.js';
 import { CAPS, expectOk, setupFixture } from './application.fixture.js';
 import {
   claimSideEffectTask,
@@ -47,6 +48,63 @@ function openRun(fx: ReliabilityFixture, over: Record<string, unknown> = {}) {
     ...over,
   } as Parameters<HeadquarterOperations['openRun']>[0]);
 }
+
+/**
+ * Wave 5 correction round four, High H3.
+ *
+ * `openRun` scanned its label with the weak `api_key: value` heuristic while
+ * `control-api.ts`'s `safe()` applied the strict, shape-based
+ * `assertBrowserSafe` to every response. So a label of `sk-...`, `ghp_...`, a
+ * PEM header or `Bearer ...` was STORED, `hq_reliability_runs` is append-only,
+ * and `GET /api/control/reliability` then answered
+ * `500 {"code":"internal"}` on every subsequent read, forever. One accepted
+ * write permanently bricked a Founder read route.
+ *
+ * Both halves are asserted, because either alone could pass for the wrong
+ * reason: the write is REFUSED, and the read the route performs still produces
+ * a body that survives the very scan the route applies.
+ */
+describe('a label that the read boundary would refuse is refused at the WRITE', () => {
+  const poisoning = [
+    'sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345',
+    'ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123',
+    '-----BEGIN RSA PRIVATE KEY-----',
+    'Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+    'OPENAI_KEY_sk-ABCDEFGHIJKLMNOPQRST',
+  ];
+
+  it('refuses every credential shape as a run label, and keeps the route readable', () => {
+    for (const label of poisoning) {
+      const fx = reliabilityFixture();
+      const refusal = expectError(openRun(fx, { label }));
+      expect(refusal.code, label).toBe('invalid_input');
+      // The message names what was actually checked (Low L2): the old wording
+      // implied shape detection the weak check did not perform.
+      expect(refusal.message, label).toContain('credential shape');
+      // Nothing was recorded, so the route's own body still passes the route's
+      // own scan — the read is not bricked.
+      expect(fx.ops.listRunsBounded().total, label).toBe(0);
+      expect(() =>
+        assertBrowserSafe(
+          {
+            posture: fx.ops.hqReliabilityPosture(),
+            runs: fx.ops.listRunsBounded(),
+            backups: fx.ops.listVerifiedBackupsBounded(),
+          },
+          'control',
+        ),
+        label,
+      ).not.toThrow();
+    }
+  });
+
+  it('still accepts an ordinary label', () => {
+    const fx = reliabilityFixture();
+    expect(expectOk(openRun(fx, { label: 'publish the release note' })).run.label).toBe(
+      'publish the release note',
+    );
+  });
+});
 
 describe('a run write is authorized by the live fenced claim, and by nothing else', () => {
   it('accepts the worker holding the current claim', () => {

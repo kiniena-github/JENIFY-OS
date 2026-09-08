@@ -109,6 +109,10 @@ function costRow(over: Partial<CostEntryRow> = {}): CostEntryRow {
     projectId: null,
     decisionId: null,
     providerId: 'anthropic',
+    // The default is a task HQ canonically BOUND to this provider, because that
+    // is the ordinary case and it keeps these folds about the fold. The
+    // unbound case has its own test (Wave 5 correction round four, Medium M6).
+    providerBound: true,
     modelId: null,
     fact: {
       provenance: 'billed',
@@ -803,6 +807,7 @@ describe('a budget ceiling blocks or asks; it never grants', () => {
 describe('analytics are derived only from observed data', () => {
   it('publishes the escalation rate as an exact numerator over an exact denominator', () => {
     const analytics = summarizeIntelligenceAnalytics({
+      canonicalScopesOf: () => ({ missionIds: [], projectIds: [] }),
       decisions: [record({ id: 'a' }), record({ id: 'b', escalatedFrom: 'a' })],
       costs: [],
       observations: [],
@@ -813,6 +818,7 @@ describe('analytics are derived only from observed data', () => {
 
   it('sums only KNOWN amounts and counts the unknown ones beside them', () => {
     const analytics = summarizeIntelligenceAnalytics({
+      canonicalScopesOf: () => ({ missionIds: [], projectIds: [] }),
       decisions: [],
       costs: [
         costRow({ id: 'c1', fact: { ...costRow().fact, amountMinorUnits: 100 } }),
@@ -837,6 +843,7 @@ describe('analytics are derived only from observed data', () => {
 
   it('never sums across currencies — each is its own bucket', () => {
     const analytics = summarizeIntelligenceAnalytics({
+      canonicalScopesOf: () => ({ missionIds: [], projectIds: [] }),
       decisions: [],
       costs: [
         costRow({ id: 'c1', fact: { ...costRow().fact, amountMinorUnits: 100, currency: 'USD' } }),
@@ -861,6 +868,7 @@ describe('analytics are derived only from observed data', () => {
    */
   it('renders an identity HQ has NO amount for as null, never as zero', () => {
     const analytics = summarizeIntelligenceAnalytics({
+      canonicalScopesOf: () => ({ missionIds: [], projectIds: [] }),
       decisions: [],
       costs: [
         costRow({
@@ -893,6 +901,7 @@ describe('analytics are derived only from observed data', () => {
     // The known and unknown halves of one identity stay separate groups, and
     // only the known one carries a number.
     const mixed = summarizeIntelligenceAnalytics({
+      canonicalScopesOf: () => ({ missionIds: [], projectIds: [] }),
       decisions: [],
       costs: [
         costRow({

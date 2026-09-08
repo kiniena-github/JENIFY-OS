@@ -178,13 +178,154 @@ describe('the value rule is not defeated by case or by invisible characters', ()
   });
 
   /**
-   * U+2800 BRAILLE PATTERN BLANK (Wave 5 correction round four, Low 2).
+   * Wave 5 correction round four, Critical C1.
    *
-   * It is `So` — not `Cf`, not `Default_Ignorable` — so the property-named
-   * strip did not reach it, and it broke every credential shape while leaving
-   * every character of the credential present and usable. It carries an advance
-   * width, which is why it is arguably not "invisible"; what the class is
-   * actually for is ZERO INK, whatever the width.
+   * The previous sweep chose characters from two Unicode PROPERTIES and the
+   * comment beside it claimed that naming a property "makes this hold for code
+   * points nobody enumerated". It did not hold for an entire BLOCK: `\p{Cc}` is
+   * neither `Cf` nor `Default_Ignorable`, and U+0001, U+001F, U+007F and U+0090
+   * each carried a live credential onto the UNAUTHENTICATED artifact.
+   *
+   * So this does not pick four characters either. It sweeps the WHOLE C0/C1
+   * control block against every credential shape the guard knows, which is the
+   * only form of this test that could have failed before the fix and cannot be
+   * satisfied by adding four more entries to a list.
+   */
+  it('refuses a credential broken by any C0/C1 CONTROL character', () => {
+    const shapes = [
+      (hidden: string) => `sk-${hidden}AAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `ghp_${hidden}AAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `github_pat_${hidden}AAAAAAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `AIza${hidden}AAAAAAAAAAAAAAAAAAAAAAAA`,
+      (hidden: string) => `-----BEGIN ${hidden}RSA PRIVATE KEY-----`,
+      (hidden: string) => `Bearer ${hidden}AAAAAAAAAAAAAAAAAAAA`,
+    ];
+    const controls: number[] = [];
+    for (let code = 0x00; code <= 0x1f; code += 1) controls.push(code);
+    for (let code = 0x7f; code <= 0x9f; code += 1) controls.push(code);
+    expect(controls).toHaveLength(65);
+    for (const code of controls) {
+      const hidden = String.fromCharCode(code);
+      for (const shape of shapes) {
+        expect(
+          () => assertBrowserSafe({ note: shape(hidden) }),
+          `U+${code.toString(16).toUpperCase().padStart(4, '0')} in ${shape('')}`,
+        ).toThrow(BrowserSafetyError);
+      }
+    }
+  });
+
+  /**
+   * NFKC does not fold these. U+2010 HYPHEN and U+2011 NON-BREAKING HYPHEN are
+   * canonical in their own right, so `sk<U+2010>...` normalized to itself and
+   * matched nothing at all (Wave 5 correction round four, Critical C1).
+   */
+  it('refuses a credential whose hyphen is drawn as some other dash', () => {
+    const dashes = [
+      '‐', // HYPHEN
+      '‑', // NON-BREAKING HYPHEN
+      '‒', // FIGURE DASH
+      '–', // EN DASH
+      '—', // EM DASH
+      '―', // HORIZONTAL BAR
+      '⁃', // HYPHEN BULLET
+      '˗', // MODIFIER LETTER MINUS SIGN
+      '−', // MINUS SIGN
+      '﹣', // SMALL HYPHEN-MINUS
+      '－', // FULLWIDTH HYPHEN-MINUS
+    ];
+    for (const dash of dashes) {
+      expect(
+        () => assertBrowserSafe({ note: `sk${dash}AAAAAAAAAAAAAAAAAAAA` }),
+        `U+${dash.codePointAt(0)!.toString(16).toUpperCase()}`,
+      ).toThrow(BrowserSafetyError);
+    }
+  });
+
+  /**
+   * `\b` is a boundary between a word character and a non-word character, and
+   * `_` is a WORD character — so any underscore-joined prefix removed the
+   * boundary the whole pattern set was anchored on (Wave 5 correction round
+   * four, Critical C1).
+   */
+  it('refuses a credential hidden behind a word-character prefix', () => {
+    const prefixed = [
+      'OPENAI_KEY_sk-AAAAAAAAAAAAAAAAAAAA',
+      'openaiKEY_sk-AAAAAAAAAAAAAAAAAAAA',
+      'GITHUB_TOKEN_ghp_AAAAAAAAAAAAAAAAAAAA',
+      'GOOGLE_KEY_AIzaAAAAAAAAAAAAAAAAAAAAAAAA',
+      'HEADER_VALUE_Bearer AAAAAAAAAAAAAAAAAAAA',
+    ];
+    for (const value of prefixed) {
+      expect(() => assertBrowserSafe({ note: value }), value).toThrow(BrowserSafetyError);
+    }
+  });
+
+  /**
+   * The anchor may not be widened into ordinary prose. `task-oriented-approach`
+   * literally contains `sk-oriented-approach`, so an UNANCHORED pattern would
+   * refuse a Founder's own text — and with the write and read scans now being
+   * the same function, a false refusal is a refused write rather than a
+   * cosmetic annoyance.
+   */
+  it('does not fabricate a credential out of ordinary hyphenated prose', () => {
+    for (const value of [
+      'the next task-oriented-approach for the salt line',
+      'a task\n-oriented-workflow-item is ready for review',
+      'risk-management-workflow, quarter three',
+      'the bearer of the news arrives tomorrow',
+    ]) {
+      expect(() => assertBrowserSafe({ note: value }), value).not.toThrow();
+    }
+  });
+
+  /**
+   * `Object.entries` of a Map is empty, a Set has no own enumerable members,
+   * and a value whose only string form comes from `toJSON` has no string
+   * property at all — yet all three are serialized to the artifact (Wave 5
+   * correction round four, Critical C1).
+   */
+  it('sees a credential carried by a Map, a Set or a toJSON projection', () => {
+    const key = 'sk-AAAAAAAAAAAAAAAAAAAA';
+    expect(() => assertBrowserSafe({ held: new Map([['note', key]]) })).toThrow(BrowserSafetyError);
+    expect(() => assertBrowserSafe({ held: new Set([key]) })).toThrow(BrowserSafetyError);
+    expect(() => assertBrowserSafe({ held: { toJSON: () => key } })).toThrow(BrowserSafetyError);
+    // The KEY rule reaches a Map's keys too: a Map is an object whose field
+    // names happen to be data.
+    expect(() => assertBrowserSafe({ held: new Map([['apiKey', 'a-live-value']]) })).toThrow(
+      BrowserSafetyError,
+    );
+  });
+
+  /** A field NAME is chosen by whoever built the object, so it can be a homoglyph. */
+  it('refuses a credential-named field whose name is spelled in another script', () => {
+    // Cyrillic а (U+0430) and р (U+0440): renders as `apiKey`.
+    expect(() => assertBrowserSafe({ 'арiKey': 'a-live-value' })).toThrow(
+      BrowserSafetyError,
+    );
+  });
+
+  /** A cyclic graph must terminate rather than overflow the stack. */
+  it('terminates on a cyclic object instead of recursing forever', () => {
+    const node: Record<string, unknown> = { label: 'fine' };
+    node.self = node;
+    // The JSON heuristic still refuses to serialize a cycle, which is the
+    // fail-closed direction; what must not happen is a stack overflow in the
+    // walk itself.
+    expect(() => assertBrowserSafe(node)).toThrow();
+  });
+
+  /**
+   * PORTED from the other Wave 5 round-four lane, whose Low 2 found U+2800.
+   *
+   * BRAILLE PATTERN BLANK is `So` — not `Cf`, not `Cc`, not
+   * `Default_Ignorable` — so it walked through every property this file's C0/C1
+   * sweep and the invisible sweep above name, and it broke every credential
+   * shape while leaving every character of the credential present and usable.
+   * It carries an advance width, which is why it is arguably not "invisible";
+   * what the class is actually for is ZERO INK, whatever the width. The merged
+   * `ERASED_CODE_POINTS` names it explicitly, so this test asserts against the
+   * surviving implementation rather than against the lane that wrote it.
    */
   it('refuses a credential broken by a zero-ink character that is not default-ignorable', () => {
     const shapes = [
@@ -195,31 +336,33 @@ describe('the value rule is not defeated by case or by invisible characters', ()
       (hidden: string) => `Bearer ${hidden}AAAAAAAAAAAAAAAAAAAA`,
     ];
     for (const shape of shapes) {
-      expect(() => assertBrowserSafe({ note: shape('\u2800') }), shape('')).toThrow(
+      expect(() => assertBrowserSafe({ note: shape('⠀') }), shape('')).toThrow(
         BrowserSafetyError,
       );
     }
     // And braille as braille is still ordinary text, not a refusal.
     expect(() =>
-      assertBrowserSafe({ note: '\u2820\u2813\u2811\u280d\u2811 transcribed for accessibility' }),
+      assertBrowserSafe({ note: '⠠⠓⠑⠍⠑ transcribed for accessibility' }),
     ).not.toThrow();
   });
 
   /**
-   * Homoglyph prefixes (Wave 5 correction round four, Low 3): one Cyrillic or
-   * Greek letter that reads as the ASCII one defeats the shape while the
-   * credential's entropy is entirely intact. Executed against the previous
-   * head, Cyrillic `s` in `sk-…` and Cyrillic `a` in `AIza…` both PASSED.
+   * PORTED from the other Wave 5 round-four lane (its Low 3), and it holds
+   * unchanged against the merged fold, which is the union of the two lanes'
+   * maps: one Cyrillic or Greek letter that reads as the ASCII one defeats the
+   * shape while the credential's entropy is entirely intact. Executed against
+   * that lane's head, Cyrillic `s` in `sk-…` and Cyrillic `a` in `AIza…` both
+   * PASSED.
    */
   it('refuses a credential whose prefix is spelled with Cyrillic or Greek lookalikes', () => {
     const disguised: [string, string][] = [
-      ['Cyrillic s in sk-', '\u0455k-ABCDEFGHIJKLMNOP0123'],
-      ['Cyrillic a in AIza', 'AIz\u0430ABCDEFGHIJKLMNOPQRSTUV'],
-      ['Cyrillic o in xoxb-', 'x\u043Exb-ABCDEFGHIJKL'],
-      ['Cyrillic e in eyJ', '\u0435yJABCDEFGH.ABCDEFGH.ABCDEFGH'],
-      ['Greek B in Bearer', '\u0392earer ABCDEFGHIJKLMNOP'],
-      ['Greek O in BEGIN', '-----BEGIN RSA PRIVATE KEY-----'.replace('O', '\u039F')],
-      ['Cyrillic s plus a zero-ink blank', '\u0455k\u2800-ABCDEFGHIJKLMNOP0123'],
+      ['Cyrillic s in sk-', 'ѕk-ABCDEFGHIJKLMNOP0123'],
+      ['Cyrillic a in AIza', 'AIzаABCDEFGHIJKLMNOPQRSTUV'],
+      ['Cyrillic o in xoxb-', 'xоxb-ABCDEFGHIJKL'],
+      ['Cyrillic e in eyJ', 'еyJABCDEFGH.ABCDEFGH.ABCDEFGH'],
+      ['Greek B in Bearer', 'Βearer ABCDEFGHIJKLMNOP'],
+      ['Greek O in BEGIN', '-----BEGIN RSA PRIVATE KEY-----'.replace('O', 'Ο')],
+      ['Cyrillic s plus a zero-ink blank', 'ѕk⠀-ABCDEFGHIJKLMNOP0123'],
     ];
     for (const [label, value] of disguised) {
       expect(() => assertBrowserSafe({ note: value }), label).toThrow(BrowserSafetyError);
@@ -227,11 +370,22 @@ describe('the value rule is not defeated by case or by invisible characters', ()
   });
 
   /**
-   * The other direction, and the one the fold must not cost: the confusable map
-   * is curated so that no Cyrillic word can fold into any English keyword the
-   * free-text heuristic looks for. Cyrillic capital EN folds to `H` and ER to
-   * `P` by SHAPE, and the lowercase letters whose glyphs differ from the Latin
-   * ones are deliberately unmapped.
+   * PORTED from the other Wave 5 round-four lane, and this is the one whose
+   * REASON changed in the merge, so the reason is restated rather than carried.
+   *
+   * That lane's map was curated by OMISSION — it deliberately left Cyrillic
+   * `к`, `м`, `т`, `в`, `н` and `г` unmapped so that no Cyrillic string could
+   * fold into an English keyword at all. The surviving map is this lane's,
+   * which IS shape-faithful for those letters, so that impossibility argument
+   * does not carry across and is not restated here. What carries across, and is
+   * what the test was really pinning, is that ordinary PROSE in these scripts
+   * is not turned into a refusal — which holds because the fold is faithful to
+   * the glyph: `С` folds to `C` and not `S`, `н` to `h` and not `n`, `р` to `p`
+   * and not `r`, so `СЕКРЕТ` folds to `CEKPET` and `токен` to `tokeh`.
+   *
+   * The two English keywords that ARE reachable from these alphabets are pinned
+   * in the test below this one, so the boundary is asserted from both sides
+   * instead of being claimed.
    */
   it('keeps accepting ordinary Cyrillic, Greek and other-script prose', () => {
     const legitimate: [string, string][] = [
@@ -247,6 +401,39 @@ describe('the value rule is not defeated by case or by invisible characters', ()
     ];
     for (const [label, value] of legitimate) {
       expect(() => assertBrowserSafe({ note: value }), label).not.toThrow();
+    }
+  });
+
+  /**
+   * NEW at the round-four reconciliation, and the other half of the boundary the
+   * test above pins.
+   *
+   * Computed over the whole modern Russian, Ukrainian and Serbian alphabets, the
+   * ASCII letters the merged fold can produce from them are exactly
+   * `abcehijkmoptxy`. `apikey` and `cookie` are the only two keywords whose
+   * every letter is in that image, so those two — and only those two — have an
+   * all-Cyrillic homoglyph spelling. Refusing them is the CORRECT answer, not
+   * the cost: they are homoglyph spellings of an English credential keyword,
+   * which is the exact thing the fold exists to catch.
+   *
+   * This is asserted rather than argued so that widening the map later cannot
+   * silently widen the false-refusal surface without a test saying so.
+   */
+  it('folds only the two credential keywords a modern Cyrillic alphabet can spell', () => {
+    // а р і к е у — renders as `apikey`, is a word in no language.
+    expect(() => assertBrowserSafe({ 'арікеу': 'a-live-value' })).toThrow(BrowserSafetyError);
+    // с о о к і е — renders as `cookie`.
+    expect(() => assertBrowserSafe({ 'соокіе': 'a-live-value' })).toThrow(BrowserSafetyError);
+    // The keywords that need an `s`, `r`, `n`, `d`, `l`, `v`, `w`, `f`, `u` or
+    // `z` cannot be reached from those alphabets at all, so their nearest
+    // all-Cyrillic spelling stays ordinary text.
+    for (const [label, name] of [
+      ['Russian for secret, folds to cekpet', 'секрет'],
+      ['Russian for token, folds to tokeh', 'токен'],
+      ['Russian for password, folds to пapoль', 'пароль'],
+      ['Russian for access, folds to дocтyп', 'доступ'],
+    ] as [string, string][]) {
+      expect(() => assertBrowserSafe({ [name]: 'a-live-value' }), label).not.toThrow();
     }
   });
 

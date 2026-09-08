@@ -268,6 +268,230 @@ describe('the governing budget policy is DERIVED, never named by the caller', ()
   });
 });
 
+/**
+ * Wave 5 correction round four, High H2 — an exhausted ceiling that could be
+ * nullified.
+ *
+ * The previous round moved ceiling measurement off the cost ledger's own
+ * columns onto three MUTABLE, UNCENSUSED tables: `hq_mission_plan_items`,
+ * `hq_missions` and `op_tasks.payload`. Breaking any of those links did two
+ * things at once, and the second was new: the scope left
+ * `#governingBudgetScopes` (a pre-existing fail-open), AND `observed` collapsed
+ * from 5000 to 0 — removing the last place a Founder could see the spend the
+ * ceiling had been exhausted by.
+ *
+ * All three routes are executed here. The rule that closes them is one rule:
+ * canonical membership UNION the attribution HQ itself recorded on the
+ * append-only cost row. HQ derives those columns; no caller supplies one; the
+ * rows cannot be updated or deleted. So a ceiling that has been charged stays
+ * charged, and no caller can charge somebody else's.
+ */
+describe('an exhausted ceiling cannot be nullified by breaking the link it was derived through', () => {
+  function exhaust(fx: IntelligenceFixture, scope: { scopeKind: 'mission' | 'project'; scopeId: string }): void {
+    fx.budget([...INTELLIGENCE_TIERS]);
+    fx.budget([...INTELLIGENCE_TIERS], {
+      ...scope,
+      window: 'total',
+      ceilingMinorUnits: 1,
+    });
+    expectOk(
+      cost(fx, { provenance: 'billed', amountMinorUnits: 5000, currency: 'USD', unitKind: 'requests' }),
+    );
+  }
+
+  function blockedObserved(fx: IntelligenceFixture, scope: { scopeKind: 'mission' | 'project'; scopeId: string }): {
+    decision: string;
+    observed: number | null;
+  } {
+    const view = expectOk(fx.ops.intelligenceBudgetDecision({ ...scope, window: 'total' }));
+    return { decision: view.decision, observed: view.observedMinorUnits };
+  }
+
+  it('route (a): clearing the mission’s project through the SUPPORTED facade call', () => {
+    const fx = intelligenceFixture();
+    const canonical = fx.linkToCanonicalMission(fx.claim.taskId, 'route-a');
+    exhaust(fx, { scopeKind: 'project', scopeId: canonical.projectId });
+    expect(blockedObserved(fx, { scopeKind: 'project', scopeId: canonical.projectId })).toEqual({
+      decision: 'blocked',
+      observed: 5000,
+    });
+    const refused = decide(fx, { tier: 'high' });
+    expect(refused.ok).toBe(false);
+    expect(!refused.ok && refused.error.code).toBe('budget_ceiling_blocks');
+
+    // A principal holding ONLY `hq.mission_command` — no approval authority, no
+    // `hq.intelligence_command` — clears the mission's project. This is a
+    // legitimate, supported act, and it must not be a way to spend past a
+    // Founder ceiling. The same principal raising the ceiling directly is
+    // correctly refused, which is what made this a bypass.
+    expectOk(
+      fx.ops.assignMissionToProject({
+        missionId: canonical.missionId,
+        projectId: null,
+        requestedBy: 'founder',
+      }),
+    );
+
+    // The spend is still visible, and the ceiling still binds.
+    expect(blockedObserved(fx, { scopeKind: 'project', scopeId: canonical.projectId })).toEqual({
+      decision: 'blocked',
+      observed: 5000,
+    });
+    const stillRefused = decide(fx, { tier: 'high', idempotencyKey: 'after-unlink' });
+    expect(stillRefused.ok).toBe(false);
+    expect(!stillRefused.ok && stillRefused.error.code).toBe('budget_ceiling_blocks');
+  });
+
+  it('route (b): re-pointing or erasing the canonical link with raw SQL', () => {
+    const fx = intelligenceFixture();
+    const canonical = fx.linkToCanonicalMission(fx.claim.taskId, 'route-b');
+    exhaust(fx, { scopeKind: 'mission', scopeId: canonical.missionId });
+
+    // The engine refuses both writes now: `no_relink` covered `task_id` only,
+    // and `hq_missions` was absent from the census entirely.
+    expect(() =>
+      fx.db
+        .prepare(`UPDATE hq_mission_plan_items SET mission_id = 'nowhere' WHERE task_id = ?`)
+        .run(fx.claim.taskId),
+    ).toThrow(/write-once/);
+    expect(() => fx.db.prepare(`DELETE FROM hq_missions`).run()).toThrow(/never erased/);
+
+    // And even against a writer that got past them, the recorded attribution
+    // keeps the spend visible and the ceiling binding. `project_id` is a column
+    // the facade legitimately moves, so this is the raw form of route (a).
+    fx.db.prepare(`UPDATE hq_missions SET project_id = NULL`).run();
+    expect(blockedObserved(fx, { scopeKind: 'mission', scopeId: canonical.missionId })).toEqual({
+      decision: 'blocked',
+      observed: 5000,
+    });
+  });
+
+  it('route (c): rewriting the task payload the provider ceiling was derived through', () => {
+    const fx = intelligenceFixture();
+    const bound = fx.providerBoundClaim('CLAUDE');
+    fx.budget([...INTELLIGENCE_TIERS]);
+    fx.budget([...INTELLIGENCE_TIERS], {
+      scopeKind: 'provider',
+      scopeId: 'claude',
+      window: 'total',
+      ceilingMinorUnits: 1,
+    });
+    expectOk(
+      fx.ops.recordIntelligenceCost({
+        taskId: bound.taskId,
+        workerId: bound.workerId,
+        fence: bound.fence,
+        providerId: 'CLAUDE',
+        provenance: 'billed',
+        amountMinorUnits: 5000,
+        currency: 'USD',
+        unitKind: 'requests',
+        // A cost entry must DECLARE an identity, so a replay of the same
+        // observation is recognized rather than counted twice (Wave 5
+        // correction round five, Low 3). Added when the two round-five lanes
+        // were reconciled: this route-(c) case was written against the build
+        // where HQ stamped a wall-clock identity of its own, and the nullification
+        // it exercises is unaffected by which identity the entry carries.
+        idempotencyKey: 'route-c-provider-spend',
+      }),
+    );
+    const before = expectOk(
+      fx.ops.intelligenceBudgetDecision({
+        scopeKind: 'provider',
+        scopeId: 'claude',
+        window: 'total',
+      }),
+    );
+    expect(before.decision).toBe('blocked');
+    expect(before.observedMinorUnits).toBe(5000);
+
+    // `op_tasks.payload` is a mutable, uncensused column, and the provider
+    // ceiling used to be measured by re-reading it for every entry. HQ records
+    // its OWN statement about the binding on the append-only row instead, so
+    // rewriting the payload cannot move spend that already happened.
+    fx.db
+      .prepare(`UPDATE op_tasks SET payload = ? WHERE id = ?`)
+      .run(JSON.stringify({ branch: 'rewritten' }), bound.taskId);
+    const after = expectOk(
+      fx.ops.intelligenceBudgetDecision({
+        scopeKind: 'provider',
+        scopeId: 'claude',
+        window: 'total',
+      }),
+    );
+    expect(after.decision).toBe('blocked');
+    expect(after.observedMinorUnits).toBe(5000);
+  });
+});
+
+/**
+ * Wave 5 correction round four, Medium M5 / M6 — the Founder's spend report.
+ *
+ * `analytics.cost.byMission`/`byProject` folded the entry's own stored column,
+ * which holds ONE of the N missions a task may be linked to, so attribution
+ * flipped on uuid sort order; and `byProvider` folded the caller-declared
+ * `providerId`, which the ceiling path had already stopped trusting. Two
+ * surfaces over one ledger, disagreeing about the same spend.
+ */
+describe('the spend report agrees with the ceiling about whose spend it was', () => {
+  it('attributes a two-mission task to BOTH missions, not to whichever sorts first', () => {
+    const fx = intelligenceFixture();
+    const first = fx.linkToCanonicalMission(fx.claim.taskId, 'm5-one');
+    fx.budget([...INTELLIGENCE_TIERS]);
+    expectOk(
+      cost(fx, { provenance: 'billed', amountMinorUnits: 5000, currency: 'USD', unitKind: 'requests' }),
+    );
+    // A SECOND canonical mission for the same task — the exact shape that made
+    // `missionIds[0]` a coin toss.
+    const second = fx.linkToCanonicalMission(fx.claim.taskId, 'm5-two');
+
+    const byMission = fx.ops.intelligenceAnalytics().cost.byMission;
+    const ids = byMission.map((row) => row.id).sort();
+    expect(ids).toEqual([first.missionId, second.missionId].sort());
+    for (const row of byMission) expect(row.knownAmountMinorUnits).toBe(5000);
+    // And the ceilings say the same thing, which is the property that matters:
+    // the report and the enforcement read one ledger the same way.
+    for (const missionId of [first.missionId, second.missionId]) {
+      fx.budget([...INTELLIGENCE_TIERS], {
+        scopeKind: 'mission',
+        scopeId: missionId,
+        window: 'total',
+        ceilingMinorUnits: 1,
+      });
+      expect(
+        expectOk(
+          fx.ops.intelligenceBudgetDecision({ scopeKind: 'mission', scopeId: missionId, window: 'total' }),
+        ).observedMinorUnits,
+      ).toBe(5000);
+    }
+  });
+
+  it('never credits a provider HQ has no canonical statement about', () => {
+    const fx = intelligenceFixture();
+    fx.budget([...INTELLIGENCE_TIERS]);
+    // The fixture's claimed task binds NO provider, so `openai` here is the
+    // claim-holding worker's own declaration and nothing more.
+    expectOk(
+      cost(fx, {
+        providerId: 'openai',
+        provenance: 'billed',
+        amountMinorUnits: 999999,
+        currency: 'USD',
+        unitKind: 'requests',
+      }),
+    );
+    const byProvider = fx.ops.intelligenceAnalytics().cost.byProvider;
+    expect(byProvider.map((row) => row.id)).toEqual(['unattributed']);
+    expect(JSON.stringify(byProvider)).not.toContain('openai');
+    // Which is exactly what the ceiling already said.
+    expect(
+      expectOk(
+        fx.ops.intelligenceBudgetDecision({ scopeKind: 'provider', scopeId: 'openai', window: 'total' }),
+      ).observedMinorUnits,
+    ).toBe(0);
+  });
+});
+
 describe('a cost entry is attributed to canonical truth, not to what the caller typed', () => {
   it('takes mission and project from the plan, ignoring a ghost pair', () => {
     const fx = intelligenceFixture();

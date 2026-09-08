@@ -14,7 +14,12 @@ import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { CAPS, expectOk } from './application.fixture.js';
 import { fileFixture } from './reliability.fixture.js';
-import { openHqDatabase, openHqDatabaseReadOnly, openMemoryHqDatabase } from '../src/store/db.js';
+import {
+  openHqDatabase,
+  openHqDatabaseReadOnly,
+  openMemoryHqDatabase,
+  schemaEnsuredMarkBeforeMigration,
+} from '../src/store/db.js';
 import {
   ENGINE_IMMUTABLE_TABLES,
   HQ_DURABILITY_REQUIREMENT,
@@ -291,14 +296,27 @@ describe('the engine-immutable inventory is checked against the live schema, not
     // silently escaping the integrity check forever.
     expect(declared).toEqual(listed);
     // A REDUCED base is a deliberate, named exception, never a quiet omission
-    // (Wave 5 Medium 3). Exactly one table has one, and adding a second is a
-    // change this assertion forces a reviewer to see.
+    // (Wave 5 Medium 3), and this assertion exists to force a reviewer to see a
+    // new one. It saw this one: `hq_missions` joined the list in Wave 5
+    // correction round four (High H2), because Phase 14 derives a task's
+    // project ceiling through `hq_missions.project_id` while the table was
+    // absent from the census entirely — `DELETE FROM hq_missions` unbound every
+    // task from every mission and project ceiling with no finding anywhere. Its
+    // base is reduced for the same reason `hq_mission_plan_items`' is: status,
+    // project link and `updated_at` legitimately move through the facade, so a
+    // blanket `no_rewrite` would break every real writer. What is write-once is
+    // the row's EXISTENCE and its identity.
     expect(
       ENGINE_IMMUTABLE_TABLES.filter((entry) => entry.requiredGuards).map((entry) => ({
         table: entry.table,
         requiredGuards: [...entry.requiredGuards!],
       })),
-    ).toEqual([{ table: 'hq_mission_plan_items', requiredGuards: ['no_erase', 'no_replace'] }]);
+    ).toEqual([
+      { table: 'hq_mission_plan_items', requiredGuards: ['no_erase', 'no_replace'] },
+      { table: 'hq_missions', requiredGuards: ['no_erase', 'no_replace'] },
+    ]);
+    expect(declared).not.toContain('hq_missions');
+    expect(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table)).toContain('hq_missions');
     // And the one reduced-base entry is there for the stated reason, not by
     // accident: it carries no `no_rewrite` guard at all, and it IS listed
     // (the other lane's assertion, kept — being unlisted was the defect).
@@ -922,6 +940,15 @@ describe('the finding vocabulary and what blocks', () => {
       expect(finding!.detail).toContain('hq_reliability_verdicts');
       expect(finding!.detail).toContain('hq_intel_budgets');
       expect(finding!.detail).toContain('hq_truth_records');
+      // `op_evidence` TOO, and this assertion exists only because of the
+      // round-four RECONCILIATION. Neither lane reported it here alone: the
+      // lane that wrote this test fixed the discriminator but left
+      // `op_evidence` invisible to the census (the migration re-creates it
+      // before the census looks), and the lane that fixed THAT judged
+      // establishment on the pre-migration ledger catalogue, which this attack
+      // empties. Composed — the mark read AS OF THE MIGRATION — the audit log
+      // HQ destroyed is named alongside everything else it destroyed.
+      expect(finding!.detail).toContain('op_evidence');
       // And the act safe mode exists to refuse is refused.
       const released = ops.releaseKillSwitch('global', 'founder');
       expect(released.ok).toBe(false);
@@ -974,6 +1001,44 @@ describe('the finding vocabulary and what blocks', () => {
       const reopened = openHqDatabase(dbPath);
       expect(observeImmutabilityAsFound(reopened).established).toBe(true);
       reopened.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  /**
+   * NEW at the round-four reconciliation, and it pins the seam between the two
+   * lanes' fixes rather than either fix.
+   *
+   * `recordHqSchemaEnsured` stamps the mark at the END of a facade
+   * construction. `migrationRestoredImmutableTables` asks whether the file was
+   * established BEFORE its migration ran. Read the mark as it STANDS in that
+   * second question and a SECOND facade over the same handle sees a mark this
+   * very process just wrote, judges a brand-new store established, and reports
+   * `op_evidence` as a lost ledger on a file nothing has ever happened to.
+   * Executed during the merge, exactly that put nine suites into safe mode —
+   * which is why the mark is recorded at migration time and read from there.
+   *
+   * Two facades over one handle is not a contrivance: several suites compose
+   * that way, and so does every caller that hands its own store or registry to
+   * a second `HeadquarterOperations`.
+   */
+  it('does not read its own schema mark as evidence that a fresh store lost a ledger', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-second-facade-'));
+    try {
+      const db = openHqDatabase(path.join(dir, 'hq.sqlite'));
+      // The first facade ensures the schema and stamps the mark.
+      const first = new HeadquarterOperations(db);
+      expect(first.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      expect(hqSchemaEnsuredMarkPresent(db)).toBe(true);
+      // The mark AS OF THE MIGRATION is still false — the file was new then.
+      expect(schemaEnsuredMarkBeforeMigration(db)).toBe(false);
+      // A second facade over the SAME handle, after the stamp.
+      const second = new HeadquarterOperations(db);
+      expect(second.hqReliabilityPosture().integrity.observations).toEqual([]);
+      expect(second.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      expect(observeImmutabilityAsFound(db).tablesAbsent).toEqual([]);
+      db.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

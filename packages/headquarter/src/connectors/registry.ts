@@ -15,6 +15,7 @@
 import { ConnectorPolicyError, type ConnectorScope } from './types.js';
 import { DRIVE_CONNECTOR_ID, DRIVE_SOURCE_SYSTEM } from './drive.js';
 import { GITHUB_CONNECTOR_ID, GITHUB_SOURCE_SYSTEM } from './github.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 export type ConnectorImplementationStatus = 'implemented' | 'planned';
 
@@ -30,7 +31,7 @@ export interface ConnectorDescriptor {
   notes: string;
 }
 
-export const CONNECTOR_REGISTRY: readonly ConnectorDescriptor[] = [
+export const CONNECTOR_REGISTRY: readonly ConnectorDescriptor[] = deepFreeze([
   {
     id: GITHUB_CONNECTOR_ID,
     title: 'GitHub evidence',
@@ -94,7 +95,7 @@ export const CONNECTOR_REGISTRY: readonly ConnectorDescriptor[] = [
     nativeKinds: [],
     notes: 'Extension point only. Not implemented in lane G.',
   },
-];
+]);
 
 export function getConnectorDescriptor(id: string): ConnectorDescriptor | undefined {
   return CONNECTOR_REGISTRY.find((descriptor) => descriptor.id === id);

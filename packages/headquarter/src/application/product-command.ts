@@ -264,7 +264,7 @@ export const PRODUCT_ARTIFACT_READ_LIMIT = 100;
 export const PRODUCT_SNAPSHOT_LIMIT = 0;
 
 /** A sha256 hex digest, and nothing else, when a content digest is supplied. */
-export const CONTENT_DIGEST_PATTERN = /^[a-f0-9]{64}$/;
+export const CONTENT_DIGEST_PATTERN = deepFreeze(/^[a-f0-9]{64}$/);
 
 /* ------------------------------------------------------------------ */
 /* Schema — three tables, all INSERT-only BY ENGINE                    */

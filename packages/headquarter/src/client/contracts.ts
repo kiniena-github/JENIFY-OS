@@ -24,6 +24,7 @@
 
 import type { HqSnapshot } from '../live/snapshot.js';
 import type { KillSwitchView } from '../application/console.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 /**
  * The authenticated HQ state document.
@@ -135,7 +136,7 @@ export interface ClientState {
  * silently uncoloured danger metric is worse than a rejected document (Codex
  * round 18).
  */
-export const ROOM_TONES = ['accent', 'info', 'warn', 'danger', 'violet', 'neutral'] as const;
+export const ROOM_TONES = deepFreeze(['accent', 'info', 'warn', 'danger', 'violet', 'neutral'] as const);
 
 export type RoomTone = (typeof ROOM_TONES)[number];
 
@@ -148,7 +149,7 @@ export type RoomTone = (typeof ROOM_TONES)[number];
  * looks better with something moving". `dark` is the honest default: a room
  * with no recorded state is a dark room.
  */
-export const ROOM_LIVENESS_VALUES = ['active', 'attention', 'quiet', 'dark'] as const;
+export const ROOM_LIVENESS_VALUES = deepFreeze(['active', 'attention', 'quiet', 'dark'] as const);
 
 export type RoomLiveness = (typeof ROOM_LIVENESS_VALUES)[number];
 

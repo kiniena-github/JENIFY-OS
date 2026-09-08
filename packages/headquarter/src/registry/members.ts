@@ -47,26 +47,27 @@ import {
   type EligibilityContext,
   type SuspendedRole,
 } from './eligibility.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
-export const WORKER_TYPES = ['interactive', 'execution', 'review', 'automation'] as const;
+export const WORKER_TYPES = deepFreeze(['interactive', 'execution', 'review', 'automation'] as const);
 export type WorkerType = (typeof WORKER_TYPES)[number];
 
-export const LOCALITIES = ['local', 'cloud'] as const;
+export const LOCALITIES = deepFreeze(['local', 'cloud'] as const);
 export type Locality = (typeof LOCALITIES)[number];
 
-export const PRIVACY_CLASSES = ['open', 'internal', 'confidential', 'restricted'] as const;
+export const PRIVACY_CLASSES = deepFreeze(['open', 'internal', 'confidential', 'restricted'] as const);
 export type PrivacyClass = (typeof PRIVACY_CLASSES)[number];
 
-export const COST_CLASSES = ['free', 'low', 'medium', 'high', 'premium'] as const;
+export const COST_CLASSES = deepFreeze(['free', 'low', 'medium', 'high', 'premium'] as const);
 export type CostClass = (typeof COST_CLASSES)[number];
 
-export const MEMBER_STATUSES = ['active', 'disabled', 'removed', 'replaced'] as const;
+export const MEMBER_STATUSES = deepFreeze(['active', 'disabled', 'removed', 'replaced'] as const);
 export type MemberStatus = (typeof MEMBER_STATUSES)[number];
 
-export const MEMBER_HEALTHS = ['unknown', 'healthy', 'degraded', 'unavailable'] as const;
+export const MEMBER_HEALTHS = deepFreeze(['unknown', 'healthy', 'degraded', 'unavailable'] as const);
 export type MemberHealth = (typeof MEMBER_HEALTHS)[number];
 
-export const ASSIGNMENT_STATUSES = ['active', 'completed', 'handover_pending'] as const;
+export const ASSIGNMENT_STATUSES = deepFreeze(['active', 'completed', 'handover_pending'] as const);
 export type AssignmentStatus = (typeof ASSIGNMENT_STATUSES)[number];
 
 export interface MemberBenchmark {

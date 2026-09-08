@@ -33,6 +33,7 @@
  */
 
 import { assertNoSecretLikeContent } from '../operator/evidence.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 /** Field names that may never carry a non-trivial string value. */
 const SECRET_KEY_PATTERN =
@@ -54,18 +55,40 @@ const SECRET_KEY_PATTERN =
  * Values are also NORMALIZED before matching (see `normalizeForScan`), because
  * the same finding showed a zero-width space or a fullwidth hyphen inside a key
  * defeating every pattern at once.
+ *
+ * **`\b` is gone, and its replacement is the point** (Wave 5 correction round
+ * four, Critical C1). `\b` is a boundary between a word character and a
+ * non-word character, and `_` is a WORD character — so a credential carrying
+ * any underscore-joined prefix simply had no boundary in front of it and
+ * matched nothing at all. Executed end to end: `OPENAI_KEY_sk-…` was carried on
+ * the UNAUTHENTICATED `hq-snapshot.json` while the bare `sk-…` correctly
+ * refused the artifact.
+ *
+ * `(?<![A-Za-z0-9])` is the anchor instead: it treats `_` — and every other
+ * punctuation character an identifier joins with — as a boundary, while still
+ * refusing to fire in the middle of a letter or digit run. That last part is
+ * what keeps ordinary prose out of it: `task-oriented-approach` contains the
+ * literal substring `sk-oriented-approach`, which an UNANCHORED pattern would
+ * refuse as an OpenAI key. The new anchor matches everywhere `\b` did plus the
+ * underscore case, and nowhere else.
+ *
+ * The residual is stated rather than glossed: a prefix that runs straight into
+ * the shape with no separator at all (`KEYsk-…`) is still not matched, because
+ * it is genuinely indistinguishable from the `task-…` case above. Anchoring is
+ * a heuristic; the architecture — credentials never enter the control plane —
+ * is the guarantee.
  */
 const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
-  /\bsk-[A-Za-z0-9_-]{16,}/i, // OpenAI-style secret key
-  /\bgh[pousr]_[A-Za-z0-9]{16,}/i, // GitHub token
-  /\bgithub_pat_[A-Za-z0-9_]{20,}/i, // GitHub fine-grained PAT
-  /\bAIza[0-9A-Za-z_-]{20,}/i, // Google API key
-  /\bya29\.[0-9A-Za-z_-]{20,}/i, // Google OAuth access token
-  /\bxox[baprs]-[A-Za-z0-9-]{10,}/i, // Slack token
-  /\bsbp_[a-f0-9]{32,}/i, // Supabase personal access token
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/, // JWT (base64url; case IS the payload)
+  /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/i, // OpenAI-style secret key
+  /(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{16,}/i, // GitHub token
+  /(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}/i, // GitHub fine-grained PAT
+  /(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{20,}/i, // Google API key
+  /(?<![A-Za-z0-9])ya29\.[0-9A-Za-z_-]{20,}/i, // Google OAuth access token
+  /(?<![A-Za-z0-9])xox[baprs]-[A-Za-z0-9-]{10,}/i, // Slack token
+  /(?<![A-Za-z0-9])sbp_[a-f0-9]{32,}/i, // Supabase personal access token
+  /(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/, // JWT (base64url; case IS the payload)
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/i, // PEM private key
-  /\bBearer\s+[A-Za-z0-9._-]{16,}/i, // Authorization header value
+  /(?<![A-Za-z0-9])Bearer\s+[A-Za-z0-9._-]{16,}/i, // Authorization header value
   // `api_key: "…"` style assignments inside free text. This mirrors the
   // evidence log's own heuristic, but is applied to each RAW string rather
   // than to the JSON encoding of the whole payload. That difference matters:
@@ -81,7 +104,7 @@ const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
  * equality, so `contextWindowTokens` (a vendor-advertised model property,
  * not a usage measurement) is unaffected.
  */
-export const FABRICATED_FIELD_NAMES: readonly string[] = [
+export const FABRICATED_FIELD_NAMES: readonly string[] = deepFreeze([
   'cost',
   'costUsd',
   'costEstimate',
@@ -100,7 +123,7 @@ export const FABRICATED_FIELD_NAMES: readonly string[] = [
   'mood',
   'confidenceScore',
   'progressPercent',
-];
+]);
 
 export class BrowserSafetyError extends Error {
   constructor(
@@ -113,137 +136,201 @@ export class BrowserSafetyError extends Error {
 }
 
 /**
- * Every code point that carries NO INK and is therefore usable to break a
- * credential pattern while leaving every character of the credential present.
+ * Every code point that carries NO INK — that does not render as an ordinary
+ * visible character — and is therefore usable to break a credential pattern
+ * while leaving every character of the credential present, and without changing
+ * what a reader meaningfully sees.
+ *
+ * The rule is zero INK, not zero WIDTH, and the difference is load-bearing: one
+ * member of this set (U+2800) has an advance width and is here anyway.
  *
  * Defined by PROPERTY, not by a hand-listed range (Wave 5 correction round
- * three, Medium B7). The previous version stripped five ranges somebody chose,
- * and a whole class walked straight through it: U+00AD SOFT HYPHEN, U+034F
- * COMBINING GRAPHEME JOINER, U+180E, U+2028 LINE SEPARATOR, U+2029, U+115F and
- * U+FFA0 HALFWIDTH HANGUL FILLER all passed the scan when placed inside `sk-`,
- * `ghp_`, `github_pat_`, `AIza`, a PEM header, `Bearer ` and a JWT.
+ * three, Medium B7). The version before that stripped five ranges somebody
+ * chose, and a whole class walked straight through it: U+00AD SOFT HYPHEN,
+ * U+034F COMBINING GRAPHEME JOINER, U+180E, U+2028 LINE SEPARATOR, U+2029,
+ * U+115F and U+FFA0 HALFWIDTH HANGUL FILLER all passed the scan when placed
+ * inside `sk-`, `ghp_`, `github_pat_`, `AIza`, a PEM header, `Bearer ` and a
+ * JWT.
  *
  * That was not a snapshot backstop failing quietly. End to end through the
- * Founder route, a plain `sk-…` note was refused 400 while the same note
+ * Founder route, a plain `sk-...` note was refused 400 while the same note
  * carrying one U+00AD was stored 201 and came back on the wire on the next
- * read; and through the RETRIEVAL facade — the layer
- * `RETRIEVAL_GUARD_STATEMENT` names as the guarantee — `searchCompany` and
+ * read; and through the RETRIEVAL facade -- the layer
+ * `RETRIEVAL_GUARD_STATEMENT` names as the guarantee -- `searchCompany` and
  * `askJenify` refused the plain form and ACCEPTED the invisible-character form.
  *
  *  - `\p{Default_Ignorable_Code_Point}` is Unicode's own name for "renders as
  *    nothing": the soft hyphen, the Hangul fillers, the Mongolian and variation
  *    selectors, the zero-width and bidi controls, the tag characters;
  *  - `\p{Cf}` is the format category, which overlaps it and covers the rest;
- *  - U+034F and U+2028/U+2029 are named explicitly because they are in neither:
- *    the combining grapheme joiner is a combining mark and the line and
- *    paragraph separators are `Zl`/`Zp`, and all three split a pattern in
- *    exactly the same invisible way;
- *  - U+2800 BRAILLE PATTERN BLANK is named for the same reason and is the one
- *    member with an advance WIDTH. It is `So`, not `Cf` and not
- *    `Default_Ignorable`, and it went straight through this class while
- *    splitting `sk-…` in two (Wave 5 correction round four, Low 2). The rule
- *    the class actually follows is zero INK, not zero width — see
- *    `normalizeForScan`.
+ *  - `\p{Cc}` is the C0/C1 CONTROL block -- U+0000-U+001F, U+007F-U+009F. **It
+ *    is in neither of the two above, and the previous comment's claim that
+ *    naming a property "makes this hold for code points nobody enumerated" was
+ *    therefore false of an entire block** (Wave 5 correction round four,
+ *    Critical C1). Executed, one fresh fixture per row through
+ *    `liveSnapshotFromOperations`: U+0001, U+001F, U+007F and U+0090 each
+ *    carried a live credential onto the UNAUTHENTICATED artifact while the
+ *    plain form refused to build it. A control character is not a format
+ *    character and not default-ignorable; it is simply not a character a reader
+ *    of an HQ string ever sees as itself. The claim is corrected here rather
+ *    than restated: this set holds for the properties it NAMES, and the pinning
+ *    test sweeps the code points themselves rather than trusting the naming;
+ *  - U+034F and `\p{Zl}`/`\p{Zp}` (U+2028/U+2029) are named explicitly because
+ *    they are in none of the above: the combining grapheme joiner is a
+ *    combining mark and the line and paragraph separators are their own
+ *    categories, and all three split a pattern in exactly the same invisible
+ *    way;
+ *  - U+2800 BRAILLE PATTERN BLANK is named for the same reason, and is the one
+ *    member of this set with an advance WIDTH. It is `So` — not `Cf`, not
+ *    `Cc`, not `Default_Ignorable` — so it walked straight through every
+ *    property named above while splitting `sk-…` in two (Wave 5 correction
+ *    round four, the other lane's Low 2, executed on that lane's head). It is
+ *    the reason this class is stated as zero INK rather than zero width.
+ *    Ordinary whitespace is still deliberately not folded — see the `\p{Zs}`
+ *    paragraph below.
  *
- * Naming a property rather than a range is what makes this hold for code points
- * nobody enumerated, which is why the pinning test uses characters this comment
- * does not list.
+ * `\p{Zs}` -- the ordinary SPACE separators -- is deliberately NOT here, and
+ * that is an argued boundary rather than an omission. A space is VISIBLE: it
+ * changes what a reader sees, so it hides nothing. Erasing it would join
+ * ordinary prose into fabricated credential shapes (`...ask -driven-workflow`),
+ * which is a false REFUSAL of a Founder's own text, and `Bearer\s+...` is
+ * matched on the raw string anyway.
  */
-const INVISIBLE_CODE_POINTS =
-  /[\p{Default_Ignorable_Code_Point}\p{Cf}\u034F\u2028\u2029\u2800]/gu;
+const ERASED_CODE_POINTS =
+  /[\p{Default_Ignorable_Code_Point}\p{Cf}\p{Cc}\p{Zl}\p{Zp}͏⠀]/gu;
 
 /**
- * Latin lookalikes from the two scripts a homoglyph substitution is actually
- * written in, folded onto the ASCII the credential patterns are written in.
+ * The hyphen family, folded to ASCII `-`.
  *
- * **Why this exists** (Wave 5 correction round four, Low 3). The value rule
- * matches SHAPES, and a shape is defeated by one character that reads the same
- * and encodes differently: executed against the previous head, Cyrillic
- * `\u0455` in `\u0455k-ABCDEFGHIJKLMNOP0123` and Cyrillic `\u0430` in
- * `AIz\u0430ABCDEFGHIJKLMNOPQRSTUV` both PASSED with the whole key material
- * intact, while the ASCII spellings of both were refused.
+ * NFKC does NOT do this: U+2010 HYPHEN, U+2011 NON-BREAKING HYPHEN, U+2212
+ * MINUS SIGN, U+02D7 MODIFIER LETTER MINUS SIGN and U+2043 HYPHEN BULLET are
+ * each canonical in their own right, so `sk<U+2010>AAAA...` normalized to
+ * itself and matched nothing -- executed, and carried onto the unauthenticated
+ * artifact (Wave 5 correction round four, Critical C1). The compatibility forms
+ * (U+FE63, U+FF0D) DO fold under NFKC and are listed anyway, so this set is a
+ * statement about the hyphen family rather than about what one normalization
+ * form happens to leave behind.
+ *
+ * U+00AD SOFT HYPHEN is deliberately absent: it is invisible, so it belongs in
+ * the ERASED set above rather than here.
+ */
+const HYPHEN_CONFUSABLES =
+  /[‐‑‒–—―⁃˗⁻₋−⸺⸻⹀︱︲﹘﹣－᐀᠆ー]/gu;
+
+/**
+ * Latin look-alikes from other scripts, folded to the ASCII letter they are
+ * drawn as.
+ *
+ * **Why this exists, from both round-four lanes, which found it independently.**
+ * The KEY rule reads a field NAME, and a name is chosen by whoever built the
+ * object: `<Cyrillic a><Cyrillic r>iKey` renders identically to `apiKey` and
+ * matched neither rule (Critical C1). The VALUE rule matches SHAPES, and a
+ * shape is defeated by one character that reads the same and encodes
+ * differently: Cyrillic `ѕ` in `ѕk-ABCDEFGHIJKLMNOP0123` and Cyrillic
+ * `а` in `AIzаABCDEFGHIJKLMNOPQRSTUV` both PASSED with the whole key
+ * material intact, while the ASCII spellings of both were refused (Low 3).
  *
  * **What it deliberately is not.** This is not a Unicode confusables
- * implementation — HQ carries no confusables table, and inventing a partial
- * one while calling it complete would be the overclaim. It is a curated map
- * over Cyrillic and Greek, the two scripts that carry a full set of
- * ASCII-identical letters, sit on common keyboard layouts, and are what
- * homoglyph substitution is written in. Cherokee, Armenian, Coptic, Lisu and
- * the rest are NOT folded and a substitution drawn from them still defeats the
- * shape; that limit is stated in the phase document's residual list rather than
- * papered over.
+ * implementation — HQ carries no confusables table, and inventing a partial one
+ * while calling it complete would be the overclaim. It is a curated map over
+ * Cyrillic and Greek, the two scripts that carry a full set of ASCII-identical
+ * letters, sit on common keyboard layouts, and are what homoglyph substitution
+ * is written in. Cherokee, Armenian, Coptic, Lisu and the rest are NOT folded
+ * and a substitution drawn from them still defeats the shape; that limit is
+ * stated in the phase document's residual list rather than papered over.
  *
- * **What bounds the false-positive risk, by construction rather than by
- * hope.** Only glyphs that are identical or all-but-identical are included, and
- * the omissions are what matter: Cyrillic `\u043A`, `\u043C`, `\u0442`,
- * `\u0432`, `\u043D` and `\u0433` are NOT mapped, because their glyphs differ
- * from `k`, `m`, `t`, `b`, `h` and `r`; and Cyrillic `\u041D` folds to `H`,
- * `\u0420` to `P` and `\u0421` to `C`, by SHAPE. The consequence is that no
- * Cyrillic word can fold into any of the English keywords the free-text
- * heuristic looks for — `\u0421\u0415\u041A\u0420\u0415\u0422` folds to
- * `CEKPET`, not `SECRET`, and `\u0422\u041E\u041A\u0415\u041D` folds to
- * `TOKEH`, not `TOKEN` — so ordinary Cyrillic prose cannot become a match by
- * being folded. Greek `\u03A4\u039F\u039A\u0395\u039D` does fold to `TOKEN`,
- * which the case-insensitive free-text heuristic then treats exactly as it
- * already treats the English `TOKEN: …`. That is the pre-existing behaviour
- * of that heuristic applied consistently, not a new class of refusal.
+ * **What bounds the false-positive risk, by construction rather than by hope.**
+ * Every entry is faithful to the GLYPH, and the faithfulness is what does the
+ * bounding: Cyrillic `с` folds to `c` and not `s`, `н` to `h` and not `n`, `р`
+ * to `p` and not `r`, `В` to `B` and not `V`. Computed over the whole modern
+ * Russian, Ukrainian and Serbian alphabets, the ASCII letters this map can
+ * produce from them are exactly `abcehijkmoptxy` — so `СЕКРЕТ` folds to
+ * `CEKPET` and never to `SECRET`, and `токен` folds to `tokeh` and never to
+ * `token`, because `s`, `r` and `n` are not in that image at all.
+ *
+ * That is a bound, not an impossibility, and the exceptions are named rather
+ * than implied: `apikey` (with its `api_key` and `api-key` spellings) and
+ * `cookie` are the two keywords whose every letter IS in that image, so
+ * `арікеу` and `соокіе` do fold onto them. Neither is a word in any of those
+ * languages — they are homoglyph spellings of the English keyword, which is
+ * precisely what the fold exists to catch — and both are field-NAME keywords,
+ * where a refusal is the correct answer. `live-redaction.test.ts` pins the
+ * boundary from both sides: ordinary prose in these scripts is accepted, and
+ * those two spellings are refused.
+ *
+ * **The one visible cost, disclosed rather than discovered.** Greek capitals for
+ * `TOKEN` — `ΤΟΚΕΝ` — do fold to `TOKEN`, so Greek
+ * text of that shape is refused by the free-text key/value heuristic exactly as
+ * the English spelling already is. That is the pre-existing behaviour of that
+ * heuristic applied consistently, not a new class of refusal, and it is in the
+ * phase document's residual list.
+ *
+ * ONE map, not two (Wave 5 round-four reconciliation). Both lanes shipped a
+ * fold; this is the union of their entries on the broader lane's
+ * implementation, because a wider fold is the fail-closed direction for a
+ * credential scan and the bound above survives the widening.
  */
-const CONFUSABLE_TO_ASCII: ReadonlyMap<string, string> = new Map<string, string>([
-  // Cyrillic capitals whose glyph is the Latin capital.
-  ['\u0410', 'A'], ['\u0412', 'B'], ['\u0415', 'E'], ['\u0405', 'S'],
-  ['\u0406', 'I'], ['\u0408', 'J'], ['\u041A', 'K'], ['\u041C', 'M'],
-  ['\u041D', 'H'], ['\u041E', 'O'], ['\u0420', 'P'], ['\u0421', 'C'],
-  ['\u0422', 'T'], ['\u0423', 'Y'], ['\u04AE', 'Y'], ['\u0425', 'X'],
-  ['\u051A', 'Q'], ['\u051C', 'W'],
-  // Cyrillic smalls whose glyph is the Latin small letter.
-  ['\u0430', 'a'], ['\u0435', 'e'], ['\u0455', 's'], ['\u0456', 'i'],
-  ['\u0458', 'j'], ['\u043E', 'o'], ['\u0440', 'p'], ['\u0441', 'c'],
-  ['\u0443', 'y'], ['\u0445', 'x'], ['\u051B', 'q'], ['\u051D', 'w'],
-  // Greek capitals whose glyph is the Latin capital.
-  ['\u0391', 'A'], ['\u0392', 'B'], ['\u0395', 'E'], ['\u0396', 'Z'],
-  ['\u0397', 'H'], ['\u0399', 'I'], ['\u039A', 'K'], ['\u039C', 'M'],
-  ['\u039D', 'N'], ['\u039F', 'O'], ['\u03A1', 'P'], ['\u03A4', 'T'],
-  ['\u03A5', 'Y'], ['\u03A7', 'X'],
-  // Greek smalls whose glyph is the Latin small letter.
-  ['\u03BF', 'o'], ['\u03C1', 'p'], ['\u03F2', 'c'],
+const CONFUSABLE_LATIN: ReadonlyMap<string, string> = new Map([
+  ['а', 'a'], ['в', 'b'], ['с', 'c'], ['ԁ', 'd'], ['е', 'e'],
+  ['ѕ', 's'], ['і', 'i'], ['ј', 'j'], ['к', 'k'], ['м', 'm'],
+  ['н', 'h'], ['о', 'o'], ['р', 'p'], ['т', 't'], ['у', 'y'],
+  ['х', 'x'], ['һ', 'h'], ['ԛ', 'q'], ['ԝ', 'w'],
+  ['А', 'A'], ['В', 'B'], ['С', 'C'], ['Е', 'E'], ['Ѕ', 'S'],
+  ['І', 'I'], ['Ј', 'J'], ['К', 'K'], ['М', 'M'], ['Н', 'H'],
+  ['О', 'O'], ['Р', 'P'], ['Т', 'T'], ['У', 'Y'], ['Х', 'X'],
+  // Carried from the other round-four lane's curated map, which reached four
+  // code points this one did not: the Cyrillic Straight U and the Komi Qa/Wa
+  // capitals, and the Greek lunate sigma.
+  ['Ү', 'Y'], ['Ԛ', 'Q'], ['Ԝ', 'W'], ['ϲ', 'c'],
+  ['α', 'a'], ['ο', 'o'], ['ν', 'v'], ['ρ', 'p'], ['τ', 't'],
+  ['υ', 'u'], ['κ', 'k'], ['ε', 'e'], ['ι', 'i'],
+  ['Α', 'A'], ['Β', 'B'], ['Ε', 'E'], ['Ζ', 'Z'], ['Η', 'H'],
+  ['Ι', 'I'], ['Κ', 'K'], ['Μ', 'M'], ['Ν', 'N'], ['Ο', 'O'],
+  ['Ρ', 'P'], ['Τ', 'T'], ['Υ', 'Y'], ['Χ', 'X'],
 ]);
 
-const CONFUSABLE_CODE_POINTS = new RegExp(`[${[...CONFUSABLE_TO_ASCII.keys()].join('')}]`, 'gu');
+function foldConfusableLetters(value: string): string {
+  let out = '';
+  for (const character of value) out += CONFUSABLE_LATIN.get(character) ?? character;
+  return out;
+}
 
 /**
- * Fold away the three cheap ways to hide a credential shape from a regex:
- * invisible characters inside it, compatibility variants of its separators, and
- * letters from another script that read as the ASCII ones.
+ * Fold away the cheap ways to hide a credential shape from a regex: invisible
+ * or control characters inside it, compatibility variants of its separators, a
+ * hyphen drawn as some other dash, and a letter drawn in another script.
  *
- * `NFKC` maps the fullwidth forms (`－`, `＿`, `．`) onto the ASCII
- * the patterns look for; the strip removes every zero-ink code point NFKC
- * leaves alone; the confusable fold maps the Cyrillic and Greek lookalikes onto
- * their ASCII counterparts. Scanning the normalized form only — the ORIGINAL
- * string is what gets refused or published, so this widens what is caught and
- * never rewrites what is carried.
+ * Order is load-bearing and each step is here because the one before it does
+ * not do its job:
  *
- * NFKC runs FIRST and the strip SECOND, deliberately: a compatibility form can
- * decompose around an invisible character, so stripping afterwards catches a
- * shape that only becomes contiguous once the folding has happened. The
- * confusable fold runs LAST, over the text those two have already made
- * contiguous, for the same reason.
+ *  1. `NFKC` maps the fullwidth and compatibility forms onto the ASCII the
+ *     patterns look for;
+ *  2. the hyphen fold catches the dash family NFKC leaves canonical;
+ *  3. the confusable-letter fold catches a word spelled in Cyrillic or Greek;
+ *  4. the ERASE runs LAST, because a compatibility form can decompose around an
+ *     invisible character and a shape may only become contiguous once the
+ *     folding has happened.
  *
- * **U+2800 BRAILLE PATTERN BLANK is stripped, and it is the one member of the
- * stripped class that is not `Default_Ignorable`** (Wave 5 correction round
- * four, Low 2). It carries an advance width, so it is arguably not "invisible"
- * — but it has no ink, and executed against the previous head it broke
+ * Scanning the normalized form only -- the ORIGINAL string is what gets refused
+ * or published, so this widens what is caught and never rewrites what is
+ * carried.
+ *
+ * **U+2800 BRAILLE PATTERN BLANK is erased by step 4 even though it has an
+ * advance width** (Wave 5 correction round four, the other lane's Low 2). It is
+ * `So` — not `Cf`, not `Cc`, not `Default_Ignorable` — so it walked through
+ * every property `ERASED_CODE_POINTS` names, and on that lane's head it broke
  * `sk-ABCDEFGHIJKLMNOP0123` into two unmatched halves while leaving every
- * character of the key present and usable. What this class is for is ZERO-INK
+ * character of the key present and usable. What that class is for is ZERO-INK
  * characters, whatever their width, because those are the ones that defeat a
- * shape without removing the credential. Ordinary whitespace is deliberately
- * NOT folded: a space inside a credential is a break a reader can see, and
- * folding whitespace away would start matching prose.
+ * shape without removing the credential. Ordinary whitespace is still
+ * deliberately NOT folded: a space inside a credential is a break a reader can
+ * see, folding it away would start matching prose, and `Bearer\s+…` is matched
+ * on the raw string anyway.
  */
 function normalizeForScan(value: string): string {
-  return value
-    .normalize('NFKC')
-    .replace(INVISIBLE_CODE_POINTS, '')
-    .replace(CONFUSABLE_CODE_POINTS, (character) => CONFUSABLE_TO_ASCII.get(character) ?? character);
+  return foldConfusableLetters(
+    value.normalize('NFKC').replace(HYPHEN_CONFUSABLES, '-'),
+  ).replace(ERASED_CODE_POINTS, '');
 }
 
 /** Trivial values are exempt from the key rule so `{ token: null }` is fine. */
@@ -251,18 +338,106 @@ function isTrivial(value: unknown): boolean {
   return value == null || (typeof value === 'string' && value.trim().length === 0);
 }
 
-function walk(value: unknown, path: string, visit: (value: unknown, path: string, key?: string) => void): void {
+/**
+ * How deep the walk goes before it stops descending. A bound rather than a
+ * hope: the traversal now follows `toJSON`, and a `toJSON` that returns a fresh
+ * object every call cannot be closed over by the cycle set.
+ */
+const MAX_SCAN_DEPTH = 64;
+
+/**
+ * Walk everything a browser could end up seeing — which is NOT the same set as
+ * "the own enumerable properties of a plain object" (Wave 5 correction round
+ * four, Critical C1).
+ *
+ * Three carriers were invisible to the previous walk, each demonstrated at unit
+ * level against `assertBrowserSafe`:
+ *
+ *  - **`toJSON`.** `JSON.stringify` calls it, so a value whose only STRING form
+ *    comes from `toJSON` reached the artifact while the walk saw an object with
+ *    no string properties at all. It is followed here, so the scan sees what
+ *    the serializer will;
+ *  - **`Map`.** `Object.entries` of a Map is empty. Its keys are walked as KEY
+ *    NAMES (so `new Map([['apiKey', '...']])` meets the key rule) and its values
+ *    as values;
+ *  - **`Set`.** Same shape of blindness; members are walked as array elements
+ *    are.
+ *
+ * A `seen` set makes a cyclic graph terminate instead of overflowing the stack,
+ * and `depth` bounds the rest. Both are fail-CLOSED in the only direction that
+ * matters: they stop the walk descending, they never stop a finding being
+ * raised.
+ */
+function walk(
+  value: unknown,
+  path: string,
+  visit: (value: unknown, path: string, key?: string) => void,
+  seen: WeakSet<object> = new WeakSet(),
+  depth = 0,
+): void {
   visit(value, path);
-  if (Array.isArray(value)) {
-    value.forEach((item, index) => walk(item, `${path}[${index}]`, visit));
-    return;
-  }
-  if (value != null && typeof value === 'object') {
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      visit(child, `${path}.${key}`, key);
-      walk(child, `${path}.${key}`, visit);
+  if (value == null || typeof value !== 'object') return;
+  if (depth >= MAX_SCAN_DEPTH) return;
+  const target = value as object;
+  if (seen.has(target)) return;
+  seen.add(target);
+  // What the SERIALIZER would see. Followed before anything else, because for a
+  // value whose own properties are all non-strings this is the only place a
+  // credential can be.
+  const toJson = (target as { toJSON?: unknown }).toJSON;
+  if (typeof toJson === 'function') {
+    let projected: unknown;
+    let projectable = true;
+    try {
+      projected = (toJson as () => unknown).call(target);
+    } catch {
+      // A `toJSON` that throws produces nothing to publish; the serializer
+      // would fail too. Not a finding, and not a reason to stop scanning the
+      // object's own properties.
+      projectable = false;
+    }
+    if (projectable && projected !== target) {
+      walk(projected, `${path}.toJSON()`, visit, seen, depth + 1);
     }
   }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => walk(item, `${path}[${index}]`, visit, seen, depth + 1));
+    return;
+  }
+  if (value instanceof Map) {
+    let index = 0;
+    for (const [key, child] of value) {
+      const at = `${path}{${index}}`;
+      index += 1;
+      // The Map KEY is scanned as a value in its own right AND, when it is a
+      // string, offered to the key rule — a Map is an object whose field names
+      // happen to be data.
+      walk(key, `${at}.key`, visit, seen, depth + 1);
+      if (typeof key === 'string') visit(child, `${at}.value`, key);
+      walk(child, `${at}.value`, visit, seen, depth + 1);
+    }
+    return;
+  }
+  if (value instanceof Set) {
+    let index = 0;
+    for (const member of value) {
+      walk(member, `${path}<${index}>`, visit, seen, depth + 1);
+      index += 1;
+    }
+    return;
+  }
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    visit(child, `${path}.${key}`, key);
+    walk(child, `${path}.${key}`, visit, seen, depth + 1);
+  }
+}
+
+/** The key rule, applied to the name as WRITTEN and as normalized. */
+function namesACredentialHolder(key: string): boolean {
+  // A field NAME is chosen by whoever built the object, so a homoglyph spelling
+  // of `apiKey` is exactly as available as an invisible character inside a
+  // value. Same normalization, same reason.
+  return SECRET_KEY_PATTERN.test(key) || SECRET_KEY_PATTERN.test(normalizeForScan(key));
 }
 
 /**
@@ -270,13 +445,25 @@ function walk(value: unknown, path: string, visit: (value: unknown, path: string
  * `BrowserSafetyError` naming the offending path — fail closed, never redact
  * silently, because a silently-redacted snapshot hides the bug that put the
  * secret there.
+ *
+ * **What this does NOT catch, recorded rather than implied.** A credential
+ * SPLIT across two sibling fields or two array items (`{a: 'sk-', b: '<32
+ * chars>'}`) is not detected, and deliberately so: catching it would mean
+ * concatenating sibling values and scanning the join, which fabricates matches
+ * out of ordinary text — `['task', '-oriented-workflow-item']` would be refused
+ * as an OpenAI key. Every candidate rule for it was a worse trade than the hole,
+ * so the hole is stated here and in the phase document rather than papered over.
+ * The architecture is what answers it: credentials never enter the control
+ * plane, and no HQ writer splits a value across fields.
  */
 export function assertBrowserSafe(payload: unknown, rootPath = 'snapshot'): void {
   walk(payload, rootPath, (value, path, key) => {
-    // The key rule reads the normalized form too, for the same reason the
-    // value rule does: a field named with one Cyrillic lookalike is still a
-    // field that names a credential holder.
-    if (key != null && !isTrivial(value) && (SECRET_KEY_PATTERN.test(key) || SECRET_KEY_PATTERN.test(normalizeForScan(key)))) {
+    // Both round-four lanes made the key rule read the NORMALIZED name too, for
+    // the same reason the value rule does: a field named with one Cyrillic
+    // lookalike is still a field that names a credential holder. One spelling
+    // of it survives — `namesACredentialHolder` — because the rule is asked in
+    // more than one place.
+    if (key != null && namesACredentialHolder(key) && !isTrivial(value)) {
       if (typeof value === 'string' || typeof value === 'number') {
         throw new BrowserSafetyError(
           `Field "${key}" names a credential holder and carries a value; HQ snapshots carry secret PRESENCE, never secret values`,

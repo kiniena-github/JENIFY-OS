@@ -41,6 +41,7 @@ import { HQ_ROOMS } from './rooms.js';
 import { hydrateRooms } from './hydrate.js';
 import { SOURCE_MODE_LABELS } from '../live/provenance.js';
 import { ROOM_LIVENESS_VALUES, ROOM_TONES } from './contracts.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 /** The authenticated read route this stage adds. */
 export const CLIENT_STATE_PATH: string = CONTROL_ROUTES.state;
@@ -72,7 +73,7 @@ export const CLIENT_READ_TIMEOUT_MS = 12_000;
  * carries for the control consoles. Two read routes; no write route, because
  * this runtime performs no write.
  */
-export const CLIENT_FETCH_TARGETS: readonly string[] = [CONTROL_ROUTES.session, CLIENT_STATE_PATH];
+export const CLIENT_FETCH_TARGETS: readonly string[] = deepFreeze([CONTROL_ROUTES.session, CLIENT_STATE_PATH]);
 
 export function clientRuntimeScript(): string {
   const roomIds = HQ_ROOMS.map((room) => room.id);

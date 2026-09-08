@@ -19,8 +19,9 @@
 import type { ProviderDescriptor } from './contracts.js';
 import { ProviderDirectory } from './directory.js';
 import { createMockAdapter, type MockAdapterOptions } from './mock.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
-export const KNOWN_PROVIDERS: readonly ProviderDescriptor[] = [
+export const KNOWN_PROVIDERS: readonly ProviderDescriptor[] = deepFreeze([
   {
     providerId: 'openai',
     displayName: 'OpenAI',
@@ -212,7 +213,7 @@ export const KNOWN_PROVIDERS: readonly ProviderDescriptor[] = [
       },
     ],
   },
-] as const;
+] as const);
 
 /**
  * Convenience for tests/dev wiring: registers every known descriptor into a

@@ -280,6 +280,35 @@ CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_relink
 BEFORE UPDATE OF task_id ON hq_mission_plan_items
 WHEN OLD.task_id IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items task link is write-once'); END;
+
+-- The OTHER end of the same link, and it was open (Wave 5 correction round
+-- four, High H2, route (b)). no_relink covers task_id only -- it is declared
+-- BEFORE UPDATE OF task_id -- so UPDATE hq_mission_plan_items SET
+-- mission_id = 'nowhere' WHERE task_id = ? was simply accepted, and it breaks
+-- the task-to-mission link just as completely as re-pointing the task would.
+-- A plan item's mission is set at INSERT and no code path anywhere in this
+-- repository changes it afterwards (the three UPDATE statements against this
+-- table name superseded_in_intent_seq, task_id/linked_by/linked_at, and the
+-- spec columns).
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_remission
+BEFORE UPDATE OF mission_id ON hq_mission_plan_items
+BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items mission is write-once'); END;
+
+-- hq_missions is NOT append-only -- status, project_id and updated_at all move
+-- through the facade -- but a mission ROW is the thing a plan item joins to,
+-- and DELETE FROM hq_missions unbinds every task in it from every mission and
+-- project ceiling at once (Wave 5 correction round four, High H2, route (b)).
+-- Nothing in this repository deletes a mission: a terminal mission's record is
+-- history, and assignMissionToProject clears a link by setting the column.
+-- The no_replace guard closes the other half, an INSERT OR REPLACE that would
+-- swap a mission's row -- and with it its project -- out from under its items.
+CREATE TRIGGER IF NOT EXISTS trg_hq_missions_no_erase
+BEFORE DELETE ON hq_missions
+BEGIN SELECT RAISE(ABORT, 'hq_missions rows are never erased'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_missions_no_replace
+BEFORE INSERT ON hq_missions
+WHEN EXISTS (SELECT 1 FROM hq_missions WHERE id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'hq_missions identity is write-once'); END;
 `;
 
 /**

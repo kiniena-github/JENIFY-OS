@@ -243,6 +243,7 @@ import { HQ_INTEGRITY_FINDINGS } from '../store/integrity.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
 import { isArchiveStatus } from '../archive/schema.js';
 import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 export const CONTROL_API_PREFIX = '/api/hq/control';
 
@@ -260,7 +261,7 @@ export const MAX_DENIAL_REASON_LENGTH = 500;
  */
 export const MAX_APPROVAL_NOTE_LENGTH = 500;
 
-export const CONTROL_ROUTES = {
+export const CONTROL_ROUTES = deepFreeze({
   session: `${CONTROL_API_PREFIX}/session`,
   approvals: `${CONTROL_API_PREFIX}/approvals`,
   /**
@@ -497,14 +498,14 @@ export const CONTROL_ROUTES = {
   intelligence: `${CONTROL_API_PREFIX}/intelligence`,
   intelligenceObserve: `${CONTROL_API_PREFIX}/intelligence/observe`,
   intelligenceBudget: `${CONTROL_API_PREFIX}/intelligence/budget`,
-} as const;
+} as const);
 
 /**
  * Every state-changing route, stated once so test obligations can enumerate
  * the write surface instead of inferring it from path shapes — a heuristic
  * that silently probed new POSTs as GETs when it guessed wrong.
  */
-export const CONTROL_WRITE_ROUTES: readonly string[] = [
+export const CONTROL_WRITE_ROUTES: readonly string[] = deepFreeze([
   CONTROL_ROUTES.orders,
   CONTROL_ROUTES.approve,
   CONTROL_ROUTES.deny,
@@ -547,7 +548,7 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   // worker acts under a live fenced claim and a browser holds no claim.
   CONTROL_ROUTES.intelligenceObserve,
   CONTROL_ROUTES.intelligenceBudget,
-];
+]);
 
 export interface ControlResponse {
   status: number;

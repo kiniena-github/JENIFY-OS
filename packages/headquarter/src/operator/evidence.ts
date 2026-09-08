@@ -12,8 +12,8 @@
  *     correction this table carried NO triggers at all, on the argument that
  *     "its guarantee is the chain rather than the engine"; a raw
  *     `DELETE FROM op_evidence WHERE seq > 1` was therefore simply permitted.
- *  2. **A dropped guard is a census finding.** `op_evidence` is now a member
- *     of `ENGINE_IMMUTABLE_TABLES`, so removing the triggers is
+ *  2. **A dropped guard is a census finding.** `op_evidence` is a member of
+ *     `ENGINE_IMMUTABLE_TABLES`, so removing the triggers is
  *     `append_only_guard_missing` — blocking, and safe mode engages on it.
  *  3. **The chain commits to its own LENGTH, not only to its links.**
  *     `verifyEvidenceChain` walks the links, requires the seqs present to be
@@ -33,7 +33,68 @@
  *     refuses a log that contradicts any commitment ever recorded there. See
  *     `recordIntegrityCheckpoint` in `store/integrity.ts`.
  *
- * What is corrected rather than restated, three times:
+ * **Holds 3 and 4 answer different questions, and neither subsumes the other.**
+ * The concurrent Wave 5 round-four lanes each closed one of the two ways the
+ * length commitment failed, and both closures are kept:
+ *
+ *  - CONTIGUITY (hold 3) is a property of the record that no later write
+ *    repairs, so it holds with no prior commitment on the file at all. It is
+ *    silent on a log DROPPED and re-created whole, because the seqs then
+ *    restart at 1 with no gap;
+ *  - the DURABLE COMMITMENT (hold 4) survives that drop, because it lives in a
+ *    different ledger — but it says nothing until HQ has recorded one, so a
+ *    file nothing has happened on yet has only holds 1–3.
+ *
+ * Together they leave no window: a tail delete followed by any number of
+ * appends fails contiguity, and a whole-log rebuild that restores contiguity
+ * fails the commitment.
+ *
+ * **There was a second candidate for hold 4, and it is gone rather than kept
+ * beside this one.** The round-four lane recorded the same tip on every
+ * VERDICT row (`evidence_tip_seq` / `evidence_tip_hash` on
+ * `hq_reliability_verdicts`) and read the strongest back with a MAX. Both
+ * mechanisms answer one question — "how far did this log reach, according to a
+ * record kept outside it" — and two answers to one question is the thing this
+ * package does not keep. The MAX is the reason this one survived: appending to
+ * the verdict ledger is a write its trio deliberately permits, so a writer that
+ * rebuilt `op_evidence` as a LONGER coherent forgery could append a verdict
+ * committing to the forged tip and the MAX would select it, retiring the
+ * genuine commitment behind it. `contradictedChainCommitment` checks EVERY
+ * commitment ever recorded and takes the per-ledger maximum, so the same
+ * appended row adds a satisfied row and removes nothing. The checkpoint is also
+ * written at every construction that finds nothing blocking, not only when a
+ * Founder assessment records a verdict, which bounds the forger's window to one
+ * process lifetime rather than to the gap between two Founder acts. What was
+ * lost with the verdict-row version is stated rather than glossed: the two
+ * commitments lived in two different ledgers, so an attacker now has to drop
+ * ONE ledger rather than two — see the residual at the end of this header.
+ *
+ * **Hold 4 is not decoration, and it corrects four shipped claims** (Wave 5
+ * correction rounds four High H1 and five High 1). Holds 1–3 all live INSIDE
+ * the thing being checked: the triggers, the rows and the `sqlite_sequence`
+ * entry all disappear with `DROP TABLE op_evidence`, which is DDL that no
+ * BEFORE trigger refuses. And the census that hold 2 rests on runs AFTER
+ * `migrateHqDatabase` has already re-created the table, empty.
+ *
+ *  - the header before the fourth round said "a dropped `op_evidence` is caught
+ *    by the census … the check that can actually see it". It was NOT: executed,
+ *    raw-view `absentImmutableTables` returned `["op_evidence"]` and, after
+ *    `openHqDatabase()`, `[]`. A drop plus a rebuild carrying its own three
+ *    declared guards read `safeMode: false`, `observations: []`,
+ *    `chainVerified: true` at both depths over a destroyed audit log — and
+ *    CLEARED an already-latched safe mode. The ordering is fixed at the
+ *    ordering (`tableNamesBeforeMigration`), and the commitment closes the
+ *    rebuild case that no ordering can;
+ *  - that header also called the `sqlite_sequence` step a real barrier because
+ *    "the first of them is itself a blocking finding". It is not: a dropped
+ *    trigger that is RECREATED before the next boot observation is never
+ *    observed missing, so drop-trigger / delete-tail / recreate-trigger /
+ *    `UPDATE sqlite_sequence` read clean. `sqlite_sequence` carries no triggers
+ *    and cannot be brought under the census — it is an internal SQLite table —
+ *    so what closes that is the commitment, which lives in a ledger that DOES
+ *    carry the guards and IS censused.
+ *
+ * **And two further claims are corrected, from the other round-four lane:**
  *
  *  - the header before the third correction round claimed "silent tampering or
  *    deletion breaks the chain and is detectable by verifyChain()". The
@@ -41,10 +102,12 @@
  *    audit record actually needs (Wave 5 correction round three, High A2);
  *  - the header after it claimed point 3 unqualified while the length
  *    commitment lived only in `sqlite_sequence`, so ONE later append made a
- *    deletion invisible again and the documented remedy — a Founder full
- *    assessment — certified the robbed log as intact (Wave 5 correction round
- *    four, High 2). The contiguity requirement is what makes point 3 hold
- *    against the next write rather than only at the instant before it;
+ *    deletion invisible again — HQ's OWN boot appends being the laundering
+ *    write — and the documented remedy, a Founder full assessment, certified
+ *    the robbed log as intact (Wave 5 correction round four, High 2). The
+ *    contiguity requirement is what makes point 3 hold against the next write
+ *    rather than only at the instant before it, and no `sqlite_sequence`
+ *    rewrite was ever needed for that route;
  *  - the header after THAT claimed points 1–3 named a real cost, in three
  *    sentences that were all false (Wave 5 correction round five, High 1). It
  *    said a coherent rewrite required RENUMBERING the survivors, that the
@@ -64,19 +127,39 @@
  *    recorded outside this table rather than a fourth reading of the table.
  *
  * The residual is stated rather than glossed, at the CHEAPEST price found and
- * with the version WITHOUT each named barrier executed first. The previous
- * round's sentence here named DROPPING `hq_integrity_checkpoints` as what the
- * surviving attack costs, and that was false in the reassuring direction (Wave
- * 5 correction round six, Medium 1): the drop costs a restart and a second
- * Founder act, while wiping the commitments' ROWS in place — drop the ledger's
- * three triggers, `DELETE`, INSERT one row agreeing with the forged log,
- * re-create the triggers — left the table present, the census silent and the
- * forgery accepted from the very next boot at zero restarts and zero Founder
- * acts. That free version is now blocking: the commitment ledger's row count,
- * greatest rowid and AUTOINCREMENT high-water mark are one number or rows were
- * elided from it (`elidedCommitmentLedgerRows`). Appending a commitment that
- * matches the forgery has never worked on its own, because every commitment
- * ever recorded is checked and the per-ledger comparison takes the maximum.
+ * with the version WITHOUT each named barrier executed first. HQ holds no key a
+ * foreign writer does not also have, so a writer that already holds the database
+ * file open can still APPEND a correctly-hashed entry of its own; nothing here
+ * is a signature.
+ *
+ * Beyond that, TWO prices stated here in earlier rounds were both wrong in the
+ * reassuring direction, and both are corrected rather than left standing:
+ *
+ *  - the round-five sentence named DROPPING `hq_integrity_checkpoints` as what
+ *    the surviving attack costs (Wave 5 correction round six, Medium 1). The
+ *    drop reproduces exactly as written — a restart and a second Founder act —
+ *    but it was never the cheap path: wiping the commitments' ROWS in place —
+ *    drop the ledger's three triggers, `DELETE`, INSERT one row agreeing with
+ *    the forged log, re-create the triggers — left the table present, so the
+ *    as-found census had nothing to observe and the forgery was accepted from
+ *    the very next boot at zero restarts and zero Founder acts. That free
+ *    version is now blocking: the commitment ledger's row count, its greatest
+ *    rowid and its AUTOINCREMENT high-water mark are one number, or rows were
+ *    elided from it (`elidedCommitmentLedgerRows`);
+ *  - the round-five reconciliation recorded the cost of retiring the concurrent
+ *    lane's SECOND commitment (the verdict-row `evidence_tip_seq` /
+ *    `evidence_tip_hash` pair) as "there is now ONE ledger to drop" rather than
+ *    two. The trade itself was taken on the merits and stands — a barrier a
+ *    PERMITTED write can retire is not a second barrier — but its price was
+ *    understated in the same reassuring direction, because until the row check
+ *    above existed the surviving ledger did not have to be DROPPED at all. The
+ *    honest re-pricing is one ledger to drop OR to wipe in place and re-seat,
+ *    and the second of those is exactly what `elidedCommitmentLedgerRows`
+ *    closes; what remains of it is priced immediately below.
+ *
+ * Appending a commitment that matches the forgery has never worked on its own,
+ * because every commitment ever recorded is checked and the per-ledger
+ * comparison takes the maximum.
  *
  * What SURVIVES, executed: the same in-place wipe with that invariant repaired
  * — the replacement inserted at an explicit `seq = 1`, then one `UPDATE
@@ -84,12 +167,13 @@
  * `boot=false assess=false release=ADMITTED`. The cheaper one-statement repair,
  * DELETING that `sqlite_sequence` row instead, was tried too and buys only the
  * process that follows: the assessment it was aiming to pass is itself the next
- * commitment, which re-creates the mark and breaks the identity again
- * (`p3 boot=true assess=true release=refused`, permanently). So
+ * commitment, which re-creates the mark from the surviving rowid and breaks the
+ * identity again (`p3 boot=true assess=true release=refused`, permanently). So
  * the cost is one explicit rowid and one extra `UPDATE`, across two
  * engine-guarded ledgers and a census that reports a drop at the boot that
- * observes it — a real cost, and still not a cryptographic boundary. HQ holds
- * no key a foreign writer does not also have; nothing here pretends otherwise.
+ * observes it — a real cost, and still not a cryptographic boundary. Dropping
+ * `hq_integrity_checkpoints` outright is still the other route, and still costs
+ * the restart and the second Founder act the round-five text priced it at.
  */
 
 import { createHash } from 'node:crypto';
@@ -176,9 +260,20 @@ export function ensureEvidenceGuards(db: HqDatabase): void {
  *
  * Null when there is nothing to compare against: `sqlite_sequence` is created
  * lazily by the first AUTOINCREMENT insert in the whole database, and its row
- * for a table disappears with the table. A dropped `op_evidence` is caught by
- * the census instead (`ENGINE_IMMUTABLE_TABLES`), which is the check that can
- * actually see it.
+ * for a table disappears with the table.
+ *
+ * A dropped `op_evidence` is therefore INVISIBLE here, and the claim that used
+ * to stand in this comment — that the census catches it, being "the check that
+ * can actually see it" — was false (Wave 5 correction round four, High H1). The
+ * census ran after `migrateHqDatabase` had already re-created the table. What
+ * sees it now is the pre-migration observation and the durable chain-tip
+ * commitment; see the module header.
+ *
+ * `sqlite_sequence` is also UNGUARDED and uncensused — it is an internal SQLite
+ * table, so no trigger can be put on it and `tableNames` excludes it by
+ * construction. One `UPDATE sqlite_sequence` therefore defeats this check on
+ * its own. It is kept because it is free and catches a careless truncation; the
+ * commitment is what catches a deliberate one.
  */
 function evidenceHighWaterMark(db: HqDatabase): number | null {
   try {
@@ -257,6 +352,14 @@ export function assertNoSecretLikeContent(payload: Record<string, unknown>): voi
  * `append_only_guard_missing` detects the removal of those guards, and this
  * check detects a chain whose links or whose LENGTH no longer stand. Two
  * findings, deliberately, because either one alone could be walked around.
+ *
+ * Neither of them detects DESTRUCTION, and that is stated here rather than
+ * left to be discovered: this walk sees only what the table now contains, so
+ * over a log dropped and rebuilt it returns null — "the chain stands" — about a
+ * chain that no longer exists. `contradictedChainCommitment` is the check for
+ * that; it is the LAST step of this function and the structural pass reads it
+ * directly as well, so it speaks at both depths (Wave 5 correction round four,
+ * High H1; round five, High 1).
  *
  * `EvidenceLog.verifyChain` stays as the public delegate and now
  * calls this; `HeadquarterOperations` calls this directly through a `#private`
@@ -349,6 +452,73 @@ export function verifyEvidenceChain(db: HqDatabase): number | null {
   // hole in the seqs keeps its own precise answer, and the commitment only
   // speaks when the log has been made to look whole.
   return contradictedChainCommitment(db);
+}
+
+/**
+ * **The chain's TIP is deliberately not exported from this module.**
+ *
+ * The concurrent round-four lane exported an `evidenceChainTip` here so the
+ * verdict ledger could store the tip on every verdict row. That mechanism was
+ * retired in favour of `hq_integrity_checkpoints` (see hold 4 in the module
+ * header), and `store/integrity.ts` reads the tip through its own module-private
+ * helper as part of writing a checkpoint. Re-exporting the read here would leave
+ * exactly the dead surface the `GENESIS_HASH` note above warns about: a second
+ * place to read the same two columns, inviting a second spelling of what a
+ * commitment is.
+ */
+
+/**
+ * Does the entry at `seq` LINK soundly — its own hash correct over its stored
+ * fields, and its `prev_hash` equal to the hash of the entry before it?
+ *
+ * O(1), which is what lets a boot-time structural pass use it. It is not a
+ * whole-chain verification and does not claim to be: what it answers is "is
+ * this one row a genuine link", which is exactly the question a corroboration
+ * check needs (Wave 5 correction round four, Medium M1). Before it, a
+ * corroborating evidence row needed NO valid hash at all — the check matched
+ * `kind` and a `json_extract` of the payload — so two raw INSERTs cleared a
+ * latched safe mode while the chain was genuinely broken.
+ *
+ * The residual is unchanged and is stated wherever this is used: HQ holds no
+ * key a foreign writer does not also have, so a writer holding the file open
+ * can APPEND a correctly-hashed row. This raises the bar from "any row" to "a
+ * row that is really part of the chain"; it is not a cryptographic boundary.
+ */
+export function evidenceEntryLinkStands(db: HqDatabase, seq: number): boolean {
+  try {
+    const row = db.prepare(`SELECT * FROM op_evidence WHERE seq = ?`).get(seq) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return false;
+    const previous = db
+      .prepare(`SELECT hash FROM op_evidence WHERE seq < ? ORDER BY seq DESC LIMIT 1`)
+      .get(seq) as { hash: unknown } | undefined;
+    const prevHash = previous ? previous.hash : GENESIS_HASH;
+    if (typeof prevHash !== 'string') return false;
+    if (row.prev_hash !== prevHash) return false;
+    let payloadJson: string;
+    try {
+      payloadJson = JSON.stringify(JSON.parse(row.payload as string));
+    } catch {
+      return false;
+    }
+    const expected = createHash('sha256')
+      .update(
+        [
+          prevHash,
+          row.id as string,
+          row.at as string,
+          (row.task_id as string | null) ?? '',
+          row.actor as string,
+          row.kind as string,
+          payloadJson,
+        ].join('|'),
+      )
+      .digest('hex');
+    return row.hash === expected;
+  } catch {
+    return false;
+  }
 }
 
 export class EvidenceLog {

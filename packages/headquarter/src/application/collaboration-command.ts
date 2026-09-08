@@ -113,7 +113,7 @@ export type SessionStanding = 'active' | 'closed';
  * material is not carried at all. `internal` is the conservative default —
  * a session opened without naming a classification is internal, never public.
  */
-export const COLLABORATION_PRIVACIES = MEMORY_PRIVACY_LEVELS;
+export const COLLABORATION_PRIVACIES = deepFreeze(MEMORY_PRIVACY_LEVELS);
 export type CollaborationPrivacy = MemoryPrivacy;
 
 export function isCollaborationPrivacy(value: unknown): value is CollaborationPrivacy {

@@ -40,7 +40,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { HqDatabase } from './db.js';
-import { openHqDatabaseReadOnly } from './db.js';
+import {
+  openHqDatabaseReadOnly,
+  schemaEnsuredMarkBeforeMigration,
+  tableNamesBeforeMigration,
+} from './db.js';
 
 /* ------------------------------------------------------------------ */
 /* Durability requirements                                             */
@@ -270,6 +274,18 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = deepFree
    * The guards are installed by `ensureEvidenceGuards`; being LISTED here is
    * what makes their removal a reportable finding rather than a silent one.
    *
+   * Membership does NOT, on its own, make a DROP of this table reportable, and
+   * the round that added it said it did (Wave 5 correction round four, High
+   * H1). `migrateHqDatabase` re-creates `op_evidence` before the facade census
+   * runs, so `absentImmutableTables` could never see it absent — see
+   * `MIGRATION_CREATED_IMMUTABLE_TABLES` and
+   * `migrationRestoredImmutableTables` for the ordering fix, and
+   * `contradictedChainCommitment` for the half no ordering can close. (That
+   * second reference read `evidenceChainCommitmentBreach` until the round-five
+   * reconciliation retired the verdict-row commitment in favour of the
+   * checkpoint ledger; the symbol is gone, so the pointer is corrected here
+   * rather than left dangling.)
+   *
    * Trio only: `id` is the sole secondary unique index and the `no_replace`
    * guard already covers it beside `seq`.
    */
@@ -298,7 +314,28 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = deepFree
     // UPDATE their own columns, and each of those columns is write-once by its
     // own guard below. `no_erase` IS required — see the header.
     requiredGuards: ['no_erase', 'no_replace'],
-    secondaryGuards: ['no_relink', 'no_respec'],
+    // `no_remission` closes the OTHER end of the task-to-mission link (Wave 5
+    // correction round four, High H2): `no_relink` is declared `BEFORE UPDATE
+    // OF task_id`, so re-pointing `mission_id` broke the same link and was
+    // simply accepted.
+    secondaryGuards: ['no_relink', 'no_remission', 'no_respec'],
+  },
+  {
+    // The mission ROW a plan item joins to. Added by the Wave 5 correction
+    // round four (High H2): Phase 14's budget derivation reads a task's mission
+    // and, through `hq_missions.project_id`, its project — and this table was
+    // absent from this list entirely, so `DELETE FROM hq_missions` unbound
+    // every task from every mission and project ceiling with no finding
+    // anywhere.
+    //
+    // A REDUCED base, for the same reason `hq_mission_plan_items` has one: a
+    // mission's status, project link and `updated_at` legitimately move through
+    // the facade, so a blanket `no_rewrite` would break every real writer. What
+    // is write-once is the row's EXISTENCE and its identity.
+    table: 'hq_missions',
+    triggerPrefix: 'hq_missions',
+    requiredGuards: ['no_erase', 'no_replace'],
+    secondaryGuards: [],
   },
   { table: 'hq_orchestration_runs', triggerPrefix: 'hq_orch_runs', secondaryGuards: [] },
   { table: 'hq_orchestration_run_items', triggerPrefix: 'hq_orch_run_items', secondaryGuards: [] },
@@ -493,6 +530,17 @@ export interface HqIntegrityReport {
    * review, Medium finding 5). It is false on every structural assessment,
    * because a structural assessment does not run the check — false means "not
    * verified here", never "verified and broken".
+   *
+   * **What TRUE still does not distinguish, stated rather than implied** (Wave
+   * 5 correction round four, Low L7). `verifyEvidenceChain` returns null both
+   * for a chain whose every link stands and for a log with no entries at all,
+   * so "checked and sound" and "there was nothing to check" reach the same
+   * verdict. That case is now BOUNDED rather than open-ended: a verdict commits
+   * to the chain tip it was reached over, so any database on which an
+   * assessment has ever run carries a commitment an empty log cannot satisfy,
+   * and the breach is reported. What stays indistinguishable is a database that
+   * has never recorded a verdict AND whose log is empty — a file nothing has
+   * happened on yet.
    */
   chainVerified: boolean;
   durability: HqDurabilityPosture;
@@ -511,16 +559,46 @@ export interface RecordedIntegrityVerdict {
   findings: readonly HqIntegrityFinding[];
 }
 
+/**
+ * The sentence HQ ships verbatim on every reliability view, in every safe-mode
+ * refusal and on the unauthenticated snapshot.
+ *
+ * Two clauses are CORRECTED here rather than softened elsewhere (Wave 5
+ * correction round four, Medium M1 / Low L6).
+ *
+ *  - it used to say HQ "refuses the acts that would ADD TO … a record it cannot
+ *    stand behind". Broader than the code: under an engaged latch `createTask`,
+ *    `proposeMission`, `appendSystemEvidence`, `recordVerifiedBackup` and
+ *    `engageKillSwitch` all add rows, and each is individually argued and
+ *    correct — recording that work was requested, that a recovery point was
+ *    verified, or that everything is now stopped is exactly what a store you
+ *    cannot vouch for still needs. The sentence now names what is actually
+ *    refused: acts that would APPROVE, RELEASE, EXECUTE or grant AUTHORITY;
+ *  - it used to say "only a fresh full assessment that finds nothing blocking"
+ *    clears it, with no qualification. A corroborating evidence entry now has
+ *    to be a genuine LINK in the chain, which closes the forged-row route the
+ *    review executed — but a writer holding the file open can still append a
+ *    correctly-hashed entry, because HQ holds no key such a writer does not
+ *    also have. The sentence says that, in words, instead of asserting a
+ *    boundary the code cannot hold.
+ */
 export const SAFE_MODE_STATEMENT =
   'Safe mode is a statement about HQ’s OWN stored record, not about the outside world. It engages only when ' +
   'the engine reports the file corrupt, an append-only guard the schema declares is missing, or the evidence ' +
-  'hash chain does not verify. While engaged HQ still READS and still reconciles, and it refuses the acts ' +
-  'that would add to, approve, release or execute against a record it cannot stand behind — including ' +
+  'hash chain does not verify — which includes a chain that no longer reaches the tip HQ recorded for it. ' +
+  'While engaged HQ still READS, still reconciles, and still records what happened — a task requested, a ' +
+  'backup verified, a kill switch engaged — because a store you cannot vouch for still needs those facts on ' +
+  'the record. What it refuses are the acts that would APPROVE, RELEASE, EXECUTE against or grant AUTHORITY ' +
+  'over a record it cannot stand behind — including ' +
   'registering a worker or declaring its provider, which would ADD authority. A blocking ' +
   'verdict is APPENDED to HQ’s own verdict ledger and re-read at every construction, so a restart does not ' +
   'clear it — only a fresh full assessment that finds nothing blocking does. A verdict row appended by ' +
   'anything else does not clear it either: a clearing verdict counts only when the hash-chained evidence ' +
-  'log carries the entry naming it that an assessment writes beside it. On a database that carries no ' +
+  'log carries the entry naming it that an assessment writes beside it, AND that entry is a genuine link in ' +
+  'the chain. That is a barrier, not a cryptographic boundary: HQ holds no key a foreign writer does not also ' +
+  'have, so a writer that already holds the database file open can append a correctly-hashed entry of its ' +
+  'own. It is a barrier against a stray append and a restart, not against that writer. On a database that ' +
+  'carries no ' +
   'Phase 13 ledger there is nowhere to record it and the verdict is process-local; the ' +
   'reliability_schema_absent finding says when that is the case. HQ also records what it has committed ' +
   'to about its own append-only records — the evidence chain’s length and the hash at that seq, and each ' +
@@ -680,6 +758,14 @@ export function restoredImmutableTables(db: HqDatabase, absentAsFound: readonly 
  * inside the facade constructor, which is what makes "at least one of them is
  * already here" a sound reading of "this file has been through an HQ boot
  * before".
+ *
+ * Until the Wave 5 correction round four (High H1) this constant recorded that
+ * fact and did nothing else with it: the census ran AFTER the migration, so a
+ * dropped `op_evidence` had already been re-created empty by the time anything
+ * looked, and it was excluded from `established` on top of that. The ordering
+ * is now answered where the ordering is — `migrateHqDatabase` records what the
+ * file carried before it touched it, and `observeImmutabilityAsFound` reads
+ * that instead of the post-migration catalogue for exactly these tables.
  */
 const MIGRATION_CREATED_IMMUTABLE_TABLES: readonly string[] = Object.freeze(['op_evidence']);
 
@@ -697,7 +783,7 @@ const MIGRATION_CREATED_IMMUTABLE_TABLES: readonly string[] = Object.freeze(['op
  * ledger or guard that is now absent is a fact worth reporting.
  *
  * **It is only half, and on its own it failed open on the widest attack**
- * (Wave 5 correction round four, High 1): dropping ALL 31 declared ledgers
+ * (Wave 5 correction round four, High 1): dropping ALL of the declared ledgers
  * empties this set, which read as a first boot and silenced the whole census
  * while the operational half of the database survived. The other half —
  * `hqSchemaEnsuredMarkPresent` — is what closes that, and
@@ -765,7 +851,7 @@ const HQ_SCHEMA_ENSURED_MARKS: readonly number[] = Object.freeze([HQ_SCHEMA_ENSU
  * **This exists because the schema-only discriminator was bypassed by doing
  * MORE damage** (Wave 5 correction round four, High 1).
  * `establishedImmutableTables` asks which declared ledgers a file still
- * carries, so dropping a SUBSET of them was reported and dropping ALL 31 —
+ * carries, so dropping a SUBSET of them was reported and dropping ALL of them —
  * `op_evidence` included — emptied the set, read as a first boot, and reported
  * NOTHING at either assessment depth. Executed against the previous head: the
  * verdict ledger, the evidence log, every Founder budget ceiling, every truth
@@ -1296,7 +1382,7 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
  * attacker every process after the one it bought.
  *
  * Scoped to this ONE ledger deliberately. The identity holds for it because HQ
- * is its only writer; extending a row COUNT to all 31 declared ledgers would
+ * is its only writer; extending a row COUNT to every other declared ledger would
  * both break `structuralIntegrity`'s stated cost (a `COUNT(*)` is O(rows),
  * unlike the `MAX(rowid)` seek) and assert an invariant over tables this module
  * does not own.
@@ -1371,9 +1457,72 @@ export function observeImmutabilityAsFound(db: HqDatabase): ImmutabilityAsFound 
   if (!established) return { guardsMissing: [], tablesAbsent: [], established };
   return {
     guardsMissing: missingImmutabilityGuards(db),
-    tablesAbsent: absentImmutableTables(db),
+    tablesAbsent: [
+      ...new Set([...absentImmutableTables(db), ...migrationRestoredImmutableTables(db)]),
+    ].sort(),
     established,
   };
+}
+
+/**
+ * The migration-created ledgers this file did NOT carry before
+ * `migrateHqDatabase` re-created them.
+ *
+ * `absentImmutableTables` reads the catalogue as it stands, and by the time the
+ * facade constructor runs, `openHqDatabase` has already executed the DDL — so
+ * for `op_evidence`, and only for it, "absent" is a question that can no longer
+ * be asked of the live catalogue. It is asked of the record
+ * `migrateHqDatabase` took a moment earlier instead (Wave 5 correction round
+ * four, High H1).
+ *
+ * Null-safe by design: a handle with no recorded pre-migration census — a
+ * read-only snapshot handle, or one connected without migrating — contributes
+ * nothing here rather than reporting every migration-created ledger as lost.
+ * Nothing re-created anything on such a handle, so there is nothing to launder.
+ */
+export function migrationRestoredImmutableTables(db: HqDatabase): string[] {
+  const before = tableNamesBeforeMigration(db);
+  if (!before) return [];
+  // ESTABLISHED as the file was found, judged on the PRE-migration catalogue —
+  // not on the live one. The distinction is the whole correctness of this
+  // function. A brand-new database legitimately has no `op_evidence` before
+  // `migrateHqDatabase` creates it, and the live catalogue a moment later
+  // carries every ledger this process has just ensured; reading `established`
+  // from THAT would report the first boot of every fresh store as a lost
+  // ledger, and a second facade over the same handle as one too.
+  //
+  // A file that already carried an ensure-created immutable ledger has been
+  // through an HQ boot before, so `op_evidence` missing from it is a fact worth
+  // reporting — the same discriminator `establishedImmutableTables` applies,
+  // asked of the moment it is still answerable.
+  //
+  // BOTH readings of that discriminator, not one (Wave 5 round-four
+  // reconciliation). This function was written against the ledger reading
+  // alone, and the other lane's finding applies to it word for word: dropping
+  // EVERY declared ledger empties the ledger reading, so `op_evidence` — the
+  // audit log itself, and the widest form of the attack — would have been the
+  // one table left out of the census exactly when everything else was gone.
+  // The mark reading answers it, and using it here is also what keeps ONE
+  // definition of "established" in the module: `observeImmutabilityAsFound`
+  // takes both readings, and so must the function whose result it unions in.
+  //
+  // The mark is read AS OF THE MIGRATION, not as it stands. That distinction is
+  // the same one this whole function exists for, and getting it wrong is not
+  // theoretical: `recordHqSchemaEnsured` runs at the END of a facade
+  // construction, so a SECOND facade over the same handle would see a mark this
+  // very process had just written, judge a genuine first boot "established",
+  // and report `op_evidence` as a lost ledger on a brand-new store. Executed
+  // during this merge, that put nine suites into safe mode.
+  const establishedBefore =
+    ENGINE_IMMUTABLE_TABLES.some(
+      (entry) =>
+        before.has(entry.table) && !MIGRATION_CREATED_IMMUTABLE_TABLES.includes(entry.table),
+    ) || schemaEnsuredMarkBeforeMigration(db) === true;
+  if (!establishedBefore) return [];
+  const now = tableNames(db);
+  return MIGRATION_CREATED_IMMUTABLE_TABLES.filter(
+    (table) => !before.has(table) && now.has(table),
+  ).sort();
 }
 
 /** Every guard the schema declares on the named engine-immutable tables. */
@@ -1451,6 +1600,24 @@ export function structuralIntegrity(
      * clean verdict and therefore clears it.
      */
     recordedVerdict?: RecordedIntegrityVerdict | null;
+    /**
+     * **There is deliberately no `evidenceCommitmentBreachAt` option**, and its
+     * absence is the round-four/round-five reconciliation recorded where a
+     * future caller will look for it.
+     *
+     * The concurrent round-four lane injected the durable chain commitment as a
+     * VALUE here, computed by the caller from `evidence_tip_seq` on the verdict
+     * ledger, because the verdict ledger belongs to `application/` and this
+     * module is a leaf of `store/`. The commitment that survived the
+     * reconciliation lives in `hq_integrity_checkpoints`, which is a `store/`
+     * table, so it is read DIRECTLY below (`contradictedChainCommitment`) —
+     * no injection, nothing patchable in the path, and one place a reader can
+     * find the answer. The property the injected version was defended for is
+     * unchanged: it is checked at the CHEAP depth, for one indexed lookup,
+     * because destroying the audit log and rebuilding it is an attack a BOOT
+     * must not read as clean (Wave 5 correction round four, High H1; round
+     * five, High 1).
+     */
   } = {},
 ): HqIntegrityReport {
   const observations: HqIntegrityObservation[] = [];
@@ -1561,6 +1728,7 @@ export function structuralIntegrity(
     });
   }
 
+
   if (options.reliabilitySchemaPresent === false) {
     observations.push({
       finding: 'reliability_schema_absent',
@@ -1667,6 +1835,16 @@ export function fullIntegrity(
     guardsMissingAsFound?: readonly string[];
     /** See `structuralIntegrity`. Omitted here for the same reason. */
     immutableTablesAbsentAsFound?: readonly string[];
+    /**
+     * **No commitment argument, deliberately** — see `structuralIntegrity`. The
+     * durable commitment reaches a FULL assessment by two paths that need no
+     * caller cooperation, and that is the property that matters here: this is
+     * the only latch-clearing path, so a commitment the log cannot satisfy must
+     * be visible HERE or a Founder assessment would clear a verdict about a
+     * destroyed audit log. It is visible through the structural pass beneath
+     * this one, and again through `verifyEvidenceChain`, which ends on the same
+     * check.
+     */
   },
 ): HqIntegrityReport {
   // Deliberately WITHOUT a recorded verdict: a full assessment of the file as
@@ -1762,6 +1940,12 @@ export function fullIntegrity(
     depth: 'full',
     observations,
     safeMode: observations.some((observation) => observation.blocking),
+    // A commitment the log cannot satisfy is a chain that did not verify, even
+    // when every link present holds — which is exactly the state a dropped and
+    // rebuilt log is in. `verifyEvidenceChain` ends on
+    // `contradictedChainCommitment`, so that state is already inside `brokenAt`
+    // and no second term is needed here; the concurrent lane's second term read
+    // an injected value that no longer exists.
     chainVerified: brokenAt === null,
     durability: structural.durability,
   };
@@ -1959,16 +2143,28 @@ function digestFile(
  *  - a HARD LINK to the live inode under a name with no sidecars beside it
  *    passed, because the sidecar check is keyed on the PATH. That is closed
  *    now, from the descriptor, by `file_has_multiple_links`;
- *  - a plain `cp` of a live WAL database still verifies, and it always will.
- *    It is a different inode with no sidecars, and its bytes are a valid,
- *    integrity-clean HQ database — just one that is missing whatever the WAL
- *    had not yet checkpointed. Nothing in the bytes distinguishes it from a
- *    properly consolidated backup, so HQ does not pretend to distinguish it.
- *    `verified` means "these bytes are a sound HQ database", and it has never
- *    meant "this is the whole of what was committed at the moment it was
- *    taken". Take a backup with SQLite's own backup API or after a checkpoint;
- *    a `cp` of a live database is not a backup, and this function is not the
- *    thing that can tell you so.
+ *  - a plain `cp` of a live WAL database may verify, and when it does, nothing
+ *    in the bytes says it is missing anything. It is a different inode with no
+ *    sidecars, and its content is whatever had been checkpointed into the main
+ *    file at the moment it was copied — which can be a valid, integrity-clean
+ *    HQ database missing the newest committed rows.
+ *
+ *    The claim that used to stand here — that such a copy "still verifies, and
+ *    it always will" — was too strong in the other direction as well, and the
+ *    review executed the counter-example (Wave 5 correction round four, Low
+ *    L8): a `cp` of a live but UNCHECKPOINTED store was REFUSED
+ *    `not_an_hq_database` with `schemaTables: 0`, because everything including
+ *    the schema was still in the `-wal`. Only after
+ *    `wal_checkpoint(TRUNCATE)` did the copy verify.
+ *
+ *    So the honest statement is neither "always verifies" nor "always refuses":
+ *    a `cp` of a live WAL database is a copy of an arbitrary prefix of the
+ *    truth, and it may read as sound, as empty, or as not a database at all,
+ *    depending on where the checkpoint boundary fell. `verified` means "these
+ *    bytes are a sound HQ database", and it has never meant "this is the whole
+ *    of what was committed at the moment it was taken". Take a backup with
+ *    SQLite's own backup API or after a checkpoint; a `cp` of a live database
+ *    is not a backup, and this function is not the thing that can tell you so.
  *
  * Path protections are refusals, not exceptions, so a caller gets a
  * categorical reason it can record — see `BACKUP_REFUSAL_REASONS` for the

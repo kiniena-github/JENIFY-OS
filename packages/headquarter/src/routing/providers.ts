@@ -208,9 +208,9 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderDef> = deepFreeze({
 });
 
 /** Every result marker in the registry — nothing carrying one may re-trigger. */
-export const ALL_RESULT_MARKERS: string[] = Object.values(PROVIDER_REGISTRY)
+export const ALL_RESULT_MARKERS: string[] = deepFreeze(Object.values(PROVIDER_REGISTRY)
   .map((p) => p.resultMarker)
-  .filter((m): m is string => m != null);
+  .filter((m): m is string => m != null));
 
 export function isProviderId(value: string): value is ProviderId {
   return (PROVIDERS as readonly string[]).includes(value);
