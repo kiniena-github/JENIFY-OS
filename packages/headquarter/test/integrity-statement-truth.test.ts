@@ -80,6 +80,7 @@ import {
   HQ_INTEGRITY_FINDINGS,
   INTEGRITY_DEPTH_STATEMENT,
   SAFE_MODE_BLOCKING_FINDINGS,
+  STRUCTURAL_STATEMENT_BASE,
   fullIntegrity,
   structuralIntegrity,
   type HqIntegrityFinding,
@@ -438,20 +439,23 @@ function statementsExecutedByOneStructuralPass(dbPath: string): { sql: string[];
 
 describe('the cost clause of the depth statement is derived from what a pass executes', () => {
   /**
-   * RE-DERIVED at the merge with the concurrent round-seven lane, and strictly
-   * stronger than before.
+   * RE-DERIVED a third time (round twelve, Medium 1), and this time against the
+   * sets themselves rather than against their sizes.
    *
-   * Round ten measured this clause at its own head and found "two MAX(rowid)
-   * seeks per COMMITTED ledger, not one per DECLARED one". The concurrent lane
-   * was closing High 2 in the same wave, and its fix reads every DECLARED
-   * ledger's identity — a `COUNT(*)` and a `MAX(rowid)` together — because a
-   * seek cannot see a row taken out of the middle of a ledger and a count can.
-   * So BOTH shapes are in the pass now, and both are counted here rather than
-   * one of them standing in for the other: the identity read is per declared
-   * ledger, the standalone seek is per committed one, and neither number is
-   * read off the sentence.
+   * Round ten measured "two MAX(rowid) seeks per COMMITTED ledger"; the merge
+   * with the concurrent round-seven lane made the identity read per DECLARED
+   * ledger; and this test's own title claimed the standalone seek was "per
+   * committed one" while its assertions only ever compared `seeks.length` to
+   * `ledgersSeeked.size` and bounded that size below 33 — neither of which can
+   * tell the committed set from any other. It is not per committed ledger:
+   * `truncatedImmutableLedgers` takes it while walking `sqlite_sequence`, so on
+   * the fixture's own warmed file it seeks four ledgers where HQ has committed
+   * marks for three, and it would seek a ledger HQ has committed nothing about.
+   * So the seeked set is compared to the `sqlite_sequence` set it really comes
+   * from, and shown DIFFERENT from the committed set, which is the comparison
+   * whose absence let the sentence ship wrong.
    */
-  it('counts both reads: an identity per declared ledger, a seek per committed one', () => {
+  it('reads an identity per declared ledger, and seeks the sqlite_sequence set, not the committed set', () => {
     const file = warmedFile();
     try {
       const pass = statementsExecutedByOneStructuralPass(file.dbPath);
@@ -471,9 +475,36 @@ describe('the cost clause of the depth statement is derived from what a pass exe
       // over the whole declared census.
       expect(ledgersSeeked.size).toBeLessThan(ENGINE_IMMUTABLE_TABLES.length);
       expect(seeks.length).toBe(ledgersSeeked.size);
+      pass.close();
 
-      // The retired PHRASING stays retired, by its exact shape, and the two
-      // clauses that replaced it are the measured ones.
+      // The two candidate sets, read off the file the pass just ran over.
+      const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
+      const raw = new Database(file.dbPath, { readonly: true });
+      const sequenced = new Set(
+        (raw.prepare(`SELECT name, seq FROM sqlite_sequence`).all() as { name: string; seq: number }[])
+          .filter((row) => declared.has(row.name) && row.seq > 0)
+          .map((row) => row.name),
+      );
+      const committed = new Set<string>();
+      for (const row of raw
+        .prepare(`SELECT ledger_marks FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`)
+        .all() as { ledger_marks: string }[]) {
+        for (const name of Object.keys(JSON.parse(row.ledger_marks) as Record<string, unknown>)) {
+          if (declared.has(name)) committed.add(name);
+        }
+      }
+      raw.close();
+
+      const sorted = (values: Set<string>): string[] => [...values].sort();
+      // The set it IS.
+      expect(sorted(ledgersSeeked)).toEqual(sorted(sequenced));
+      // The set the sentence used to name, shown to be a different one on this
+      // very file — so an assertion that only counted would have passed.
+      expect(committed.size).toBeGreaterThan(0);
+      expect(sorted(ledgersSeeked)).not.toEqual(sorted(committed));
+
+      // The retired PHRASING stays retired, by its exact shape, and the clauses
+      // that replaced it are the measured ones.
       expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(/one MAX\(rowid\) seek per declared ledger/i);
       expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(
         /two MAX\(rowid\) seeks for each ledger HQ has committed a mark for/,
@@ -482,12 +513,104 @@ describe('the cost clause of the depth statement is derived from what a pass exe
         /one COUNT\(\*\) and one MAX\(rowid\) over each declared ledger/,
       );
       expect(INTEGRITY_DEPTH_STATEMENT).toMatch(
+        /one further MAX\(rowid\) seek for each declared ledger the engine carries a positive sqlite_sequence\s+row for/,
+      );
+      // And the wrong set may not come back as the sentence's own claim.
+      expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(
         /one further MAX\(rowid\) seek for each ledger HQ has committed a mark for/,
       );
-      pass.close();
     } finally {
       file.cleanup();
     }
+  });
+
+  /**
+   * The statement TOTAL, as a rule rather than as one file's number.
+   *
+   * "46 statements per pass" shipped to the Founder verbatim and was wrong on
+   * both files measured at the head that shipped it — the third wrong number
+   * this clause has carried, always understating, and every one of them possible
+   * because no test ever compared a count to anything. A pass costs
+   * `STRUCTURAL_STATEMENT_BASE` plus one standalone seek per declared ledger
+   * with a positive `sqlite_sequence` row, and that second term moves with the
+   * store's history, so the total cannot be a constant. Executed on TWO files
+   * whose seek terms differ, because a rule asserted on one file is a number.
+   */
+  it('costs a fixed base plus one statement per seek, on two files with different seek counts', () => {
+    const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
+    const measure = (dbPath: string): { total: number; seeks: number; identities: number } => {
+      const pass = statementsExecutedByOneStructuralPass(dbPath);
+      const total = pass.sql.length;
+      const seeks = pass.sql.filter((sql) => /^SELECT MAX\(rowid\) AS top FROM /.test(sql)).length;
+      const identities = pass.sql.filter((sql) =>
+        /^SELECT COUNT\(\*\) AS held, COALESCE\(MAX\(rowid\), 0\) AS top FROM /.test(sql),
+      ).length;
+      pass.close();
+      return { total, seeks, identities };
+    };
+    const committedOn = (dbPath: string): boolean => {
+      const raw = new Database(dbPath, { readonly: true });
+      const rows = (
+        raw.prepare(`SELECT COUNT(*) AS n FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`).get() as { n: number }
+      ).n;
+      raw.close();
+      return rows > 0;
+    };
+
+    // A file HQ has established but not yet committed on: the expensive half
+    // has nothing to compare against and does not run. Stated because quoting
+    // the committed-on figure for every pass overstates this case four times
+    // over.
+    const fresh = fileFixture();
+    try {
+      fresh.db.close();
+      expect(committedOn(fresh.dbPath), 'this branch is the pre-commitment one').toBe(false);
+      const before = measure(fresh.dbPath);
+      expect(before.identities, 'no ledger identity is read before the first commitment').toBe(0);
+      expect(before.total).toBeLessThan(STRUCTURAL_STATEMENT_BASE);
+
+      // One more boot is what records the first commitment, and it is what
+      // brings the 33 identity reads into the pass.
+      const booted = openHqDatabase(fresh.dbPath);
+      new HeadquarterOperations(booted);
+      booted.close();
+      expect(committedOn(fresh.dbPath)).toBe(true);
+      const plain = measure(fresh.dbPath);
+      expect(plain.identities).toBe(ENGINE_IMMUTABLE_TABLES.length);
+
+      // And a file carrying real reliability work, which brings further ledgers
+      // into `sqlite_sequence` and therefore adds seeks.
+      const file = warmedFile();
+      try {
+        const warm = measure(file.dbPath);
+        expect(warm.seeks, 'the two files must differ in the term being tested').toBeGreaterThan(
+          plain.seeks,
+        );
+        // The RULE, on both committed-on files.
+        expect(plain.total).toBe(STRUCTURAL_STATEMENT_BASE + plain.seeks);
+        expect(warm.total).toBe(STRUCTURAL_STATEMENT_BASE + warm.seeks);
+        // The seek term really is the sqlite_sequence count, on the file with
+        // more of them — so the base is not absorbing a second variable.
+        const raw = new Database(file.dbPath, { readonly: true });
+        const sequenced = (
+          raw.prepare(`SELECT name, seq FROM sqlite_sequence`).all() as { name: string; seq: number }[]
+        ).filter((row) => declared.has(row.name) && row.seq > 0);
+        raw.close();
+        expect(warm.seeks).toBe(sequenced.length);
+      } finally {
+        file.cleanup();
+      }
+    } finally {
+      fresh.cleanup();
+    }
+
+    // The sentence states the rule and interpolates the constant, so it cannot
+    // carry a total of its own again — and it states the cheaper branch too.
+    expect(INTEGRITY_DEPTH_STATEMENT).toContain(
+      `${STRUCTURAL_STATEMENT_BASE} statements plus one for each of those seeks`,
+    );
+    expect(INTEGRITY_DEPTH_STATEMENT).not.toMatch(/the whole pass is \d+ statements/);
+    expect(INTEGRITY_DEPTH_STATEMENT).toMatch(/Before the first commitment/);
   });
 
   it('reads the commitment ledger with a SCAN and a temporary B-tree, not one indexed lookup', () => {

@@ -292,10 +292,32 @@ const ERASED_CODE_POINTS =
  * a non-alphanumeric boundary, one of those s-like letters is followed by one
  * of those k-like letters, then `-`, then 16 or more of `[A-Za-z0-9_-]` — and
  * all 53 s-like spellings were executed against that tail and all 53 refuse.
- * Nothing else in the class exists: an accented hyphenated name that does not
+ * An accented hyphenated name that does not
  * spell s-then-k is untouched, and `Škoda-Auto-Mladá-Boleslav`,
  * `Sköldebrand-Åkerström-Handelsbolaget` and
  * `Ćwikliński-Żółkiewski-Przedsiębiorstwo` were each executed and each pass.
+ *
+ * **This paragraph used to close by declaring the class complete, and that
+ * claimed more than the enumeration behind it could see** (Wave 5 correction
+ * round twelve, Low 1). The counts above are derived by walking the plane for single
+ * `\p{L}` characters whose fold is ONE ASCII letter, which is structurally blind
+ * to two other shapes: characters that are not letters (`Ⓢ Ⓚ ⓢ ⓚ 🅂 🄺 𜳨 𜳠` —
+ * eight of them fold to a single `s` or `k`), and characters whose fold is
+ * MULTI-character and ends in an s-like letter behind a non-alphanumeric
+ * (`℁` → `a/s`, `㎧` → `m∕s`, `㎮` → `rad∕s` — exactly three in the whole
+ * plane). `℁k-Slovan-Bratislava-1919` is refused, and no enumeration of single
+ * letters could ever have said so.
+ *
+ * **They are refused, and they are NOT part of the class this fold added — which
+ * was executed before it was written.** All eleven fold under `NFKC` alone, so
+ * the pipeline refused every one of them BEFORE round seven's `NFKD` mark-strip
+ * existed: run the pre-strip pipeline over `℁k-Slovan-Bratislava-1919` and it
+ * already reads `a/sk-Slovan-…`. So the availability cost this fold introduced
+ * really is the s-then-k prefix and nothing wider — but that is a statement
+ * about what CHANGED, not about what the guard refuses, and the sentence used to
+ * blur the two. `credential-scan-false-positive-class.test.ts` now enumerates
+ * the whole plane without the `\p{L}` filter, names all eleven, and asserts of
+ * each that it refuses AND that it already refused before the strip.
  *
  * **Why it is disclosed rather than fixed.** The ASCII spelling
  * `SK-Slovan-Bratislava-1919` was ALREADY refused before this wave: the over-
