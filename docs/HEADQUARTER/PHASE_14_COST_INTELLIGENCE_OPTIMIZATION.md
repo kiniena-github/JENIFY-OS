@@ -1306,18 +1306,33 @@ canonical attribution instead — a deliberate behaviour change, not a compatibl
 one.
 
 **Added by the third correction round**, and each stated where it belongs as
-well as here: a cost entry's stored `mission_id` and `project_id` still hold one
-value each and are recorded ATTRIBUTION only — every ceiling is measured from
+well as here: ~~a cost entry's stored `mission_id` and `project_id` still hold
+one value each and are recorded ATTRIBUTION only — every ceiling is measured from
 `hq_mission_plan_items` instead, so the columns can be read as a summary but
-never as the measurement; spend recorded against a provider the task is not
-canonically bound to is kept in the deployment total and measures no PROVIDER
-ceiling, which means an unbound lane's provider ceiling cannot be filled at all
-rather than being fillable by anyone; the provider fold is a CASE fold and
-nothing else, so two providers whose ids differ only by case would collide, which
-the canonical uppercase-distinct set makes impossible today and a future set
-would have to preserve; and the credential scan remains SHAPE-based — folding
-away invisible characters widens what it catches and does not make it a
-data-loss-prevention filter.
+never as the measurement~~ — **superseded twice, and left unmarked until round
+eight (Low 2).** Both halves of that sentence stopped being true in this wave and
+the H2 row below in this same section already says so. Round six (High 3) added
+`mission_ids`, and round seven (High NEW-4) added `project_ids`: a cost entry
+now records the WHOLE set it was recorded under, not one of N. And
+`#entriesForScope` measures from those columns — `canonicalOf(entry.taskId)
+.missionIds.includes(scope.scopeId) || entry.missionIds.includes(scope.scopeId)`
+— so the recorded columns are a measurement term, which is precisely what makes
+the ceiling survive `assignMissionToProject` severing the canonical link
+(`blocked / observed 5000` where the canonical read alone returns
+`within_ceiling / observed 0`). The residual that still holds is narrower and
+is stated in the H2 row: the singular `mission_id`/`project_id` columns remain,
+carrying the FIRST of the set for display, and a reader who measures from those
+rather than from the plural ones gets one of N.
+
+The rest of that list still holds as written: spend recorded against a provider
+the task is not canonically bound to is kept in the deployment total and
+measures no PROVIDER ceiling, which means an unbound lane's provider ceiling
+cannot be filled at all rather than being fillable by anyone; the provider fold
+is a CASE fold and nothing else, so two providers whose ids differ only by case
+would collide, which the canonical uppercase-distinct set makes impossible today
+and a future set would have to preserve; and the credential scan remains
+SHAPE-based — folding away invisible characters widens what it catches and does
+not make it a data-loss-prevention filter.
 
 
 ## The FOURTH correction round: what three independent hostile reviews reproduced
@@ -1530,5 +1545,34 @@ are on the Phase 13 page.
 exit 0): `npm run test:hq` 178 files / 3288 tests; `npm test` (root) 37 files /
 569 passed + 3 pre-existing skips; hq-host 23 / 222; hq-server 2 / 20; all four
 typechecks clean; `npm run build:site` 10 pages + `hq-snapshot.json`;
+`npm run build` all workspaces, web initial JS 215.66 kB / 69.22 kB gzip,
+unchanged.
+
+## The EIGHTH correction round (this page's part)
+
+One of the round's three findings lands here: **Low 2**, the superseded
+residual above that still told the reader a cost entry's `mission_id` and
+`project_id` "still hold one value each" and are "never the measurement". Both
+clauses stopped being true when round six added `mission_ids` (High 3) and round
+seven added `project_ids` (High NEW-4), and the H2 row in the same section
+already said so. It is marked in the house style where it stands, with the
+narrower residual that does still hold stated in its place. No behaviour
+changed on this page's surfaces; the attribution behaviour was already pinned as
+route (d) in `intelligence-attribution.test.ts`.
+
+The round's other two findings are recorded on
+`PHASE_13_ADVANCED_RELIABILITY.md`, together with the sweep of every shipped
+statement in this wave carrying a literal count, an only/always/never/every
+claim or a named mechanism. Two of this page's live counts were re-measured in
+that sweep and both hold at this head: `assertNoCredentialShape`'s "**46 call
+sites at this head**" (measured: 46 across `src/`, excluding the definition) and
+`credential-scan-coverage.test.ts`'s "(29 at this head)" facade members that
+call `missionText` (measured: 29).
+
+**Verification at the round-eight head** (the whole matrix, all green, exit 0):
+`npm run test:hq` 179 files / 3292 tests; `npm test` (root) 37 files / 569
+passed + 3 pre-existing skips; hq-host 23 / 222; hq-server 2 / 20; typechecks
+clean for `@factoryos/headquarter`, `@factoryos/hq-host` and
+`@factoryos/hq-server`; `npm run build:site` 10 pages + `hq-snapshot.json`;
 `npm run build` all workspaces, web initial JS 215.66 kB / 69.22 kB gzip,
 unchanged.

@@ -378,11 +378,25 @@ that no longer has the disposition it claims fails it too.
 
 | Depth | What runs | When |
 |---|---|---|
-| `structural` | the schema catalogue (three `sqlite_master` reads) and the durability pragmas | **every construction of the facade** — cheap enough to afford there |
+| `structural` | the schema catalogue (three `sqlite_master` reads), the durability pragmas, one `MAX(rowid)` seek per declared ledger, and one `COUNT(*)` plus one indexed lookup over `hq_integrity_checkpoints` | **every construction of the facade** — none of it is proportional to the data, so it is cheap enough to afford there |
 | `full` | everything structural, plus `PRAGMA integrity_check`, `PRAGMA foreign_key_check` and a whole-log evidence-chain verification | only `assessHqIntegrity`, a Founder act — these are O(database) and O(log) |
 
 The depth is carried ON the verdict and on the published snapshot, so a cheap
 pass can never be mistaken for a full one.
+
+**This row said "the schema catalogue and the durability pragmas" alone, and
+was stale by four correction rounds (round eight, Medium 1).** The commitment
+and high-water-mark reads were added to the cheap pass by rounds five and six
+and the row was never re-read, so the page under-stated what a boot detects —
+fail-safe in direction, and exactly the drift this wave keeps finding. Measured
+at this head by inducing all seven findings against a real file and running both
+depths over each: `structural` raises five of them —
+`append_only_guard_missing`, `append_only_ledger_truncated`,
+`evidence_chain_broken`, `durability_below_requirement` and
+`reliability_schema_absent` — and only `database_integrity_check_failed` and
+`foreign_key_violations` need the full pass. That partition is now derived by
+execution in `integrity-statement-truth.test.ts` and compared to the sentence
+HQ serves the Founder, so the two cannot separate again.
 
 **The boot-time observation is taken BEFORE the schema ensures, and that is
 load-bearing.** Every `ensure*Schema` is `CREATE TRIGGER IF NOT EXISTS`, so a
@@ -941,9 +955,16 @@ timing-only concurrency tests. What was built:
 - **Safe mode is assessed at construction and on demand, not continuously.** A
   corruption that appears while HQ is running is caught at the next boot or the
   next explicit assessment, not at the moment it happens.
-- **The structural check cannot see everything.** It reads the schema catalogue
-  and the pragmas; a corrupt page, a broken chain and a referential violation
-  are only found by the full assessment.
+- **The structural check cannot see everything.** It reads the schema
+  catalogue, the pragmas, and the bounded marks HQ keeps about its own
+  append-only records; a corrupt page and a referential violation are the two
+  findings only the full assessment raises. **This bullet also said "a broken
+  chain", and that has been wrong since round five (round eight, Medium 1):**
+  the cheap pass reads HQ's durable commitment, so a log that has been shortened
+  or rebuilt is blocking at the BOOT as well as at the assessment. What the
+  structural pass still cannot do is verify the chain link by link — a tampered
+  entry that no commitment covers needs the full pass, and only a full
+  assessment ever reports the chain as verified.
 - **A missing append-only guard is detected, and the tamper window is not
   bounded.** HQ reports that a guard was absent when the file was found; it
   cannot say for how long, or what was written meanwhile. That is why the
@@ -2793,3 +2814,73 @@ files / 569 passed + 3 pre-existing skips**; hq-host **23 / 222**; hq-server
 `f1ce71c` touches `packages/server`, `packages/web`, `packages/shared`,
 `packages/config-mesob`, `packages/hq-host`, `apps/`, `package.json` and
 `package-lock.json` not at all, and no test file was deleted or renamed.
+
+## The EIGHTH correction round: three statements the wave's own corrections outran
+
+A fresh read-only hostile review of the round-seven merged head returned **0
+Critical / 0 High / 1 Medium / 2 Low**, and recorded that every
+security-relevant claim it tested held under execution. All three findings are
+documentation honesty, with zero runtime effect: no gate, guard, ledger or
+route behaves differently than claimed. This round changes no behaviour. Every
+statement below was already true of the code and false in the prose describing
+it — the sixth consecutive round in which a disclosure, rather than a defect,
+was the finding.
+
+| Finding | What was wrong | What was done |
+|---|---|---|
+| **MEDIUM 1** — the depth sentence served to the Founder was false of the code it describes | `INTEGRITY_DEPTH_STATEMENT` — published as `depthStatement` on `hqReliabilityPosture`, i.e. read by the Founder verbatim — said a structural assessment "reads the schema catalogue and the durability pragmas **only**", and that a broken chain is found "only by the full assessment". Rounds five and six had given the cheap pass a `MAX(rowid)` seek per declared ledger, a `COUNT(*)` and an indexed lookup over `hq_integrity_checkpoints`, and it reports `append_only_ledger_truncated` and `evidence_chain_broken` itself. The module header's own point 3 was updated to say so; the shipped string, the depth table and the residual bullet were not. The Low 1 row of round six even records the cost wording being corrected in ONE place ("rather than keeping the old 'runs no table scan'") while this string kept it. Direction was under-claim — HQ detects more than it says, which is fail-safe and is exactly why nothing caught it. | The statement, the depth table and the residual bullet are corrected together, and the claim is now **derived rather than written**. `integrity-statement-truth.test.ts` induces all seven findings against a real file-backed database, runs BOTH depths over each induced state, and compares the executed full-exclusive set to the names parsed out of the shipped sentence. Measured at this head: `structural` raises `append_only_guard_missing`, `append_only_ledger_truncated`, `evidence_chain_broken`, `durability_below_requirement` and `reliability_schema_absent`; `full` raises all seven; only `database_integrity_check_failed` and `foreign_key_violations` need the full pass. The battery is required to reach the WHOLE vocabulary, so a new finding no scenario induces fails the test rather than silently escaping the partition. |
+| **LOW 1** — the canonical safe-mode module's header contradicted its own constants | `integrity.ts` said a finding "is one of **six** names" fifteen lines above `HQ_INTEGRITY_FINDINGS`, which holds **seven** and whose own docstring says "Seven names"; and that "**Only three findings** engage safe mode", enumerating three, while `SAFE_MODE_BLOCKING_FINDINGS` holds **four** and its docstring says "The four findings". `append_only_ledger_truncated`, added by round six, was missing from the enumeration. Round six's sweep for exactly this stale sentence reached the phase doc and a test comment but not the module that DEFINES both constants. | Both counts corrected, all four blocking findings named by identifier, and the counts **pinned to the constants**: the same test parses the two numbers back out of the header and compares them to `HQ_INTEGRITY_FINDINGS.length` and `SAFE_MODE_BLOCKING_FINDINGS.length`, requires every blocking finding to be named in the paragraph, and requires every non-blocking finding NOT to be. Adding an eighth finding or a fifth blocking one now fails a test instead of quietly falsifying the prose. This is the pattern `INBOX_ORDERING_STATEMENT` has had since Phase 10; the integrity module simply never got it. |
+| **LOW 2** — a superseded residual left unmarked in PHASE_14's NOT-fixed list | `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md` still told the reader that a cost entry's `mission_id`/`project_id` "still hold one value each" and that the columns can be read "but never as the measurement". Round six (High 3) added `mission_ids` and round seven (High NEW-4) added `project_ids`, and `#entriesForScope` measures from them; the H2 row in the same section already said so. Every other superseded statement in these docs carries an inline correction marker; this one did not. | Marked in the house style, with the narrower residual that does still hold stated in its place: the singular columns remain and carry the FIRST of the set for display. Behaviour was already pinned as route (d) in `intelligence-attribution.test.ts`. |
+
+### What was swept, and what the sweep found
+
+Because this is the sixth round in which a stale sentence was the finding, the
+whole wave was swept for the same class rather than only the three sites
+reported: every shipped statement carrying a literal count, an
+only/always/never/every claim, or a named mechanism was checked against the
+code. Checked and TRUE at this head, each measured rather than read:
+`INBOX_ORDERING_STATEMENT`'s nine attention kinds against `ATTENTION_KINDS`
+(already pinned); `COST_LEDGER_STATEMENT`'s four provenances against
+`COST_PROVENANCES`; `BACKUP_RECORD_STATEMENT`'s three sidecar suffixes against
+`SQLITE_SIDECAR_SUFFIXES` and its "an lstat, a realpath and three sidecar
+lstats" against the call sites; `INTELLIGENCE_LATENCY_STATEMENT`'s "discriminates
+between NO tiers" against `imposedFloor: null`; "All seventeen HQ destinations"
+against `HQ_ROOMS` (17); "the sum of the six canonical buckets" against the six
+summed terms; "the two decisions this model has … there is no third" against
+`'approved' | 'denied'`; "at most one hour ahead and thirty days behind" against
+`MAX_COST_OCCURRED_AT_FUTURE_MS` and `MAX_COST_OCCURRED_AT_PAST_MS`; PHASE_14's
+"**46 call sites at this head**" (measured: 46) and "(29 at this head)"
+(measured: 29); and the five other descriptions of the structural pass in this
+document, which were already consistent with the corrected statement. No further
+stale statement was found.
+
+**Residual, stated rather than fixed:** three of those statements enumerate a
+frozen constant in prose without being pinned to it —
+`COST_LEDGER_STATEMENT`/`COST_PROVENANCES`,
+`BACKUP_RECORD_STATEMENT`/`SQLITE_SIDECAR_SUFFIXES`, and
+`INTELLIGENCE_LATENCY_STATEMENT`/the latency floor. All three are correct today
+and none is load-bearing for a gate, so they are disclosed rather than changed
+in a round scoped to three findings. The cheapest path when one is next touched
+is one assertion apiece, of the shape `INBOX_ORDERING_STATEMENT` already
+carries.
+
+**Verification at the round-eight head** (the whole matrix, all green, exit 0):
+`npm run test:hq` **179 files / 3292 tests** (round-seven head was 178 / 3288;
+the whole delta is the one new file and its four tests); `npm test` (root)
+**37 files / 569 passed + 3 pre-existing skips**; hq-host **23 / 222**;
+hq-server **2 / 20**; typechecks clean for `@factoryos/headquarter`,
+`@factoryos/hq-host` and `@factoryos/hq-server`; `npm run build:site` 10 pages +
+`hq-snapshot.json`; `npm run build` all workspaces, web initial JS
+**215.66 kB / 69.22 kB gzip** (unchanged). The diff against the accepted base
+`f1ce71c` touches `packages/server`, `packages/web`, `packages/shared`,
+`packages/config-mesob`, `package.json` and `package-lock.json` not at all, and
+no test file was deleted or renamed. Zero new dependencies.
+
+**The new tests were verified to FAIL against the round-seven head** rather than
+merely to pass here: `ae4bf90` was extracted to a scratch tree, the new file
+overlaid on it alone, and all **4 of 4 failed** — the depth statement's derived
+list absent (`expected null to be truthy`), the retired "durability pragmas
+only" wording still present, `expected 6 to be 7`, and `expected 3 to be 4`.
+The eight-scenario battery itself RAN clean against that head, which is the
+point: the behaviour was already correct and only the sentences describing it
+were not.
