@@ -101,12 +101,18 @@ function record(over: Partial<DecisionRow> = {}): DecisionRecord {
 }
 
 function costRow(over: Partial<CostEntryRow> = {}): CostEntryRow {
-  return {
+  const row: CostEntryRow = {
     seq: 1,
     id: 'cost-1',
     taskId: 'task-1',
     missionId: null,
     projectId: null,
+    // EVERY scope HQ derived at record time, not just the first (Wave 5
+    // correction round six, High 3). Defaulted from the single columns so a
+    // fixture that names one gets the row the writer would actually have
+    // produced; a case that means the two to differ passes both explicitly.
+    missionIds: [],
+    projectIds: [],
     decisionId: null,
     providerId: 'anthropic',
     // The default is a task HQ canonically BOUND to this provider, because that
@@ -128,6 +134,11 @@ function costRow(over: Partial<CostEntryRow> = {}): CostEntryRow {
     recordedBy: 'claude',
     note: null,
     ...over,
+  };
+  return {
+    ...row,
+    missionIds: over.missionIds ?? (row.missionId ? [row.missionId] : []),
+    projectIds: over.projectIds ?? (row.projectId ? [row.projectId] : []),
   };
 }
 

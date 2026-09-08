@@ -1058,7 +1058,7 @@ describe('safe mode', () => {
   /**
    * Wave 5 Critical 1: the assessment read the evidence chain through
    * `queue.evidence.verifyChain` — a PUBLIC own-property closure the queue
-   * documents as safe to patch. `evidence_chain_broken` is one of only three
+   * documents as safe to patch. `evidence_chain_broken` is one of only four
    * blocking findings and the assessment is the only path that CLEARS the
    * latch, so that read was the one lever a same-realm caller needed: break
    * the chain, let a dropped guard latch safe mode at boot, replace

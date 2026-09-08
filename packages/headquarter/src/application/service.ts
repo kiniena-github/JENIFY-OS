@@ -4607,10 +4607,20 @@ export class HeadquarterOperations {
     }
     const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
     if (!reason.ok) return fail('invalid_input', reason.message);
+    // Same class as the two above, and the sibling `assignAiMember` already
+    // scans its own `reason` (Wave 5 correction round six, Medium 4; found
+    // independently as one of the unscanned facade writes in round seven —
+    // two lanes wrote this guard, ONE of them survives, and the surviving
+    // refusal message is the field-named one because that is what the other
+    // fourteen credential refusals in this file say and it tells the caller
+    // WHICH input to rephrase).
     try {
       assertNoCredentialShape({ reason: reason.value });
-    } catch (error) {
-      return fail('invalid_input', errorMessage(error));
+    } catch {
+      return fail(
+        'invalid_input',
+        'The disable reason looks like it contains a credential; nothing was recorded.',
+      );
     }
     try {
       const privileged = this.#requirePrivilegedQueue();
@@ -6553,8 +6563,9 @@ export class HeadquarterOperations {
    *
    * Refuses an act while HQ has said, about itself, that its stored record
    * cannot be trusted — the engine reports the file corrupt, an append-only
-   * guard the schema declares is missing, or the evidence hash chain does not
-   * verify.
+   * guard the schema declares is missing, a declared append-only ledger holds
+   * fewer rows than the engine's own high-water mark says it reached, or the
+   * evidence hash chain does not verify.
    *
    * Reads the `#private` latched report and nothing else, because this decides
    * whether a write lands: a patch of `hqReliabilityPosture` or of any other
@@ -8757,6 +8768,24 @@ export class HeadquarterOperations {
     }
     const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
+    // The scan the "every facade write that stores caller text" rule promised
+    // and this method did not have (Wave 5 correction round six, High 4). The
+    // backup register is APPEND-ONLY and this note is served verbatim on
+    // `GET /api/hq/control/reliability`, which applies the strict scan to its
+    // whole response — so one accepted credential made that route 500 FOREVER:
+    // the row cannot be deleted, cannot be updated, and a restart re-reads it.
+    // Executed against the previous head with a real verified backup file: 200,
+    // then accepted, then 500 across a restart.
+    try {
+      assertNoCredentialShape({ note: note.value ?? '' });
+    } catch {
+      return fail(
+        'invalid_input',
+        'The backup note looks like it contains a credential; nothing was recorded. The backup register is ' +
+          'append-only and this note is published on the Founder reliability route, so a stored credential ' +
+          'could be neither removed nor served.',
+      );
+    }
     const refusedActor = this.#resolveReliabilityCommander(input.requestedBy, 'record a verified backup');
     if (refusedActor) return refusedActor;
     const refusedCapability = this.#reliabilityCapabilityGate('record a verified backup');
@@ -8765,7 +8794,14 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'backup register unavailable on this database handle');
     }
 
-    const verification = verifyHqBackupFile(backupPath);
+    // The live database's own path travels with the candidate, so registering
+    // the file HQ is running on as a "recovery point" is refused on identity
+    // (Wave 5 correction round six, Low 3). `sidecar_journal_present` catches
+    // it only while a process holds it open; SQLite removes the sidecars on a
+    // clean close, so between runs the live file verified perfectly.
+    const verification = verifyHqBackupFile(backupPath, {
+      liveDatabasePath: typeof this.#db.name === 'string' ? this.#db.name : null,
+    });
     if (!verification.verified) {
       return fail(
         'backup_verification_failed',
@@ -8781,13 +8817,19 @@ export class HeadquarterOperations {
     // it — the recovery point's identity is the file, and the key is derived
     // from it (Wave 5 Low).
     const verifiedPath = verification.resolvedPath ?? backupPath;
-    // Both stored columns are caller-derived text and both are published on
-    // the reliability view, which the read boundary scans (Wave 5 correction
-    // round seven, Medium 2). `hq_reliability_backups` is append-only, so a
+    // The SECOND stored column. `note` is already refused above, by the guard
+    // the other lane placed before the actor gate, so this scan is narrowed to
+    // the path alone rather than repeating it (Wave 5 correction round seven,
+    // Medium 2, reconciled with round six High 4 — both lanes found this
+    // method, each closed a different column of it, and both closures stand).
+    // The path cannot be scanned up there: what is stored is the path HQ
+    // actually OPENED, which does not exist until `verifyHqBackupFile` has
+    // resolved it. `hq_reliability_backups` is append-only and both columns are
+    // published on the reliability view, which the read boundary scans, so a
     // value the read refuses would be a permanent outage on the exact route a
     // Founder needs while investigating one.
     try {
-      assertNoCredentialShape({ backupPath: verifiedPath, note: note.value ?? '' });
+      assertNoCredentialShape({ backupPath: verifiedPath });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -9148,18 +9190,25 @@ export class HeadquarterOperations {
           // mission, no later relinking can take it out of that mission's
           // measurement, and no caller can put it into another's.
           //
-          // The column still holds ONE of N missions, which is why the
-          // canonical half stays: it is what lets a task linked to a second
-          // mission accumulate against that mission's ceiling too.
+          // The recorded half is EVERY scope HQ derived at record time, not the
+          // single `mission_id`/`project_id` column (Wave 5 correction round
+          // six, High 3). That column holds one of N, so the union it produced
+          // was complete only for the mission or project that sorted first, and
+          // the OTHER one's ceiling could be nullified by moving its mission to
+          // a different project — `assignMissionToProject`, no raw SQL,
+          // `hq.mission_command` alone: `blocked, observed 5000` became
+          // `within_ceiling, observed 0` and the refused decision was recorded.
+          // The canonical half still stays: it is what lets a ceiling start
+          // governing a task that is linked to a mission AFTER the spend.
           case 'mission':
             return (
               canonicalOf(entry.taskId).missionIds.includes(scope.scopeId) ||
-              entry.missionId === scope.scopeId
+              entry.missionIds.includes(scope.scopeId)
             );
           case 'project':
             return (
               canonicalOf(entry.taskId).projectIds.includes(scope.scopeId) ||
-              entry.projectId === scope.scopeId
+              entry.projectIds.includes(scope.scopeId)
             );
           // The provider scope is measured against the task's canonical
           // BINDING, never against the caller-supplied column. On a bound task
@@ -9262,8 +9311,11 @@ export class HeadquarterOperations {
     const providerIds = new Set<string>();
     for (const entry of this.#costEntriesFromStore()) {
       if (entry.taskId !== taskId) continue;
-      if (entry.missionId) missionIds.add(entry.missionId);
-      if (entry.projectId) projectIds.add(entry.projectId);
+      // EVERY recorded scope, not the first-sorting one (Wave 5 correction
+      // round six, High 3): a governing set built from one of N left the other
+      // ceiling out of the evaluation entirely.
+      for (const missionId of entry.missionIds) missionIds.add(missionId);
+      for (const projectId of entry.projectIds) projectIds.add(projectId);
       // Only a binding HQ VOUCHED for. A caller-declared provider on an
       // unbound task is an attribution claim, not a scope — the same rule
       // `#entriesForScope` applies to the measurement.
@@ -10480,14 +10532,24 @@ export class HeadquarterOperations {
     }
     const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
-    // Caller free text into an append-only ledger the intelligence view
-    // publishes (Wave 5 correction round seven, Medium 2). Its two sibling
-    // writes, `recordIntelligenceCost` and `setIntelligenceBudget`, already
-    // scanned their notes; this one did not.
+    // The 30th write site the "29 call sites" claim missed (Wave 5 correction
+    // round six, Medium 4), found again independently in round seven: its two
+    // sibling writes, `recordIntelligenceCost` and `setIntelligenceBudget`,
+    // already scanned their notes and this one did not. No read publishes this
+    // column TODAY, so nothing 500s — which makes it a latent brick rather than
+    // a live one: the row is append-only, so the first read that ever serves it
+    // repeats High 4 verbatim and cannot be undone. The rule is "every facade
+    // write that stores caller text", not "every one that is currently
+    // published". Two lanes wrote this guard against the same finding; one
+    // survives, with the field-named refusal message the rest of this file
+    // uses.
     try {
       assertNoCredentialShape({ note: note.value ?? '' });
-    } catch (error) {
-      return fail('invalid_input', errorMessage(error));
+    } catch {
+      return fail(
+        'invalid_input',
+        'The outcome note looks like it contains a credential; nothing was recorded.',
+      );
     }
     if (!this.#intelligenceStorePresent) {
       return fail('invalid_input', 'intelligence ledger unavailable on this database handle');
@@ -10870,17 +10932,26 @@ export class HeadquarterOperations {
       this.#db
         .prepare(
           `INSERT INTO hq_intel_cost_entries
-             (id, task_id, mission_id, project_id, decision_id, provider_id, provider_bound, model_id,
+             (id, task_id, mission_id, project_id, mission_ids, project_ids, decision_id, provider_id,
+              provider_bound, model_id,
               provenance,
               amount_minor_units, currency, unit_kind, units_observed, basis, occurred_at, recorded_at,
               recorded_by, note, entry_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
           input.taskId,
           canonicalScopes.missionIds[0] ?? null,
           canonicalScopes.projectIds[0] ?? null,
+          // EVERY derived scope, not just the first (Wave 5 correction round
+          // six, High 3). The two single columns above are kept because they
+          // are what an older row carries and what several readers display; the
+          // MEASUREMENT reads these arrays, because a task linked to two
+          // missions files its spend under both and a ceiling that has been
+          // charged has to stay charged whichever of them is later moved.
+          JSON.stringify(canonicalScopes.missionIds),
+          JSON.stringify(canonicalScopes.projectIds),
           decisionId,
           providerId,
           // HQ's OWN statement about the caller's attribution claim, taken from

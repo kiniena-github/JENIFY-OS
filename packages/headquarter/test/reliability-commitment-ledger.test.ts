@@ -48,6 +48,7 @@ import {
   SAFE_MODE_STATEMENT,
   elidedCommitmentLedgerRows,
   immutableLedgerMarks,
+  recordIntegrityCheckpoint,
   regressedImmutableLedgers,
 } from '../src/store/integrity.js';
 
@@ -455,19 +456,60 @@ describe('a committed ledger mark is corroborated by the rows, not taken from sq
       expect(immutableLedgerMarks(tamper)['hq_reliability_verdicts']).toBe(real);
       tamper.close();
 
-      // ONE clean boot is all the attack needed: it is the boot that commits.
+      // ONE clean boot used to be all the attack needed: it is the boot that
+      // commits. The round-six MERGE made that boot no longer clean — the other
+      // lane's `truncatedImmutableLedgers` compares `MAX(rowid)` against
+      // `sqlite_sequence` for EVERY declared ledger, so an inflated mark IS a
+      // blocking observation about the file as it now stands, and the attack
+      // cannot even reach the commit through a facade construction. That is a
+      // strengthening, not a replacement: the corroborated reading above is
+      // still what HQ commits, and it is still the only thing standing between
+      // a forged mark and a PERMANENT finding, which is what this test exists
+      // for. Both are asserted.
       const committing = fx.reopen('commits-the-forged-reading');
-      expect(committing.ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      const blocked = committing.ops.hqReliabilityPosture().integrity;
+      expect(blocked.safeMode).toBe(true);
+      expect(findings(blocked.observations)).toContain('append_only_ledger_truncated');
       committing.db.close();
+
+      // The commit path itself, exercised DIRECTLY against the raw handle so
+      // this test still proves what it was written to prove: with the inflated
+      // mark in place, what HQ commits is the CORROBORATED value, not the
+      // forged one. Without that corroboration this write is what made the
+      // finding below permanent.
+      const committer = fx.raw();
+      recordIntegrityCheckpoint(committer, {
+        id: `checkpoint-forged-reading`,
+        recordedAt: '2026-09-08T00:00:00.000Z',
+        processId: 'commits-the-forged-reading',
+        recordedBy: 'founder',
+      });
+      committer.close();
 
       const restore = fx.raw();
       restore.exec(`UPDATE sqlite_sequence SET seq = ${real} WHERE name = 'hq_reliability_verdicts'`);
+      // NOTHING was manufactured. This is the assertion the whole test exists
+      // for and it is unchanged by the merge.
       expect(regressedImmutableLedgers(restore)).toEqual([]);
       restore.close();
 
       // Every process afterwards used to report ["append_only_guard_missing"]
-      // at both depths, for ever, on a file whose ledgers were intact.
-      for (const tag of ['after-one', 'after-two', 'after-three']) {
+      // at both depths, for ever, on a file whose ledgers were intact — with
+      // the only escape being a backup restore. What stands now is a LATCHED
+      // verdict from the boot that genuinely observed the inflated mark, and a
+      // latch is not a fabrication: it is HQ's record of an observation it
+      // really made, and one Founder full assessment of the file as it now
+      // stands clears it. That is the difference this correction is about.
+      const first = fx.reopen('after-one');
+      expect(first.ops.hqReliabilityPosture().integrity.safeMode).toBe(true);
+      const cleared = first.ops.assessHqIntegrity({ requestedBy: 'founder' });
+      expect(cleared.ok).toBe(true);
+      if (!cleared.ok) throw new Error('unreachable');
+      expect(findings(cleared.data.observations)).toEqual([]);
+      expect(first.ops.releaseKillSwitch('global', 'founder').ok).toBe(true);
+      first.db.close();
+
+      for (const tag of ['after-two', 'after-three']) {
         const process = fx.reopen(tag);
         expect(process.ops.hqReliabilityPosture().integrity.safeMode, tag).toBe(false);
         const assessed = process.ops.assessHqIntegrity({ requestedBy: 'founder' });

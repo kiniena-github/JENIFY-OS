@@ -29,7 +29,9 @@
  * `hq_project_events` records both moves append-only.
  */
 
-export const PROJECT_STATUSES = ['active', 'closed'] as const;
+import { deepFreeze } from './freeze.js';
+
+export const PROJECT_STATUSES = deepFreeze(['active', 'closed'] as const);
 
 export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
 
@@ -39,10 +41,10 @@ export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
  * reasons, and the reason is part of the record (the mission
  * MISSION_NOTE_REQUIRED_TARGETS / denyTask mandatory-reason precedent).
  */
-export const PROJECT_ALLOWED_TRANSITIONS: Record<ProjectStatus, readonly ProjectStatus[]> = {
+export const PROJECT_ALLOWED_TRANSITIONS: Record<ProjectStatus, readonly ProjectStatus[]> = deepFreeze({
   active: ['closed'],
   closed: ['active'],
-};
+});
 
 export function isProjectStatus(value: string): value is ProjectStatus {
   return (PROJECT_STATUSES as readonly string[]).includes(value);

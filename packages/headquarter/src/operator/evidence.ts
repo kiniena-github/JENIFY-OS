@@ -92,7 +92,17 @@
  *    `UPDATE sqlite_sequence` read clean. `sqlite_sequence` carries no triggers
  *    and cannot be brought under the census — it is an internal SQLite table —
  *    so what closes that is the commitment, which lives in a ledger that DOES
- *    carry the guards and IS censused.
+ *    carry the guards. **"And IS censused" was the half that did not hold**
+ *    (Wave 5 correction round six, High 1): the census reads `sqlite_master` at
+ *    construction time, and this header's own sentence two lines up says a
+ *    trigger dropped and re-created before the next boot is never observed
+ *    missing — so the SAME three statements emptied the witness ledger, and
+ *    both of its readers read the very rows deleted. Executed: boot clean, full
+ *    Founder assessment clean, `releaseKillSwitch` admitted. What makes the
+ *    ledger genuinely censused is `truncatedImmutableLedgers`, which generalises
+ *    the `MAX(rowid)` versus `sqlite_sequence` comparison this function already
+ *    makes for `op_evidence` to EVERY declared AUTOINCREMENT ledger and reports
+ *    `append_only_ledger_truncated`, blocking, at both depths.
  *
  * **And two further claims are corrected, from the other round-four lane:**
  *
@@ -198,6 +208,22 @@
  * count is exactly what this version preserves. Dropping
  * `hq_integrity_checkpoints` outright remains the other route, and still costs
  * the restart and the second Founder act the round-five text priced it at.
+ *
+ * The other round-six lane reproduced the DELETE-and-re-seat wipe independently
+ * — the one two paragraphs up, not the count-preserving rewrite priced
+ * immediately above it, which deletes nothing and which no rule in this module
+ * closes — and answered it with a second, weaker rule that is kept beside the
+ * row-count identity because it is not the same rule:
+ * `truncatedImmutableLedgers` asserts `MAX(rowid) >= sqlite_sequence` over EVERY
+ * declared AUTOINCREMENT ledger and reports `append_only_ledger_truncated`,
+ * blocking, at both depths. It is what closes the identical attack on the
+ * twenty-odd ledgers this ledger's own invariant says nothing about — most
+ * sharply `hq_reliability_run_events`, where emptying the ledger returned a
+ * correctly refused duplicate attempt to generation 1 and ADMITTED it, making
+ * `RUN_RETRY_STATEMENT`'s "an interrupted attempt is NEVER retried
+ * automatically" false. The row-count identity is strictly stronger for the
+ * commitment ledger, because a replacement row can restore the greatest rowid;
+ * neither subsumes the other.
  */
 
 import { createHash } from 'node:crypto';

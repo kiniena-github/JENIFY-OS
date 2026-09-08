@@ -477,6 +477,22 @@ describe('the AI member registry facade — lifecycle, not authority', () => {
       ops.setAiMemberHealth({ memberId: 'fable-main', health: 'excellent', founderId: FOUNDER }).ok,
     ).toBe(false);
 
+    // Wave 5 correction round six, Medium 4: the disable REASON is stored
+    // caller text on an append-only registry row, and it went through no
+    // credential scan while `assignAiMember`'s own `reason` did. Same class as
+    // the backup note (High 4): a stored credential could not be removed.
+    const poisoned = ops.disableAiMember({
+      memberId: 'fable-main',
+      reason: 'rotate ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123 first',
+      founderId: FOUNDER,
+    });
+    expect(poisoned.ok).toBe(false);
+    expect(!poisoned.ok && poisoned.error.code).toBe('invalid_input');
+    expect(!poisoned.ok && poisoned.error.message).toContain('credential');
+    expect(
+      ops.listAiMembers().members.find((member) => member.id === 'fable-main')!.status,
+    ).not.toBe('disabled');
+
     const disabled = expectOk(
       ops.disableAiMember({ memberId: 'fable-main', reason: 'model retired', founderId: FOUNDER }),
     );

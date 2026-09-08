@@ -422,6 +422,92 @@ describe('an exhausted ceiling cannot be nullified by breaking the link it was d
     expect(after.decision).toBe('blocked');
     expect(after.observedMinorUnits).toBe(5000);
   });
+
+  /**
+   * Route (d): a task linked to TWO missions, and the OTHER mission moved.
+   *
+   * Wave 5 correction round six, High 3. The rule the three routes above rest
+   * on is "canonical membership UNION the attribution HQ recorded on the row",
+   * and the phase document called that union "monotone and unforgeable". It was
+   * neither for a task linked to more than one mission: the cost row stored
+   * `canonicalScopes.missionIds[0]` and `projectIds[0]`, ONE of N, so the union
+   * was complete only for the scope that sorted first.
+   *
+   * No raw SQL. A principal holding `hq.mission_command`, without approval
+   * authority and without `hq.intelligence_command`, calls
+   * `assignMissionToProject` on the mission owning the project the row did NOT
+   * store. Executed against the previous head: the victim project went from
+   * `blocked, observed 5000` to `within_ceiling, observed 0`, the refused
+   * decision was RECORDED, and the published report credited the whole 5000 to
+   * the escape project, which had spent nothing.
+   */
+  it('route (d): moving the OTHER mission of a task linked to two of them', () => {
+    const fx = intelligenceFixture();
+    const first = fx.linkToCanonicalMission(fx.claim.taskId, 'alpha');
+    const second = fx.linkToCanonicalMission(fx.claim.taskId, 'beta');
+    // The row stores the project that sorts FIRST, so the victim is the other
+    // one — whichever that happens to be for these uuids.
+    const [stored, victim] =
+      first.projectId < second.projectId ? [first, second] : [second, first];
+    expect(stored.projectId < victim.projectId).toBe(true);
+
+    exhaust(fx, { scopeKind: 'project', scopeId: victim.projectId });
+    expect(blockedObserved(fx, { scopeKind: 'project', scopeId: victim.projectId })).toEqual({
+      decision: 'blocked',
+      observed: 5000,
+    });
+    const refusedBefore = decide(fx, { tier: 'high' });
+    expect(refusedBefore.ok).toBe(false);
+    expect(!refusedBefore.ok && refusedBefore.error.code).toBe('budget_ceiling_blocks');
+
+    const escape = expectOk(
+      fx.ops.createProject({
+        name: 'Somewhere else',
+        purpose: 'The project the mission is moved to',
+        requestedBy: 'founder',
+      }),
+    ).project;
+    expectOk(
+      fx.ops.assignMissionToProject({
+        missionId: victim.missionId,
+        projectId: escape.id,
+        requestedBy: 'founder',
+      }),
+    );
+
+    // The ceiling still binds and the spend is still visible under it.
+    expect(blockedObserved(fx, { scopeKind: 'project', scopeId: victim.projectId })).toEqual({
+      decision: 'blocked',
+      observed: 5000,
+    });
+    const stillRefused = decide(fx, { tier: 'high', idempotencyKey: 'after-mission-moved' });
+    expect(stillRefused.ok).toBe(false);
+    expect(!stillRefused.ok && stillRefused.error.code).toBe('budget_ceiling_blocks');
+
+    // And the published report still SHOWS the spend under the project that
+    // incurred it. Before the fix the victim vanished from `byProject`
+    // altogether — the report agreed with a ceiling that had stopped binding.
+    const analytics = fx.ops.intelligenceAnalytics();
+    const credited = (
+      analytics.cost.byProject as { id: string | null; knownAmountMinorUnits: number | null }[]
+    )
+      .filter((row) => row.knownAmountMinorUnits === 5000)
+      .map((row) => row.id)
+      .sort();
+    expect(credited).toContain(victim.projectId);
+    expect(credited).toContain(stored.projectId);
+    // The escape project appears TOO, and that is the union's stated behaviour
+    // rather than a leftover of this defect: `byProject` folds canonical
+    // membership as it stands NOW beside the attribution HQ recorded, so a
+    // project a task has been moved under is shown that task's spend. It is the
+    // same rule that makes the escape project's OWN ceiling start governing the
+    // work, which is the fail-closed direction. Asserted rather than left
+    // implicit, and carried in the phase document's residual list — the defect
+    // this test closes is the victim's DISAPPEARANCE, which was the half no
+    // reading of the union could defend.
+    expect(credited).toContain(escape.id);
+  });
+
 });
 
 /**

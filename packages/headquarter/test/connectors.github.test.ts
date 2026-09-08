@@ -123,7 +123,11 @@ describe('untrusted metadata', () => {
   });
 
   it('strips control characters and bidi overrides from titles', () => {
-    const item = normalized({ kind: 'issue', number: 9, title: 'a\u0000b‮cd' });
+    // Every one of the four written as an ESCAPE (Wave 5 correction round six,
+    // Low 6). \u0000 was escaped while the bidi override and the bell beside
+    // it were raw, so the fixture read as three characters in a source viewer
+    // and one of them re-ordered the line around it.
+    const item = normalized({ kind: 'issue', number: 9, title: 'a\u0000b\u202Ec\u0007d' });
     expect(item.title).toBe('a b c d');
   });
 });

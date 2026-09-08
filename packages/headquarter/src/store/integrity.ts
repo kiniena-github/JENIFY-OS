@@ -41,6 +41,8 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { HqDatabase } from './db.js';
 import {
+  HQ_SCHEMA_ENSURED_MARK,
+  isHqSchemaEnsuredMark,
   openHqDatabaseReadOnly,
   schemaEnsuredMarkBeforeMigration,
   tableNamesBeforeMigration,
@@ -283,8 +285,9 @@ export const ENGINE_IMMUTABLE_TABLES: readonly EngineImmutableTable[] = deepFree
    * `contradictedChainCommitment` for the half no ordering can close. (That
    * second reference read `evidenceChainCommitmentBreach` until the round-five
    * reconciliation retired the verdict-row commitment in favour of the
-   * checkpoint ledger; the symbol is gone, so the pointer is corrected here
-   * rather than left dangling.)
+   * checkpoint ledger; the symbol was gone package-wide — one reference, no
+   * definition — so the pointer is corrected here rather than left dangling.
+   * Both round-six lanes reached this independently.)
    *
    * Trio only: `id` is the sole secondary unique index and the `no_replace`
    * guard already covers it beside `seq`.
@@ -459,13 +462,24 @@ export function declaredGuardsFor(entry: EngineImmutableTable): string[] {
 /* ------------------------------------------------------------------ */
 
 /**
- * The CLOSED finding vocabulary. Six names, and nothing else may be reported —
- * a finding is what a safe-mode decision is taken on and what a count in the
+ * The CLOSED finding vocabulary. Seven names, and nothing else may be reported
+ * — a finding is what a safe-mode decision is taken on and what a count in the
  * unauthenticated artifact is keyed by, so it can never be a stored string.
+ *
+ * `append_only_ledger_truncated` was added by the Wave 5 correction round six
+ * (High 1 and High 2). It is deliberately NOT folded into
+ * `append_only_guard_missing`: in the attack it names, every declared guard is
+ * present and correct at the moment the census looks — the trigger was dropped,
+ * the rows were deleted and the trigger was put back — so reporting it under
+ * "a guard the schema declares is missing" would tell the Founder something
+ * that is not true of the file. What IS true is that the ledger holds fewer
+ * rows than the engine's own high-water mark says it reached. See
+ * `truncatedImmutableLedgers`.
  */
 export const HQ_INTEGRITY_FINDINGS = Object.freeze([
   'database_integrity_check_failed',
   'append_only_guard_missing',
+  'append_only_ledger_truncated',
   'evidence_chain_broken',
   'foreign_key_violations',
   'durability_below_requirement',
@@ -478,13 +492,19 @@ export function isHqIntegrityFinding(value: unknown): value is HqIntegrityFindin
 }
 
 /**
- * The three findings that mean HQ's own record cannot be trusted, and are
+ * The four findings that mean HQ's own record cannot be trusted, and are
  * therefore the ONLY ones that engage safe mode. Argued in the module header;
  * pinned by a test so widening or narrowing it is a deliberate, reviewed act.
+ *
+ * `append_only_ledger_truncated` blocks for exactly the reason the other three
+ * do: rows that HQ committed to having appended are no longer in the file. That
+ * is a statement about HQ's OWN stored record being false, not about the
+ * outside world — the test the module header applies.
  */
 export const SAFE_MODE_BLOCKING_FINDINGS: readonly HqIntegrityFinding[] = Object.freeze([
   'database_integrity_check_failed',
   'append_only_guard_missing',
+  'append_only_ledger_truncated',
   'evidence_chain_broken',
 ] as const);
 
@@ -584,8 +604,10 @@ export interface RecordedIntegrityVerdict {
  */
 export const SAFE_MODE_STATEMENT =
   'Safe mode is a statement about HQ’s OWN stored record, not about the outside world. It engages only when ' +
-  'the engine reports the file corrupt, an append-only guard the schema declares is missing, or the evidence ' +
-  'hash chain does not verify — which includes a chain that no longer reaches the tip HQ recorded for it. ' +
+  'the engine reports the file corrupt, an append-only guard the schema declares is missing, a declared ' +
+  'append-only ledger holds fewer rows than the engine’s own high-water mark says it reached, or the ' +
+  'evidence hash chain does not verify — which includes a chain that no longer reaches the tip HQ recorded ' +
+  'for it. ' +
   'While engaged HQ still READS, still reconciles, and still records what happened — a task requested, a ' +
   'backup verified, a kill switch engaged — because a store you cannot vouch for still needs those facts on ' +
   'the record. What it refuses are the acts that would APPROVE, RELEASE, EXECUTE against or grant AUTHORITY ' +
@@ -828,22 +850,11 @@ export function establishedImmutableTables(db: HqDatabase): string[] {
  * raises the generation adds the new value to `HQ_SCHEMA_ENSURED_MARKS` beside
  * the old one, which is a deliberate reviewed act rather than an arithmetic
  * comparison that would quietly accept a foreign stamp again.
- */
-const HQ_SCHEMA_ENSURED_MARK = 0x48510001;
-
-/**
- * Every `user_version` value that means "HQ ensured this file". A CLOSED set,
- * for the same reason the finding vocabulary is closed: a value HQ does not
- * recognize is somebody else's stamp, and reading somebody else's stamp as
- * HQ's own is how the false alarm above happened.
  *
- * The cost, stated: a file stamped by an EARLIER build of this wave carries
- * `user_version = 1`, which is not a member, so such a file reads as unmarked.
- * The ledger half of the discriminator still answers for it — an established
- * file carries ensure-created ledgers — and the first writable construction
- * re-stamps it with the value above.
+ * The constants themselves live in `store/db.ts`, because BOTH readings of the
+ * mark have to be ONE reading — see `HQ_SCHEMA_ENSURED_MARK` there (Wave 5
+ * correction round six, Low 7).
  */
-const HQ_SCHEMA_ENSURED_MARKS: readonly number[] = Object.freeze([HQ_SCHEMA_ENSURED_MARK]);
 
 /**
  * Whether a previous HQ construction has ENSURED this file's schema.
@@ -896,7 +907,7 @@ export function hqSchemaEnsuredMarkPresent(db: HqDatabase): boolean {
   try {
     const row = db.prepare(`PRAGMA user_version`).get() as Record<string, unknown> | undefined;
     const value = Number(Object.values(row ?? {})[0] ?? 0);
-    return Number.isInteger(value) && HQ_SCHEMA_ENSURED_MARKS.includes(value);
+    return isHqSchemaEnsuredMark(value);
   } catch {
     // A handle that cannot answer the pragma contributes no evidence either
     // way; the ledger reading still applies.
@@ -974,15 +985,40 @@ export function recordHqSchemaEnsured(db: HqDatabase): void {
  * finding at the boot that observes it (the table is declared in
  * `ENGINE_IMMUTABLE_TABLES`) and, once HQ has re-created it empty, a later
  * process has nothing left to contradict. **That is not the cheap way, and the
- * previous round's residual named it as if it were** (Wave 5 correction round
- * six, Medium 1): the drop costs a restart and a second Founder act, while
- * wiping the ROWS in place — drop the three triggers, `DELETE`, INSERT one
- * agreeing replacement, re-create the triggers — left the table present, the
- * census silent and the forgery accepted from the very next boot at zero
- * restarts and zero Founder acts. `elidedCommitmentLedgerRows` is what closes
- * the free version of that, and the honest price of the surviving version is
- * written there: one `UPDATE sqlite_sequence` and an explicit `seq` on the
- * replacement row, executed and still silent. That is a cost, not a boundary,
+ * previous round's residual named it as if it were** — both round-six lanes
+ * reproduced the cheaper act independently, and it is the same act: the witness
+ * did not have to be taken AWAY, its rows could be wiped IN PLACE. Drop the
+ * `no_erase` guard (or all three), `DELETE`, optionally INSERT one replacement
+ * that agrees with a forged log, re-create the guards. The table is present and
+ * its declared guards are complete at the moment the census looks, so the
+ * as-found census observes nothing; and both readers of the commitment —
+ * `regressedImmutableLedgers` and `contradictedChainCommitment` — read the very
+ * rows deleted, so they returned `[]` and `null`. Measured against the previous
+ * head: `BOOT safeMode = false []`, `FULL assessment safeMode = false []`,
+ * `releaseKillSwitch ADMITTED`, at zero restarts and zero Founder acts. The
+ * drop, by contrast, really does cost a restart and a second Founder act.
+ *
+ * TWO checks close the free version, and both are kept because they are not the
+ * same check. `elidedCommitmentLedgerRows` asserts THIS ledger's own identity —
+ * row count, greatest rowid and high-water mark are one number — which catches
+ * a wipe even when a replacement row restores the greatest rowid.
+ * `truncatedImmutableLedgers` asserts the weaker `MAX(rowid) >= high-water`
+ * relation over EVERY declared AUTOINCREMENT ledger, which is what closes the
+ * identical attack on `hq_reliability_run_events` and the other twenty-odd
+ * ledgers this module declares. Neither subsumes the other; both fire at both
+ * depths.
+ *
+ * The honest price of the SURVIVING version is written on
+ * `elidedCommitmentLedgerRows`, and the round-seven correction re-measured it
+ * there: the `sqlite_sequence` path this paragraph used to name — an explicit
+ * `seq` on the replacement row plus one `UPDATE sqlite_sequence` — is NOT the
+ * surviving one. Executed on a file carrying three genuine commitments it is
+ * CAUGHT, because collapsing three rows to one regresses this ledger's own
+ * recorded high-water mark (`boot=true assess=true release=safe_mode_engaged`);
+ * it was only ever measured on a single-commitment file, where the collapse is
+ * invisible. What survives is cheaper and touches `sqlite_sequence` not at all:
+ * keep the row COUNT and rewrite the rows IN PLACE, through the ONE
+ * `BEFORE UPDATE` guard of the three. That is still a cost and not a boundary,
  * and it is the same residual class as zeroing `PRAGMA user_version`: HQ holds
  * no key a foreign writer does not also have, and every fact this ledger rests
  * on lives in the same file the attacker is already writing.
@@ -1029,8 +1065,17 @@ export function ensureIntegrityCheckpoints(db: HqDatabase): void {
   db.exec(INTEGRITY_CHECKPOINT_DDL);
 }
 
-/** True when this file carries the checkpoint ledger. Observation, never migration. */
-export function integrityCheckpointLedgerPresent(db: HqDatabase): boolean {
+/**
+ * True when this file carries the checkpoint ledger. Observation, never
+ * migration.
+ *
+ * Module-private (Wave 5 correction round six, Low 2). It was exported with no
+ * consumer outside this module and no test of its own — dead public surface
+ * from the mechanism that replaced the retired one, and this module's own rule
+ * is that a second place to ask a question invites a second answer. The one
+ * caller is `recordIntegrityCheckpoint`, below.
+ */
+function integrityCheckpointLedgerPresent(db: HqDatabase): boolean {
   try {
     return (
       db
@@ -1063,13 +1108,30 @@ export function integrityCheckpointLedgerPresent(db: HqDatabase): boolean {
  * restored, and every process afterwards reported
  * `["append_only_guard_missing"]` at both depths for ever. A fabricated finding
  * is forbidden in the FALSE-ALARM direction exactly as it is in the
- * false-reassurance one, so the reading is CORROBORATED against the table
- * itself: the mark HQ commits is the smaller of the engine's high-water mark
- * and the ledger's own `MAX(rowid)`, which for a genuine append-only ledger
- * that has never been deleted from are the same number. An inflated
- * `sqlite_sequence` therefore commits nothing the rows do not support, and the
- * false alarm cannot be manufactured. `MAX(rowid)` is a single reverse seek on
- * the rowid B-tree, so this stays affordable at every construction.
+ * false-reassurance one, so the reading is taken FROM THE ROWS: the mark HQ
+ * commits is the ledger's own `MAX(rowid)`, and `sqlite_sequence` is used only
+ * as the gate for "has this ledger ever been appended to at all", which is the
+ * one thing it answers that the rows cannot (a DROP takes its row with it).
+ * For a genuine append-only ledger that has never been deleted from, the two
+ * are the same number. An inflated `sqlite_sequence` therefore commits nothing
+ * the rows do not support, and the false alarm cannot be manufactured.
+ * `MAX(rowid)` is a single reverse seek on the rowid B-tree, so this stays
+ * affordable at every construction.
+ *
+ * **The round-six MERGE moved this from `min(seq, MAX(rowid))` to `MAX(rowid)`,
+ * and the reason is a fabricated finding the `min` still allowed.** The other
+ * lane's `truncatedImmutableLedgers` makes an inflated mark a BLOCKING
+ * observation, so the boot that follows the inflation appends its safe-mode
+ * verdict row — and SQLite gives that row the inflated rowid. `min` then
+ * committed the inflated value after all, and restoring `sqlite_sequence`
+ * produced exactly the permanent finding true of nothing that this correction
+ * exists to prevent; executed during the merge, and it is why the two lanes'
+ * fixes had to be composed rather than laid side by side. Reading `MAX(rowid)`
+ * alone is strictly stronger in both directions: it commits a fact about rows
+ * that are really there, it cannot be moved by any write to `sqlite_sequence`
+ * in EITHER direction, and every detection the `min` gave is unchanged — a
+ * dropped ledger loses its `sqlite_sequence` row and contributes no mark, and
+ * rows deleted in place lower `MAX(rowid)` directly.
  *
  * The corroboration also STRENGTHENS the detector in the direction that
  * matters: because the mark now tracks `MAX(rowid)`, rows deleted IN PLACE from
@@ -1102,8 +1164,7 @@ export function immutableLedgerMarks(db: HqDatabase): Record<string, number> {
       // The corroboration. A table named in `sqlite_sequence` that is no longer
       // there at all throws here, and the answer is the same as "nothing to
       // commit": its ABSENCE is the census's finding, not this one's.
-      const supported = ledgerTopRowid(db, name);
-      const mark = Math.min(value, supported);
+      const mark = ledgerTopRowid(db, name);
       if (mark > 0) marks[name] = mark;
     }
   } catch {
@@ -1419,6 +1480,20 @@ export function regressedImmutableLedgers(db: HqDatabase): string[] {
  * both break `structuralIntegrity`'s stated cost (a `COUNT(*)` is O(rows),
  * unlike the `MAX(rowid)` seek) and assert an invariant over tables this module
  * does not own.
+ *
+ * **Why this ledger has its own check as well as the general one** (round-six
+ * merge; the paragraph is stated here, on the check it is about, rather than on
+ * `truncatedImmutableLedgers`, where "below" pointed at the function carrying
+ * it and "this ledger" named the other one). `truncatedImmutableLedgers` below
+ * asserts `MAX(rowid) >= high-water` over EVERY declared AUTOINCREMENT ledger;
+ * the identity asserted here is strictly stronger for this one table, because it
+ * also counts the rows. A wipe that INSERTS a replacement carrying the old
+ * greatest rowid satisfies the general relation and fails this one. Neither
+ * check subsumes the other, so both stand: the general rule is what closes the
+ * identical attack on `hq_reliability_run_events` and every other declared
+ * ledger, and this one is what closes the replacement-row variant on the
+ * commitment ledger itself. Neither closes the in-place REWRITE priced above,
+ * which changes no count and no rowid.
  */
 export function elidedCommitmentLedgerRows(db: HqDatabase): boolean {
   try {
@@ -1444,6 +1519,105 @@ export function elidedCommitmentLedgerRows(db: HqDatabase): boolean {
     // second one here would report the same fact twice.
     return false;
   }
+}
+
+/**
+ * The declared append-only ledgers whose ROWS have been removed while the
+ * engine's own high-water mark still records that they were there.
+ *
+ * **This is the general form of the one check that already worked** (Wave 5
+ * correction round six, High 1 and High 2). `verifyEvidenceChain` has always
+ * ended its walk by comparing `op_evidence`'s last surviving seq against
+ * `sqlite_sequence.op_evidence`, and that single comparison is why tail
+ * truncation of the audit log is caught. Nothing generalised it, and the
+ * consequence was that EVERY other declared ledger could be emptied in three
+ * statements with no finding at any depth:
+ *
+ * ```sql
+ * DROP TRIGGER trg_<ledger>_no_erase;
+ * DELETE FROM <ledger>;
+ * CREATE TRIGGER trg_<ledger>_no_erase BEFORE DELETE ON <ledger>
+ *   BEGIN SELECT RAISE(ABORT, '<ledger> is append-only'); END;
+ * ```
+ *
+ * A trigger dropped and re-created before the next boot is never observed
+ * missing — the as-found census reads `sqlite_master` at construction time
+ * only — so the guard stands again, the table is present, its own guards are
+ * complete, and the rows are simply gone. Executed against the previous head,
+ * twice:
+ *
+ *  - on `hq_integrity_checkpoints`, which round five made the SOLE external
+ *    witness for the evidence chain. Both readers of that witness read the very
+ *    rows deleted: `regressedImmutableLedgers` returns `[]` on an empty
+ *    commitment set and `contradictedChainCommitment` returns `null` with no
+ *    rows to join against. Boot clean, full Founder assessment clean,
+ *    `releaseKillSwitch` handed back over an `op_evidence` rebuilt two
+ *    committed entries short;
+ *  - on `hq_reliability_run_events`, which carries the cross-process
+ *    duplicate-attempt reservation this module calls the single most
+ *    load-bearing secondary guard in the schema. Emptying it returned a
+ *    correctly-refused second attempt to generation 1 and ADMITTED it, with
+ *    boot and full assessment both clean — making `RUN_RETRY_STATEMENT`'s
+ *    "an interrupted attempt is NEVER retried automatically" false.
+ *
+ * `sqlite_sequence` is the right witness for the same reason
+ * `verifyEvidenceChain` uses it: a DELETE never lowers it, `VACUUM` and
+ * `VACUUM INTO` carry it across, and a byte copy or `.backup()` copies it. It
+ * is read against `MAX(rowid)` rather than against a named column because every
+ * declared ledger's AUTOINCREMENT key is `INTEGER PRIMARY KEY`, which IS the
+ * rowid — so one query shape covers all of them and no per-table column list
+ * can drift out of date.
+ *
+ * **What this does not close, stated rather than glossed.** `sqlite_sequence`
+ * is an internal SQLite table: it carries no triggers, `tableNames` excludes it
+ * by construction, and a writer that already holds the file open can lower the
+ * mark it finds there. Emptying a ledger AND rewriting its `sqlite_sequence`
+ * row down to match is still silent here — that is the same residual class as
+ * zeroing `PRAGMA user_version`, and it is recorded in the phase document's
+ * residual list. A ledger that is not `AUTOINCREMENT` has no `sqlite_sequence`
+ * row at all and therefore contributes nothing here; that is fail-open for such
+ * a table and is stated rather than covered by a mark that would always read
+ * zero. What changed is that emptying a ledger is no longer FREE.
+ */
+export function truncatedImmutableLedgers(db: HqDatabase): string[] {
+  const declared = new Set(ENGINE_IMMUTABLE_TABLES.map((entry) => entry.table));
+  let marks: { name: string; seq: number }[];
+  try {
+    marks = (
+      db.prepare(`SELECT name, seq FROM sqlite_sequence`).all() as {
+        name: unknown;
+        seq: unknown;
+      }[]
+    )
+      .map((row) => ({ name: String(row.name), seq: Number(row.seq) }))
+      .filter((row) => declared.has(row.name) && Number.isInteger(row.seq) && row.seq > 0);
+  } catch {
+    // No `sqlite_sequence` in this file at all: nothing has ever been appended
+    // to an AUTOINCREMENT ledger, so there is no mark to contradict.
+    return [];
+  }
+  const truncated: string[] = [];
+  for (const mark of marks) {
+    let highest: number;
+    try {
+      // `MAX(rowid)` is a single b-tree seek, not a scan, so this stays
+      // affordable at the CHEAP depth — the same cost `verifyEvidenceChain`
+      // has always paid for `op_evidence` alone.
+      const row = db.prepare(`SELECT MAX(rowid) AS top FROM "${mark.name}"`).get() as
+        | { top: unknown }
+        | undefined;
+      const value = Number(row?.top ?? 0);
+      highest = Number.isInteger(value) && value > 0 ? value : 0;
+    } catch {
+      // A mark naming a table this file does not carry. A DROP takes the
+      // `sqlite_sequence` row with it, so this is a forged row rather than a
+      // dropped ledger, and the absence of a DECLARED ledger is the census's
+      // finding rather than this one's.
+      continue;
+    }
+    if (highest < mark.seq) truncated.push(mark.name);
+  }
+  return truncated.sort();
 }
 
 /** What the schema-immutability census saw BEFORE this process ensured anything. */
@@ -1730,6 +1904,29 @@ export function structuralIntegrity(
         `${elisionDetail} ` +
         `This is a fact about the file as it now stands, not an observation about the boot that saw the ` +
         `drop, so it does not go away with a restart and no assessment clears it while it is true.`,
+    });
+  }
+
+  // The ENGINE's own witness that a declared ledger has been emptied (Wave 5
+  // correction round six, High 1 and High 2). This is the general form of the
+  // comparison `verifyEvidenceChain` has always made for `op_evidence` alone,
+  // and it is what stops "drop the guard, DELETE, put the guard back" from
+  // being free on every OTHER declared ledger — including the checkpoint ledger
+  // that both commitment readers above depend on, and including the run-event
+  // ledger that reserves an attempt generation. A fact about the file as it now
+  // stands, so no restart clears it and no assessment clears it while it holds.
+  const truncated = truncatedImmutableLedgers(db);
+  if (truncated.length > 0) {
+    observations.push({
+      finding: 'append_only_ledger_truncated',
+      blocking: true,
+      detail:
+        `${truncated.length} declared append-only ledger(s) hold FEWER rows than the engine's own ` +
+        `AUTOINCREMENT high-water mark records they reached: ${truncated.join(', ')}. A DELETE never ` +
+        `lowers that mark and the declared guards refuse a DELETE at all, so rows that HQ appended have ` +
+        `been removed — a guard dropped and re-created before this boot stands again now, and the census ` +
+        `that reads the schema catalogue cannot see that it was ever gone. Re-creating a guard does not ` +
+        `bring back what the ledger held.`,
     });
   }
 
@@ -2055,6 +2252,23 @@ export const BACKUP_REFUSAL_REASONS = Object.freeze([
    * verification never saw. Checkpoint or `.backup` the database first.
    */
   'sidecar_journal_present',
+  /**
+   * The candidate IS the database this HQ is running on.
+   *
+   * `sidecar_journal_present` refuses the live file WHILE a process holds it
+   * open, because WAL mode leaves a `-wal` beside it — and that was presented as
+   * covering the live database. It does not: SQLite removes the sidecars on a
+   * clean close, so `verifyHqBackupFile(<the live db path>)` between runs
+   * returned `verified: true, refusals: [], tables: 47`, and a Founder could
+   * register the live database as a "verified recovery point" (Wave 5 correction
+   * round six, Low 3). The bytes really were those bytes, so nothing false was
+   * recorded — but a recovery point that the next write mutates is not one, and
+   * the register exists to say which files a restore could be taken from.
+   *
+   * Answered from the LIVE HANDLE's own path rather than from the candidate's
+   * shape, because that is the only thing that actually distinguishes them.
+   */
+  'candidate_is_the_live_database',
   'verification_copy_failed',
   'not_a_readable_sqlite_database',
   'integrity_check_failed',
@@ -2222,7 +2436,18 @@ function digestFile(
  * over one descriptor. The race is closed by construction rather than detected
  * afterwards.
  */
-export function verifyHqBackupFile(candidate: string): BackupVerification {
+export function verifyHqBackupFile(
+  candidate: string,
+  options: {
+    /**
+     * The path of the database THIS process is running on, when the caller
+     * knows it. `recordVerifiedBackup` always passes it; a caller merely asking
+     * "are these bytes a sound HQ database" has no live handle to name and
+     * omits it. See `candidate_is_the_live_database`.
+     */
+    liveDatabasePath?: string | null;
+  } = {},
+): BackupVerification {
   const empty: BackupVerification = {
     verified: false,
     refusals: [],
@@ -2262,6 +2487,23 @@ export function verifyHqBackupFile(candidate: string): BackupVerification {
     resolved = fs.realpathSync(target);
   } catch {
     return { ...empty, refusals: ['path_missing'] };
+  }
+
+  // The LIVE database, refused on identity rather than on shape. Resolved on
+  // both sides, so an alias, a symlinked ancestor or a differently-spelled
+  // absolute path names the same file here (Wave 5 correction round six, Low 3).
+  if (typeof options.liveDatabasePath === 'string' && options.liveDatabasePath !== '') {
+    let live: string | null = null;
+    try {
+      live = fs.realpathSync(options.liveDatabasePath);
+    } catch {
+      // An in-memory handle, or a path this process can no longer resolve:
+      // there is no live FILE to collide with, so this check contributes
+      // nothing rather than refusing on a failed lookup.
+    }
+    if (live !== null && live === resolved) {
+      return { ...empty, refusals: ['candidate_is_the_live_database'], resolvedPath: resolved };
+    }
   }
 
   // BEFORE anything else, and beside the RESOLVED path, which is where SQLite

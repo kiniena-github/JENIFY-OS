@@ -23,6 +23,7 @@ import {
 import {
   ENGINE_IMMUTABLE_TABLES,
   HQ_DURABILITY_REQUIREMENT,
+  HQ_INTEGRITY_CHECKPOINT_TABLE,
   HQ_INTEGRITY_FINDINGS,
   REQUIRED_IMMUTABILITY_GUARDS,
   SAFE_MODE_BLOCKING_FINDINGS,
@@ -34,7 +35,9 @@ import {
   missingImmutabilityGuards,
   observeImmutabilityAsFound,
   readDurabilityPosture,
+  regressedImmutableLedgers,
   structuralIntegrity,
+  truncatedImmutableLedgers,
   verifyHqBackupFile,
 } from '../src/store/integrity.js';
 import { verifyEvidenceChain } from '../src/operator/evidence.js';
@@ -769,9 +772,14 @@ describe('the unauthenticated snapshot never publishes optimism HQ does not hold
 
 describe('the finding vocabulary and what blocks', () => {
   it('is closed, and blocking is the short argued list', () => {
+    // `append_only_ledger_truncated` was added by the Wave 5 correction round
+    // six: rows HQ appended are no longer in the file, which is a statement
+    // about HQ's own record being false — the module header's test for what
+    // blocks.
     expect([...SAFE_MODE_BLOCKING_FINDINGS]).toEqual([
       'database_integrity_check_failed',
       'append_only_guard_missing',
+      'append_only_ledger_truncated',
       'evidence_chain_broken',
     ]);
     for (const finding of HQ_INTEGRITY_FINDINGS) {
@@ -948,6 +956,17 @@ describe('the finding vocabulary and what blocks', () => {
       // establishment on the pre-migration ledger catalogue, which this attack
       // empties. Composed — the mark read AS OF THE MIGRATION — the audit log
       // HQ destroyed is named alongside everything else it destroyed.
+      //
+      // Asserted on the OBSERVATION, not on the detail string (Wave 5
+      // correction round six, Medium 2). The prose assertion it replaces was
+      // VACUOUS: the same detail already lists the missing GUARDS
+      // `trg_op_evidence_no_erase/_no_replace/_no_rewrite`, so
+      // `toContain('op_evidence')` matched whether or not the ledger itself was
+      // named — deleting `|| schemaEnsuredMarkBeforeMigration(db) === true`
+      // from `migrationRestoredImmutableTables`, which is the whole
+      // reconciliation this comment describes, passed the full suite.
+      // `tablesAbsent` is the list that reconciliation actually produces.
+      expect(observeImmutabilityAsFound(reopened).tablesAbsent).toContain('op_evidence');
       expect(finding!.detail).toContain('op_evidence');
       // And the act safe mode exists to refuse is refused.
       const released = ops.releaseKillSwitch('global', 'founder');
@@ -1600,6 +1619,415 @@ describe('backup verification, against real bytes on disk', () => {
       restored.close();
     } finally {
       fx.cleanup();
+    }
+  });
+});
+
+/**
+ * Wave 5 correction round six, High 1 and High 2 — the ledger that could be
+ * EMPTIED for free, and the two guarantees that fell with it.
+ *
+ * Round five retired one of two chain commitments to satisfy "one canonical
+ * truth per domain", leaving `hq_integrity_checkpoints` as the only external
+ * witness to what the evidence log used to be. That ledger is protected by
+ * triggers, and `operator/evidence.ts` ALREADY documented the fact that
+ * defeats them: a trigger dropped and re-created before the next boot is never
+ * observed missing, because the as-found census reads `sqlite_master` at
+ * construction time only. Three statements — drop the guard, DELETE, put the
+ * guard back — therefore emptied the witness and produced no finding at any
+ * depth, because both readers of the witness read the very rows deleted.
+ *
+ * The same three statements made `RUN_RETRY_STATEMENT` false on
+ * `hq_reliability_run_events`, whose rows are what reserve an attempt
+ * generation across processes.
+ *
+ * What closes both is the general form of the check `verifyEvidenceChain` has
+ * always made for `op_evidence` alone: `MAX(rowid)` against the engine's own
+ * `sqlite_sequence` high-water mark, which a DELETE cannot lower.
+ */
+describe('emptying a declared append-only ledger is a finding, however the guard is restored', () => {
+  /** Drop the named ledger's `no_erase` guard, empty it, and put the guard back. */
+  function eraseLedger(dbPath: string, table: string, guard = `trg_${table}_no_erase`): void {
+    const raw = new Database(dbPath);
+    const sql = (
+      raw
+        .prepare(`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?`)
+        .get(guard) as { sql: string } | undefined
+    )?.sql;
+    expect(sql, guard).toBeTruthy();
+    raw.exec(`DROP TRIGGER ${guard}`);
+    raw.exec(`DELETE FROM ${table}`);
+    raw.exec(sql!);
+    // The guard really is back, so the census that reads the catalogue sees a
+    // healthy table — which is the whole reason this attack was silent.
+    expect(
+      raw.prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = ?`).get(guard),
+    ).toBeDefined();
+    // And the engine's mark still records rows that are no longer there.
+    const mark = raw.prepare(`SELECT seq FROM sqlite_sequence WHERE name = ?`).get(table) as
+      | { seq: number }
+      | undefined;
+    expect(mark!.seq).toBeGreaterThan(0);
+    expect((raw.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n).toBe(0);
+    raw.close();
+  }
+
+  it('reports an emptied hq_integrity_checkpoints at BOTH depths, and refuses the release', () => {
+    const fx = fileFixture();
+    const dbPath = fx.dbPath;
+    try {
+      const run = openedRun(fx, 'work before the erasure');
+      expectOk(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }));
+      fx.db.close();
+      // One warm boot, so HQ has actually committed a checkpoint to erase.
+      const warm = openHqDatabase(dbPath);
+      new HeadquarterOperations(warm);
+      expect(
+        (
+          warm
+            .prepare(`SELECT COUNT(*) AS n FROM ${HQ_INTEGRITY_CHECKPOINT_TABLE}`)
+            .get() as { n: number }
+        ).n,
+      ).toBeGreaterThan(0);
+      warm.close();
+
+      eraseLedger(dbPath, HQ_INTEGRITY_CHECKPOINT_TABLE);
+
+      const reopened = openHqDatabase(dbPath);
+      const ops = new HeadquarterOperations(reopened);
+      // The CHEAP depth, at the boot that opens the file.
+      const boot = ops.hqReliabilityPosture().integrity;
+      expect(boot.safeMode).toBe(true);
+      const truncation = boot.observations.find(
+        (observation) => observation.finding === 'append_only_ledger_truncated',
+      );
+      expect(truncation).toBeDefined();
+      expect(truncation!.blocking).toBe(true);
+      expect(truncation!.detail).toContain(HQ_INTEGRITY_CHECKPOINT_TABLE);
+      // And the Founder's FULL assessment, which is the one path that clears a
+      // latch, does not clear this one.
+      const assessed = expectOk(ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(assessed.safeMode).toBe(true);
+      expect(assessed.observations.map((observation) => observation.finding)).toContain(
+        'append_only_ledger_truncated',
+      );
+      // The act safe mode exists to refuse is refused.
+      expect(ops.releaseKillSwitch('global', 'founder').ok).toBe(false);
+      reopened.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  it('keeps a spent attempt generation spent — an emptied run-event ledger is a finding, not a reset', () => {
+    const fx = fileFixture();
+    const dbPath = fx.dbPath;
+    try {
+      const run = openedRun(fx, 'the one attempt');
+      expectOk(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }));
+      // The guard `ENGINE_IMMUTABLE_TABLES` calls the single most load-bearing
+      // secondary guard in the schema, doing its job.
+      const duplicate = fx.ops.startRunAttempt({
+        runId: run.id,
+        workerId: 'claude',
+        fence: fx.claim.fence,
+      });
+      expect(duplicate.ok).toBe(false);
+      fx.db.close();
+
+      eraseLedger(dbPath, 'hq_reliability_run_events');
+
+      const reopened = openHqDatabase(dbPath);
+      const ops = new HeadquarterOperations(reopened, {
+        policyCtx: { preApprovedCapabilities: new Set<string>([CAPS.openPr]) },
+      });
+      const boot = ops.hqReliabilityPosture().integrity;
+      expect(boot.safeMode).toBe(true);
+      expect(boot.observations.map((observation) => observation.finding)).toContain(
+        'append_only_ledger_truncated',
+      );
+      // The attempt is NOT re-admitted. `RUN_RETRY_STATEMENT` says an
+      // interrupted attempt is never retried automatically and that only a
+      // human reconciliation opens a further generation; emptying the ledger
+      // used to open one silently.
+      const readmitted = ops.startRunAttempt({
+        runId: run.id,
+        workerId: 'claude',
+        fence: fx.claim.fence,
+      });
+      expect(readmitted.ok).toBe(false);
+      reopened.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * The other direction, so the fix can never be re-implemented as "any table
+   * with fewer rows than its mark is a finding, and a fresh file has none".
+   */
+  it('says nothing about a healthy file, an untouched restart or a byte copy', async () => {
+    const fx = fileFixture();
+    try {
+      const run = openedRun(fx, 'ordinary work');
+      expectOk(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }));
+      expect(truncatedImmutableLedgers(fx.db)).toEqual([]);
+      const copyPath = path.join(fx.dir, 'copy.sqlite');
+      await fx.db.backup(copyPath);
+      fx.db.close();
+      const reopened = openHqDatabase(fx.dbPath);
+      expect(truncatedImmutableLedgers(reopened)).toEqual([]);
+      expect(new HeadquarterOperations(reopened).hqReliabilityPosture().integrity.safeMode).toBe(
+        false,
+      );
+      reopened.close();
+      // `.backup()` carries `sqlite_sequence` across, so the copy is not a
+      // truncation either.
+      const copied = openHqDatabase(copyPath);
+      expect(truncatedImmutableLedgers(copied)).toEqual([]);
+      copied.close();
+      // A brand-new file has no marks at all.
+      const freshDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-truncation-fresh-'));
+      try {
+        const fresh = openHqDatabase(path.join(freshDir, 'hq.sqlite'));
+        expect(truncatedImmutableLedgers(fresh)).toEqual([]);
+        fresh.close();
+      } finally {
+        fs.rmSync(freshDir, { recursive: true, force: true });
+      }
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+/**
+ * Wave 5 correction round six, Medium 1 — `regressedImmutableLedgers` shipped
+ * load-bearing and covered by NO test.
+ *
+ * Its only two assertions were `expect(regressedImmutableLedgers(raw)).toEqual([])`
+ * on healthy files, which can only pass; mutating the function body to
+ * `const regressed: string[] = []` passed the FULL suite. This is the attack it
+ * exists for, and it is deliberately one the round-six truncation check CANNOT
+ * see: a DROPPED table takes its `sqlite_sequence` row with it, so there is no
+ * mark left to contradict — only HQ's own committed checkpoint remains.
+ */
+describe('a ledger HQ had to re-create EMPTY stays reported across restarts', () => {
+  it('names it after two further boots, when no process still remembers the drop', () => {
+    const fx = fileFixture();
+    const dbPath = fx.dbPath;
+    try {
+      const run = openedRun(fx, 'work whose record is about to be destroyed');
+      expectOk(fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: fx.claim.fence }));
+      fx.db.close();
+      const warm = openHqDatabase(dbPath);
+      new HeadquarterOperations(warm);
+      warm.close();
+
+      const raw = new Database(dbPath);
+      raw.exec('PRAGMA foreign_keys = OFF');
+      raw.exec('DROP TABLE hq_reliability_run_events');
+      // The DROP took the high-water mark with it, so the truncation check has
+      // nothing to read — this really is the checkpoint's half of the census.
+      expect(
+        raw
+          .prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'hq_reliability_run_events'`)
+          .get(),
+      ).toBeUndefined();
+      raw.close();
+
+      // First boot: HQ re-creates the ledger EMPTY. That boot's own as-found
+      // observation would report it, so the test does not stop here.
+      const first = openHqDatabase(dbPath);
+      new HeadquarterOperations(first);
+      first.close();
+      // Second boot: no process remembers the drop, the table is present, its
+      // guards are complete, and the only witness left is what HQ committed.
+      const second = openHqDatabase(dbPath);
+      expect(observeImmutabilityAsFound(second).tablesAbsent).toEqual([]);
+      expect(missingImmutabilityGuards(second)).toEqual([]);
+      expect(truncatedImmutableLedgers(second)).toEqual([]);
+      expect(regressedImmutableLedgers(second)).toContain('hq_reliability_run_events');
+      const ops = new HeadquarterOperations(second);
+      const boot = ops.hqReliabilityPosture().integrity;
+      expect(boot.safeMode).toBe(true);
+      const finding = boot.observations.find((o) => o.finding === 'append_only_guard_missing');
+      expect(finding).toBeDefined();
+      expect(finding!.detail).toContain('hq_reliability_run_events');
+      // And no assessment clears it while it is true.
+      const assessed = expectOk(ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      expect(assessed.safeMode).toBe(true);
+      expect(ops.releaseKillSwitch('global', 'founder').ok).toBe(false);
+      second.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+/**
+ * Wave 5 correction round six, Medium 3 — "a missing verifier is treated
+ * exactly like one that threw" was a claim with no test behind it.
+ *
+ * The behaviour was NOT broken and the review's proposed mutation does not
+ * break it — measured, not assumed. Replacing the ternary
+ * `typeof options.verifyEvidenceChain === 'function' ? null : 'error'` with a
+ * plain `null` leaves the guarantee standing, because the `try` below then
+ * calls `undefined()`, throws, and the `catch` sets `'error'` anyway. What was
+ * genuinely missing was any test at all: the claim "a missing verifier is
+ * treated exactly like one that threw" was pinned by nothing, so the Wave 5
+ * Medium-5 defect — an absent BLOCKING check indistinguishable from a passed
+ * one, on public package API a JS caller reaches with no arguments — could
+ * return without a failure anywhere. Verified to bite: making the `catch` set
+ * `null` instead of `'error'` fails this test.
+ */
+describe('an absent evidence-chain verifier is not a passed one', () => {
+  it('reports evidence_chain_broken and chainVerified=false when fullIntegrity is called with no verifier', async () => {
+    // TypeScript makes the verifier a REQUIRED option; JavaScript does not, and
+    // `fullIntegrity` is public package API through `@factoryos/headquarter/store`.
+    // The JS caller is modelled by taking the export through the module
+    // namespace, which is exactly how such a consumer reaches it — the defect
+    // is the runtime behaviour, so the runtime behaviour is what is pinned.
+    const namespace: Record<string, unknown> = await import('../src/store/integrity.js');
+    const asJsCaller = namespace.fullIntegrity as (
+      db: typeof fx.db,
+      options?: Record<string, unknown>,
+    ) => ReturnType<typeof fullIntegrity>;
+    const fx = fileFixture();
+    try {
+      // The chain is genuinely intact: `verifyEvidenceChain` returns null here.
+      expect(verifyEvidenceChain(fx.db)).toBeNull();
+      const supplied = fullIntegrity(fx.db, {
+        verifyEvidenceChain: () => verifyEvidenceChain(fx.db),
+      });
+      expect(supplied.safeMode).toBe(false);
+      expect(supplied.chainVerified).toBe(true);
+
+      // The SAME database, assessed with no verifier at all.
+      const absent = asJsCaller(fx.db, {});
+      // With NO options argument at all the call THROWS — `options` carries no
+      // default, unlike `structuralIntegrity`'s. That is also not a silent
+      // pass, and it is asserted so the two shapes of "no verifier" are both on
+      // the record rather than one being assumed from the other.
+      expect(() => asJsCaller(fx.db)).toThrow(TypeError);
+      expect(absent.depth).toBe('full');
+      expect(absent.chainVerified).toBe(false);
+      expect(absent.safeMode).toBe(true);
+      const finding = absent.observations.find((o) => o.finding === 'evidence_chain_broken');
+      expect(finding).toBeDefined();
+      expect(finding!.blocking).toBe(true);
+      // A verifier that THREW reaches exactly the same verdict — that is the
+      // claim, so both halves are asserted rather than one.
+      const threw = fullIntegrity(fx.db, {
+        verifyEvidenceChain: () => {
+          throw new Error('the check could not run');
+        },
+      });
+      expect(threw.chainVerified).toBe(false);
+      expect(threw.safeMode).toBe(true);
+      expect(threw.observations.map((o) => o.finding)).toEqual(
+        absent.observations.map((o) => o.finding),
+      );
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+/**
+ * Wave 5 correction round six, Low 3 and Low 7 — two facts that were nearly
+ * true, stated and closed.
+ */
+describe('the two nearly-true facts about a file HQ has been in', () => {
+  /**
+   * Low 3. `sidecar_journal_present` refuses the LIVE database only while a
+   * process holds it open: SQLite removes `-wal`/`-shm` on a clean close, so
+   * between runs `verifyHqBackupFile(<the live db path>)` answered
+   * `verified: true, refusals: []` and a Founder could register the database HQ
+   * runs on as a verified recovery point.
+   */
+  it('refuses the live database as a recovery point, open or closed', async () => {
+    const fx = fileFixture();
+    const dbPath = fx.dbPath;
+    try {
+      // While HQ holds it open, the sidecar refusal answers.
+      expect(verifyHqBackupFile(dbPath).refusals).toEqual(['sidecar_journal_present']);
+      // A genuine backup is still accepted, and is a DIFFERENT file.
+      const backupPath = path.join(fx.dir, 'genuine.sqlite');
+      await fx.db.backup(backupPath);
+      expect(verifyHqBackupFile(backupPath).verified).toBe(true);
+      expectOk(fx.ops.recordVerifiedBackup({ backupPath, requestedBy: 'founder' }));
+
+      // The live path is refused through the facade even while it is open,
+      // because the facade names the live handle rather than relying on shape.
+      const openRefusal = fx.ops.recordVerifiedBackup({ backupPath: dbPath, requestedBy: 'founder' });
+      expect(openRefusal.ok).toBe(false);
+      expect(!openRefusal.ok && openRefusal.error.code).toBe('backup_verification_failed');
+
+      fx.db.close();
+      // Closed: no sidecars remain, and the bare verification really does pass.
+      // That is the fact the previous wording denied, so it is asserted rather
+      // than glossed.
+      expect(verifyHqBackupFile(dbPath).verified).toBe(true);
+      // With the live handle named, it is refused — and through an alias for
+      // the same file, because both sides are resolved.
+      const reopened = openHqDatabase(dbPath);
+      const ops = new HeadquarterOperations(reopened);
+      expect(verifyHqBackupFile(dbPath, { liveDatabasePath: dbPath }).refusals).toEqual([
+        'candidate_is_the_live_database',
+      ]);
+      const aliased = path.join(fx.dir, '.', path.basename(dbPath));
+      expect(
+        verifyHqBackupFile(path.normalize(aliased), { liveDatabasePath: dbPath }).refusals,
+      ).toEqual(['candidate_is_the_live_database']);
+      const refused = ops.recordVerifiedBackup({ backupPath: dbPath, requestedBy: 'founder' });
+      expect(refused.ok).toBe(false);
+      expect(!refused.ok && refused.error.code).toBe('backup_verification_failed');
+      expect(!refused.ok && (refused.error.details as { refusals: string[] }).refusals).toEqual([
+        'candidate_is_the_live_database',
+      ]);
+      reopened.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * Low 7. `migrateHqDatabase` recorded the pre-migration mark as ANY non-zero
+   * `user_version` while `hqSchemaEnsuredMarkPresent` read a CLOSED set, so a
+   * foreign application's `user_version = 7` made the two readings of "HQ has
+   * been here" DISAGREE. The outer `established` gate absorbed it, so it was
+   * not exploitable at that head — which is precisely why it needed closing
+   * before a refactor made it so.
+   */
+  it('reads a FOREIGN user_version as somebody else’s stamp in BOTH readings', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-foreign-mark-'));
+    try {
+      const dbPath = path.join(dir, 'foreign.sqlite');
+      const foreign = new Database(dbPath);
+      foreign.exec(`PRAGMA user_version = 7`);
+      foreign.exec(`CREATE TABLE somebody_elses_table (id TEXT PRIMARY KEY)`);
+      foreign.close();
+
+      const db = openHqDatabase(dbPath);
+      // Both readings agree, and both say "not HQ's mark".
+      expect(schemaEnsuredMarkBeforeMigration(db)).toBe(false);
+      expect(hqSchemaEnsuredMarkPresent(db)).toBe(false);
+      // And a first construction over it is still silent, which is the
+      // behaviour the closed set was introduced to protect.
+      const ops = new HeadquarterOperations(db);
+      expect(ops.hqReliabilityPosture().integrity.safeMode).toBe(false);
+      expect(ops.hqReliabilityPosture().integrity.observations).toEqual([]);
+      // HQ has now stamped its OWN mark, so both readings flip together on the
+      // next open.
+      expect(hqSchemaEnsuredMarkPresent(db)).toBe(true);
+      db.close();
+      const second = openHqDatabase(dbPath);
+      expect(schemaEnsuredMarkBeforeMigration(second)).toBe(true);
+      expect(hqSchemaEnsuredMarkPresent(second)).toBe(true);
+      second.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });

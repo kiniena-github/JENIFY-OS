@@ -20,6 +20,7 @@
  */
 
 import type { WorkerRole } from '../../contracts/workers.js';
+import { deepFreeze } from '../../contracts/freeze.js';
 
 /** What a zone is FOR. Drives its furniture, not its liveness. */
 export type ZoneKind =
@@ -33,7 +34,7 @@ export type ZoneKind =
   | 'meeting';
 
 /** A piece of furniture an occupant or an artefact can be placed at. */
-export const STATION_KINDS = [
+export const STATION_KINDS = deepFreeze([
   'console', // mission-control console — screens, no seat
   'desk', // a working desk with a monitor
   'review_bay', // an isolated review booth
@@ -42,7 +43,7 @@ export const STATION_KINDS = [
   'uplink', // a service uplink pillar
   'stack', // an archive evidence stack
   'table', // the situation-room table
-] as const;
+] as const);
 
 /**
  * Enumerable at run time, not only in the type system, so tests can assert
@@ -96,7 +97,7 @@ const ZONE_GUTTER = 1.4;
  * station in the plan renders inside its own room — the invariant my earlier
  * check missed by testing the anchor rather than the extent.
  */
-export const STATION_FOOTPRINT: Record<string, { west: number; east: number; north: number; south: number }> = {
+export const STATION_FOOTPRINT: Record<string, { west: number; east: number; north: number; south: number }> = deepFreeze({
   // north is toward y=0; a north-facing figure stands 0.62 in front of the desk.
   desk: { west: 0, east: 0.72, north: 0.62, south: 0.72 },
   review_bay: { west: 0.06, east: 1.35, north: 0, south: 0.9 },
@@ -106,7 +107,7 @@ export const STATION_FOOTPRINT: Record<string, { west: number; east: number; nor
   uplink: { west: 0, east: 0.7, north: 0, south: 0.7 },
   stack: { west: 0, east: 0.8, north: 0, south: 1.0 },
   table: { west: 0.6, east: 1.8, north: 0, south: 1.4 },
-};
+});
 
 function origin(column: number, row: number): { x: number; y: number } {
   return { x: column * (ZONE_SPAN + ZONE_GUTTER), y: row * (ZONE_SPAN + ZONE_GUTTER) };
@@ -145,7 +146,7 @@ function row(zoneId: string, kind: StationKind, count: number, atY: number, faci
  * read is not a headquarters. Eight zones on a 3x3 plan with one open plaza
  * corner keeps every room reachable within one screen-height of panning.
  */
-export const HQ_FLOOR: readonly Zone[] = [
+export const HQ_FLOOR: readonly Zone[] = deepFreeze([
   {
     id: 'command-deck',
     name: 'Command Deck',
@@ -250,9 +251,9 @@ export const HQ_FLOOR: readonly Zone[] = [
       (station, index) => ({ ...station, id: `uplink-gallery-uplink-${index + 1}` }),
     ),
   },
-];
+]);
 
-export const ZONE_IDS = HQ_FLOOR.map((zone) => zone.id);
+export const ZONE_IDS = deepFreeze(HQ_FLOOR.map((zone) => zone.id));
 
 /** Total floor extent in floor units, used to size the scene's viewBox. */
 export function floorExtent(): { width: number; depth: number } {
@@ -275,13 +276,13 @@ export function zoneById(id: string): Zone | undefined {
  * drawn in the Review Vault has exactly the capabilities the registry grants
  * it and no others.
  */
-export const ROLE_ZONE: Record<WorkerRole, string> = {
+export const ROLE_ZONE: Record<WorkerRole, string> = deepFreeze({
   mission_director: 'command-deck',
   build_lead: 'build-floor',
   parallel_implementer: 'build-floor',
   reviewer_gatekeeper: 'review-vault',
   specialist_tool: 'build-floor',
-};
+});
 
 /**
  * Where a worker with no registry entry stands.

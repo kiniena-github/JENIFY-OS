@@ -232,6 +232,39 @@ export function connectHqDatabaseUnmigrated(path: string = DEFAULT_HQ_DB_PATH): 
 const TABLES_BEFORE_MIGRATION = new WeakMap<HqDatabase, ReadonlySet<string>>();
 
 /**
+ * HQ's own `user_version` stamp, and the CLOSED set of values that mean "HQ
+ * ensured this file".
+ *
+ * It lives HERE rather than in `integrity.ts` because BOTH readings of the mark
+ * have to be the same reading (Wave 5 correction round six, Low 7).
+ * `migrateHqDatabase` recorded "any non-zero value" while
+ * `hqSchemaEnsuredMarkPresent` read the closed set, so a foreign application's
+ * `user_version = 7` made `schemaEnsuredMarkBeforeMigration` TRUE and
+ * `hqSchemaEnsuredMarkPresent` FALSE — two spellings of "HQ has been here" that
+ * disagreed. The outer `established` gate absorbed it, so it was not
+ * exploitable at that head; it was one refactor from being so, and a mark with
+ * two meanings is not a mark. `integrity.ts` imports these rather than
+ * declaring its own.
+ *
+ * `0x48510001` is HQ's own: `0x4851` is "HQ" in ASCII, the low half is the
+ * schema generation. A later build that raises the generation adds the new
+ * value to the set beside the old one — a deliberate reviewed act, never an
+ * arithmetic comparison that would quietly accept a foreign stamp again.
+ *
+ * The cost, stated: a file stamped by an EARLIER build of this wave carries
+ * `user_version = 1`, which is not a member, so such a file reads as unmarked.
+ * The ledger half of the discriminator still answers for it, and the first
+ * writable construction re-stamps it.
+ */
+export const HQ_SCHEMA_ENSURED_MARK = 0x48510001;
+export const HQ_SCHEMA_ENSURED_MARKS: readonly number[] = Object.freeze([HQ_SCHEMA_ENSURED_MARK]);
+
+/** True when `value` is a `user_version` HQ itself stamped. One spelling, two readers. */
+export function isHqSchemaEnsuredMark(value: number): boolean {
+  return Number.isInteger(value) && HQ_SCHEMA_ENSURED_MARKS.includes(value);
+}
+
+/**
  * The same, for HQ's own schema-ensured mark in `PRAGMA user_version`. Same
  * WeakMap discipline, same reason, same instant — see
  * `schemaEnsuredMarkBeforeMigration`.
@@ -314,12 +347,16 @@ export function migrateHqDatabase(db: HqDatabase): HqDatabase {
       .all() as { name: string }[];
     TABLES_BEFORE_MIGRATION.set(db, new Set(rows.map((row) => row.name)));
     // HQ's own schema-ensured mark, read at the SAME instant and for the same
-    // reason — see `schemaEnsuredMarkBeforeMigration`. Any non-zero value
-    // counts, which is the fail-closed reading: a stamp HQ does not recognize
-    // is still not a fresh file.
+    // reason — see `schemaEnsuredMarkBeforeMigration`. Only a value HQ ITSELF
+    // stamps counts (Wave 5 correction round six, Low 7): this used to accept
+    // any non-zero value on the argument that it was the fail-closed reading,
+    // and it was not — it made a FOREIGN application's `user_version` evidence
+    // that HQ had been here, which is the false-alarm direction, and it
+    // disagreed with `hqSchemaEnsuredMarkPresent`, which has always read the
+    // closed set. `isHqSchemaEnsuredMark` is now the one spelling both use.
     const version = db.prepare(`PRAGMA user_version`).get() as Record<string, unknown> | undefined;
     const value = Number(Object.values(version ?? {})[0] ?? 0);
-    MARK_BEFORE_MIGRATION.set(db, Number.isInteger(value) && value !== 0);
+    MARK_BEFORE_MIGRATION.set(db, isHqSchemaEnsuredMark(value));
   } catch {
     // A handle that cannot even read its own catalogue records nothing rather
     // than an empty set: "I could not look" must not read as "nothing was
