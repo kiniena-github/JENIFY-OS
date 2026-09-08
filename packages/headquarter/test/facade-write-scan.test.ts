@@ -46,6 +46,7 @@ import { CapabilityRegistry } from '../src/operator/capabilities.js';
 import { HumanPrincipalRegistry } from '../src/application/principals.js';
 import { CONTROL_ROUTES, handleControlRequest } from '../src/live/control-api.js';
 import { CAPS, expectOk, setupFixture } from './application.fixture.js';
+import { classMemberSlices } from './source-members.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVICE = path.join(HERE, '..', 'src', 'application', 'service.ts');
@@ -375,20 +376,30 @@ interface MethodSlice {
  * The `#private` members are why this exists: they are never part of the
  * answer — the surface under test is public — but they are how a public method
  * reaches a write, so the graph has to contain them.
+ *
+ * The segmentation itself moved to `source-members.ts` (Wave 5 correction
+ * round fourteen, Medium 15). The regex that used to live here —
+ * `/^ {2}(#?[A-Za-z_][A-Za-z0-9_]*)\s*[(<]/` — could not see a member declared
+ * `async`, `static`, `get`, `set`, `private`, `protected` or `override`, and an
+ * unseen member is not skipped but FOLDED INTO THE PREVIOUS SLICE: the previous
+ * method is credited with writes and parameters that are not its own, and the
+ * unseen one contributes no (method, parameter) pair at all. Measured at
+ * `3fcc271`: 249 visible, one invisible (`get policyContext()`). The sibling
+ * guard in `credential-scan-coverage.test.ts` carried a second, differently
+ * incomplete copy — which is how a member invisible to one and visible to the
+ * other stays unreported by both. There is now one slicer, asserted against
+ * these files in `source-members.test.ts`.
  */
 function methodSlices(): MethodSlice[] {
-  const lines = fs.readFileSync(SERVICE, 'utf8').split('\n');
-  const classStart = lines.findIndex((line) => /^export class HeadquarterOperations\b/.test(line));
+  const source = fs.readFileSync(SERVICE, 'utf8');
+  const classStart = source
+    .split('\n')
+    .findIndex((line) => /^export class HeadquarterOperations\b/.test(line));
   expect(classStart).toBeGreaterThan(-1);
-  const starts: { name: string; line: number }[] = [];
-  for (let i = classStart; i < lines.length; i += 1) {
-    const match = /^ {2}(#?[A-Za-z_][A-Za-z0-9_]*)\s*[(<]/.exec(lines[i]);
-    if (match && !CONTROL_WORDS.has(match[1])) starts.push({ name: match[1], line: i });
-  }
-  return starts.map((start, k) => ({
-    name: start.name,
-    line: start.line,
-    body: lines.slice(start.line, k + 1 < starts.length ? starts[k + 1].line : lines.length).join('\n'),
+  return classMemberSlices(source, { fromLine: classStart, exclude: CONTROL_WORDS }).map((slice) => ({
+    name: slice.name,
+    line: slice.line,
+    body: slice.body,
   }));
 }
 

@@ -55,6 +55,7 @@ import { AiMemberRegistry } from '../src/registry/members.js';
 import { MemberCapabilityRegistry } from '../src/registry/capabilities.js';
 import { ProviderDirectory } from '../src/providers/directory.js';
 import type { AuthenticatedAccount, ControlRequest } from '../src/live/auth.js';
+import { sourceMemberSlices } from './source-members.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SERVICE = path.join(HERE, '..', 'src', 'application', 'service.ts');
@@ -64,29 +65,30 @@ const CREDENTIAL = 'sk-ABCDEFGHIJKLMNOPQRSTUVWX0123456789';
 
 /**
  * Split `service.ts` into its members — every class method and every
- * module-level function — by the two shapes this file spells them in.
+ * module-level function — through the ONE shared slicer (Wave 5 correction
+ * round fourteen, Medium 15).
  *
  * A source-level segmentation rather than a type-level one, deliberately: the
  * property under test is "a write that bounds text with `missionText` also
  * scans it", and that is a property of the code as WRITTEN. A future method
  * that adds the one call and forgets the other is reported by name.
+ *
+ * The copy that used to live here recognised `static` and `async` and nothing
+ * else — no `get`, `set`, `private`, `protected` or `override` — and kept the
+ * modifiers in the reported NAME. The sibling copy in
+ * `facade-write-scan.test.ts` recognised a DIFFERENT subset, so a member
+ * invisible to one and visible to the other was reported by neither. Both now
+ * read `source-members.ts`, which recognises every TypeScript member modifier
+ * and reports the bare identifier; `line` is 1-based here because that is how
+ * this file's failure messages cite `service.ts`.
  */
-function membersOf(source: string): { name: string; line: number; body: string }[] {
-  const lines = source.split('\n');
-  const startsMember = (line: string): boolean =>
-    /^ {2}(?:static )?(?:async )?[#a-zA-Z][\w$]*(?:<[^>]*>)?\(/.test(line);
-  const startsTopLevel = (line: string): boolean =>
-    /^(?:export )?(?:async )?function [#a-zA-Z]/.test(line) || /^(?:export )?class /.test(line);
-  const members: { name: string; line: number; body: string[] }[] = [
-    { name: '<module scope>', line: 1, body: [] },
-  ];
-  lines.forEach((line, index) => {
-    if (startsMember(line) || startsTopLevel(line)) {
-      members.push({ name: line.trim().split('(')[0], line: index + 1, body: [] });
-    }
-    members[members.length - 1].body.push(line);
-  });
-  return members.map((member) => ({ name: member.name, line: member.line, body: member.body.join('\n') }));
+function membersOf(source: string): { name: string; line: number; body: string; kind: string }[] {
+  return sourceMemberSlices(source).map((member) => ({
+    name: member.name,
+    line: member.line + 1,
+    body: member.body,
+    kind: member.kind,
+  }));
 }
 
 describe('every facade write that bounds caller text also scans it', () => {
@@ -94,8 +96,12 @@ describe('every facade write that bounds caller text also scans it', () => {
     const source = fs.readFileSync(SERVICE, 'utf8');
     const members = membersOf(source);
     const callers = members.filter(
-      // `missionText`'s own DEFINITION is not one of its callers.
-      (member) => /missionText\(/.test(member.body) && member.name !== 'function missionText',
+      // `missionText`'s own DEFINITION is not one of its callers. Matched on
+      // (kind, name) now that the slicer reports the bare identifier rather
+      // than the declaration text.
+      (member) =>
+        /missionText\(/.test(member.body) &&
+        !(member.kind === 'function' && member.name === 'missionText'),
     );
     const unscanned = callers
       .filter((member) => !/assertNoCredentialShape\(|callerTextRefusal\(/.test(member.body))
