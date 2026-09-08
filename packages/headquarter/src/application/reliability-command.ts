@@ -71,6 +71,7 @@ import {
   isActionReconcileDecision,
   type ActionReconcileDecision,
 } from './action-gateway.js';
+import { execSchemaDdl } from '../store/db.js';
 
 /* ------------------------------------------------------------------ */
 /* Vocabulary (categorical only)                                       */
@@ -488,7 +489,7 @@ BEGIN SELECT RAISE(ABORT, 'hq_reliability_backups is append-only (unique record_
  */
 export function ensureReliabilitySchema(db: HqDatabase): void {
   if (db.readonly) return;
-  db.exec(RELIABILITY_DDL);
+  execSchemaDdl(db, RELIABILITY_DDL);
 }
 
 /**
@@ -810,19 +811,58 @@ export const RUN_RECONCILED_EVIDENCE_KIND = 'run_reconciled';
  *
  * An unwitnessed `reconciled` row is not an error and is not a conclusion: the
  * fold routes it to the `default` branch, which already fails closed to
- * `needs_reconciliation`. Appending noise can only ever keep a run uncertain.
+ * `needs_reconciliation`.
  *
- * **The residual, stated rather than glossed.** HQ holds no key a foreign
- * writer does not also have, so a writer that already holds the file open can
- * forge the evidence entry too — at the cost of appending to the hash chain,
- * which is itself guarded by the engine and by a durable length commitment
- * (`verifyEvidenceChain`). Against that writer this is a real barrier and not a
- * cryptographic boundary — the same residual already recorded for
- * `standingIntegrityVerdict` and for `hq_reliability_run_events` itself. What
- * it closes completely is the thing it was built for: one appended row, by an
- * actor nobody resolved, silently concluding a run HQ had said it could not
- * account for, and re-admitting a second attempt on a `side_effect = 1`
- * capability.
+ * ## The residual, PRICED rather than glossed (round seventeen, Medium-5)
+ *
+ * The paragraph that stood here said the forgery cost "appending to the hash
+ * chain, which is itself guarded by the engine and by a durable length
+ * commitment (`verifyEvidenceChain`). Against that writer this is a real
+ * barrier." **Measured: neither guard participates, and the cost is about six
+ * lines of SQL.**
+ *
+ *  - `op_evidence`'s engine triggers refuse `UPDATE` and `DELETE`. They do not
+ *    refuse `INSERT` — an append is the write the log is FOR;
+ *  - the chain hash is `sha256(prevHash|id|at|taskId|actor|kind|payload)`. It
+ *    is public and UNKEYED, so a writer holding the file computes the next
+ *    link exactly as `EvidenceLog.append` does;
+ *  - `verifyEvidenceChain` returned `null` (intact) BEFORE the forgery and
+ *    `null` AFTER it. A correctly-chained forged link is, to that function,
+ *    an ordinary entry — which is what it is designed to say.
+ *
+ * Executed at this branch's head against a run standing
+ * `needs_reconciliation / outcome_unknown`, inbox 1: one forged
+ * `run_reconciled` link plus one raw `reconciled` ledger row produced
+ * `concluded / not_executed / needsReconciliation false / admitsAttempt true`,
+ * inbox 0, and a second run on the same `side_effect = 1` `github.open_pr`
+ * work returned `{"ok":true}`. It works with `actor='founder'` too.
+ *
+ * So the honest statement of what the witness buys is NARROW, and it is
+ * exactly the thing it was built for: a `reconciled` row is no longer
+ * SELF-authenticating, so an attacker who can append to
+ * `hq_reliability_run_events` and NOT to `op_evidence` — the shape the round
+ * sixteen review executed — no longer concludes a run. Against a writer who
+ * holds the whole database file it is not a barrier at all, and no sentence
+ * here should suggest otherwise. Closing THAT would need a key HQ holds and a
+ * foreign writer does not; HQ has no key store, and inventing one is a Founder
+ * decision about secret material rather than a correction round's business.
+ * The same residual stands, and stands for the same reason, for
+ * `standingIntegrityVerdict` and for `hq_reliability_run_events` itself.
+ *
+ * ## And "appending noise can only ever keep a run uncertain" was false one way
+ *
+ * That sentence stood here and is gone (round seventeen, Low-1). Witnesses are
+ * consumed ONE PER EVENT, so a raw COPY of an HONEST `reconciled` row — same
+ * actor, same decision, no forged evidence at all — leaves two ledger rows
+ * against one witness: the second is unwitnessed, routes to `default`, and
+ * drives a `concluded / not_executed` run back to `needs_reconciliation /
+ * outcome_unknown`. Measured. That is the FAIL-CLOSED direction — the run
+ * reappears in the Founder's inbox and the `openRun` guard comes back — so it
+ * is recorded rather than repaired: the repair would be to stop the `default`
+ * branch downgrading an already-concluded run, which is a strictly LESS
+ * conservative fold, and trading a nuisance for a weaker latch is the wrong
+ * trade. Pinned in `test/reliability-forgery-price.test.ts` so the price
+ * cannot quietly change.
  */
 function witnessReconciliations(
   db: HqDatabase,
@@ -1016,15 +1056,31 @@ function rowToRecordedVerdict(row: Record<string, unknown>): RecordedIntegrityVe
  * rule monotone: appending noise can never lower the standing verdict, and can
  * only ever raise it.
  *
- * **The residual, stated rather than glossed.** HQ holds no key a foreign
- * writer does not also have, so a writer that already holds the file open can
- * forge the evidence entry too — at the cost of appending to the hash chain,
- * which is itself now guarded by the engine and by a durable length commitment
- * (see `verifyEvidenceChain`). Against that writer this is a real barrier and
- * not a cryptographic boundary, which is the same residual recorded for
- * `hq_reliability_run_events`. What it closes completely is the thing it was
- * built for: one appended row, and a plain restart, silently lowering a verdict
- * HQ had already reached.
+ * **The residual, PRICED rather than glossed** (Wave 5 correction round
+ * seventeen, Medium-5). This paragraph used to say the forgery costs
+ * "appending to the hash chain, which is itself now guarded by the engine and
+ * by a durable length commitment (see `verifyEvidenceChain`). Against that
+ * writer this is a real barrier." It is not. Measured, on a database whose
+ * chain HQ had genuinely found broken and latched safe mode over: one raw
+ * `INSERT` of a locally-valid `hq_integrity_assessed` link plus one raw
+ * `INSERT` of a clean verdict row carrying its id took
+ * `standingIntegrityVerdict().safeMode` from `true` to `false`, while
+ * `verifyEvidenceChain` still reported the chain broken throughout — the
+ * condition the latch was raised for never went away. The hash is public and
+ * unkeyed, `op_evidence`'s triggers refuse UPDATE and DELETE rather than
+ * INSERT, and a break EARLIER in the log does not stop a later link being
+ * valid against the row before it, which is all `evidenceEntryLinkStands`
+ * asks.
+ *
+ * So what the corroboration buys is NARROW and worth stating exactly: a
+ * verdict row is no longer self-authenticating, so a writer who can append to
+ * `hq_reliability_verdicts` and NOT to `op_evidence` no longer lowers a
+ * standing verdict — the attack round three closed. Against a writer holding
+ * the whole file it is not a barrier at all. Closing that needs a key HQ holds
+ * and a foreign writer does not; HQ has no key store, and introducing secret
+ * material is a Founder decision. The same residual, for the same reason, on
+ * `hq_reliability_run_events`. Measured in
+ * `test/reliability-forgery-price.test.ts`.
  *
  * **The upgrade consequence, recorded honestly.** A verdict written by a build
  * before this change carries no paired evidence entry, so a CLEAR from such a
