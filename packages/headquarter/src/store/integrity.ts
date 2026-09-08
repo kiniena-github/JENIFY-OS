@@ -1313,9 +1313,34 @@ export function recordHqSchemaEnsured(db: HqDatabase): void {
  * What answers it is a number that only ever goes UP and that does not live in
  * any table: the greatest rowid HQ's commitment ledger has ever reached,
  * carried in the low 16 bits of the same header slot. A `DROP TABLE` cannot
- * lower it, a replay cannot raise the ledger to meet it, and HQ itself only
- * ever raises it — so a ledger holding fewer commitments than the header
- * records is blocking, at both depths and across every restart.
+ * lower it and HQ itself only ever raises it — so a ledger holding fewer
+ * commitments than the header records is blocking, at both depths and across
+ * every restart.
+ *
+ * **"a replay cannot raise the ledger to meet it" stood in this sentence and
+ * was FALSE** (Wave 5 correction round thirteen, High 2). This is a COUNT, and
+ * a count is met by putting the right NUMBER of rows back rather than the right
+ * rows: drop the table, replay its DDL, re-insert a PREFIX, then PAD up to the
+ * mark with copies of a surviving row at the erased rowids. `rows`, `top` and
+ * `sqlite_sequence` are the mark again and both comparisons below are false.
+ * Executed against `237fc76` on a real file: 13 statements took six genuine
+ * commitments to two plus four copies, and `p2`/`p3`/`p4` each read
+ * `boot=false [] assess=false [] release=ADMITTED`. Re-measured at THIS head it
+ * is 14, because the ledger carries one more guard for the replay to put back
+ * (`no_rowid_skip`) — the price is counted from the replay itself in the pin
+ * rather than written down, so it moves when the schema does. It is DISCLOSED at that
+ * price rather than closed, and the reason is exact: the attacker reads the
+ * genuine ledger before destroying it, so any predicate over the file's own
+ * content can be satisfied by writing content that satisfies it. The two
+ * candidate closures — an "each checkpoint advances something" invariant, and a
+ * content digest in the header's low bits — were designed and rejected on the
+ * merits, with the arguments recorded in
+ * `reliability-commitment-prefix-replay.test.ts` beside the executed pin. The
+ * first can raise a PERMANENT finding over an untampered file when two
+ * processes checkpoint concurrently, which is the fabricating direction this
+ * module forbids; the second is a 65,536-way offline collision search.
+ * What the mark still closes is the UNPADDED replay, which is what round ten
+ * measured and what stays pinned.
  *
  * **The encoding, and the one value it costs.** The high 16 bits are the
  * signature `0x4851` (`HQ` in ASCII); the low 16 bits are the committed mark,
@@ -1395,8 +1420,20 @@ export function encodeCommitmentWitness(mark: number): number {
   return ((HQ_COMMITMENT_WITNESS_SIGNATURE << 16) | bounded) >>> 0;
 }
 
-/** HQ's header witness for this file, read from the header rather than a table. */
-export function readCommitmentWitness(db: HqDatabase): CommitmentWitness {
+/**
+ * HQ's header witness for this file, read from the header rather than a table.
+ *
+ * Module-private (Wave 5 correction round thirteen, Low 4), for exactly the
+ * condition round six made `integrityCheckpointLedgerPresent` module-private
+ * for: it was exported and re-exported by `store/index.ts` with five hits, all
+ * inside this file, no consumer anywhere in the package or its dependants, and
+ * no test of its own. This module's own rule is that a second place to ask a
+ * question invites a second answer, and dead public surface is the cheapest way
+ * to acquire one. The two questions callers actually ask —
+ * `commitmentWitnessPresent` and `committedCheckpointMark` — stay exported and
+ * are what the suites use.
+ */
+function readCommitmentWitness(db: HqDatabase): CommitmentWitness {
   try {
     const row = db.prepare(`PRAGMA application_id`).get() as Record<string, unknown> | undefined;
     return decodeCommitmentWitness(Number(Object.values(row ?? {})[0] ?? 0));

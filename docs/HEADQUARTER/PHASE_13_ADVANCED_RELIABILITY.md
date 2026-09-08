@@ -966,11 +966,14 @@ timing-only concurrency tests. What was built:
 - **A real file.** Engine immutability (UPDATE, DELETE, and both REPLACE-on-
   unique-index paths on all four tables — `hq_reliability_verdicts` included),
   the tamper that engages safe mode, the evidence-chain break, the restart that
-  no longer clears a verdict, and ten of the thirteen backup path protections
+  no longer clears a verdict, and thirteen of the sixteen backup path protections
   are all exercised against a real database in a real temporary directory. The
   three that are not (`file_too_large`, `path_not_readable`,
   `verification_copy_failed`) are named in "Backup and restore" with the reason,
-  rather than counted as if they were.
+  rather than counted as if they were. (This sentence still read "ten of the
+  thirteen" at `237fc76`: round twelve's pin reads one phrasing of the count and
+  this is a second, so the pin now enumerates EVERY place on this page that
+  states the pair — Wave 5 correction round thirteen, Medium 3.)
 - **A real restore.** Backed up, verified, copied, verified again, opened as a
   working HQ, and the run read back out of the copy.
 
@@ -1808,6 +1811,21 @@ as well as here:
   `HQ_SCHEMA_ENSURED_MARKS` records: a foreign application's `application_id`
   must not be a false alarm at HQ's first boot over its file.
 
+  **CORRECTED at round ten, and this paragraph described the superseded
+  encoding until round thirteen (Low 3).** The slot no longer carries one exact
+  32-bit value read as a member of a closed set. It carries a 16-bit SIGNATURE
+  (`0x4851`, `HQ` in ASCII) in the high half and the greatest rowid HQ's
+  commitment ledger has ever reached in the low half, saturating at `0xFFFF`;
+  `0x48514350` is kept as a legacy stamp meaning "witnessed, mark unknown", for
+  back-compatibility with files committed on by an older build. That is a real
+  loss of specificity in the false-alarm direction — 65,535 accepted values
+  rather than one — and it is measured and argued where the encoding lives
+  (`HQ_COMMITMENT_WITNESS_MARK` in `store/integrity.ts`), together with the one
+  mark value the encoding gives up (a genuine mark of 17,232 encodes to exactly
+  the legacy value and is read back as "unknown"). This page's own convention is
+  that a superseded description carries the correction rather than being
+  silently rewritten, which is why the original sentence stands above it.
+
   **What it still does not answer, executed rather than asserted.** A writer
   that also runs `PRAGMA application_id = 0` puts the file back to unwitnessed —
   one further statement on top of the erasure, still silent, measured
@@ -1819,11 +1837,25 @@ as well as here:
   ordinary upgrade cost of any new mark and not a defence.
 
   The other escape is the one already disclosed for the header mark, and the
-  checkpoint ledger does not change it: a writer that drops every declared
-  ledger AND zeroes `PRAGMA user_version` leaves a file that reads as a first
-  boot, so the census — and every commitment, which went with the ledger —
-  reports nothing at all. Executed: `boot=false [] release=ADMITTED` on the
-  first process afterwards.
+  checkpoint ledger DOES change its price — this paragraph priced it two
+  statements too cheap and one restart too cheap until round thirteen (Low 2).
+  It read: "a writer that drops every declared ledger AND zeroes
+  `PRAGMA user_version` leaves a file that reads as a first boot … Executed:
+  `boot=false [] release=ADMITTED` on the first process afterwards." Re-executed
+  at `237fc76`, step by step on one warmed file:
+
+  - 33 `DROP TABLE`s, one per declared ledger: `boot=true
+    [append_only_guard_missing] assess=true release=REFUSED`;
+  - plus `PRAGMA user_version = 0` (34 statements): still `boot=true
+    [append_only_guard_missing] assess=true release=REFUSED`, on that process
+    and the next;
+  - plus `PRAGMA application_id = 0` (35 statements): the first process
+    afterwards is `boot=true [append_only_guard_missing] assess=FALSE []
+    release=ADMITTED`, and every process after that is `boot=false []`.
+
+  So the honest price is 35 statements, one restart and one Founder assessment —
+  not 34 and no restart. What did not change is the CLASS: HQ holds no key over
+  its own file, and a writer who already has it can rewrite both header slots.
 
 - **There were TWO durable commitments in the concurrent round-four/round-five
   lanes, and ONE survives.** The round-four lane recorded the chain tip on every
@@ -2197,8 +2229,8 @@ survived it.
   stated on `assertBrowserSafe` itself.
 - **Round seven closed two UNDISCLOSED classes of the zero-ink sweep, and
   re-states the third.** The set named five properties and two code points and
-  argued `\p{Zs}` out on the merits, but `\p{Mn}` non-spacing marks (1,796 code
-  points), `\p{Me}` enclosing marks (13) and `\p{Cn}` unassigned (810,961) were
+  argued `\p{Zs}` out on the merits, but `\p{Mn}` non-spacing marks (2,059 code
+  points), `\p{Me}` enclosing marks (13) and `\p{Cn}` unassigned (814,730) were
   in neither the set nor any residual list. Each broke
   `sk-ABCDEFGHIJKLMNOP0123` into two unmatched halves with every character of
   the key intact; U+0301 and U+0378 are the two the review named, and both were
@@ -2933,7 +2965,7 @@ same question the surviving answer is named at the code.
 | **MEDIUM NEW-5** — 26 exported ALL-CAPS constants were still unfrozen, and frozen `Set`s were mutable in content | The shipped pinning test enumerates `package.json#exports`, so it cannot see a module no entry point re-exports; the unfrozen count regrew to 26 distinct bindings over 225, across 131 `src/` modules. Separately, `deepFreeze`'s "It freezes ALL THE WAY DOWN" was NOT true of a `Set` or a `Map`: entries are not own properties, so `QUEUED_UNREACHABLE_STATUSES` — which `service.ts` decides a queued task's reachability on — accepted `.delete()` and `.add()`, and `QUERY_STOPWORDS` accepted `.clear()`. | **The other lane froze the same 26 independently** (its round-six pass), and that half of the finding is closed at `b986cff`. What this lane adds is the census that would have CAUGHT the regrowth — `frozen-constants-census.test.ts` enumerates `src/` itself rather than the entry points — and the collection fix: a frozen `Set`/`Map` now has its entries recursed into, with reading untouched. **The mutator half of that sentence was corrected at round ten (Medium 2):** own, non-configurable throwing properties shadow direct access only, so `Set.prototype.clear.call(x)` still emptied the vocabulary in one statement. `deepFreeze` now returns a `Proxy` over the collection rather than the collection, which carries no [[SetData]] slot and so refuses the prototype spelling too. The `freeze.ts` sentence is corrected rather than restated. Decision-bearing, stated either way: `PROJECT_ALLOWED_TRANSITIONS` is the gate behind `canTransitionProject` and `.active.length = 0` flips it true → false, which is NARROWING — a local denial of service on a Founder act, not an authority widening. The other 24 are `ui/spatial/*` geometry and presentation maps, `providers/codex/*` vocabularies and the review schema, `providers/claude/*` evidence kinds and the repo-slug pattern, and `control-console.ts`'s fetch allow-list; none is an authority gate. |
 | **MEDIUM NEW-6** — `provablyAvoidable` flipped retroactively and two published numbers contradicted each other | `decisionIsProvablyAvoidable` recomputed the floor from the CURRENT canonical risk class while `rowToDecision` served the STORED `floor_tier`. Executed: a Founder registry upsert flipped `provablyAvoidable` 1 → 0 and left the served record reporting `floorTier: deterministic_local` beside `requiredReviewTier: critical_review` — which cannot both be true, since the review requirement is one of the terms the floor's `max` is taken over. Undisclosed. | ONE computation answers both. `deriveDecisionRecord` recomputes the floor and SERVES it; `decisionIsProvablyAvoidable` reads that result rather than recomputing, so the two cannot diverge again. The stored value is carried as `floorTierAsRecorded`. The flip is kept — canonical truth really did move — but no longer silent: `riskClassChangedSinceIssue` per record, counted on `analytics.provablyAvoidable.riskClassChangedSinceIssue`, and stated in `AVOIDABLE_SPEND_STATEMENT`. |
 | **LOW NEW-7** — a source file the repository's own text tooling could not read | `test/connectors.github.test.ts` carried a raw U+0007 at byte 4903 and a raw U+202E beside it, so `git diff` rendered it `Bin 9424 -> 9429 bytes` — the exact hazard the NUL two characters earlier had been escaped to avoid. | Both escaped; that change now renders as one line out, one line in. **The other lane escaped the same two characters independently** (its round-six Low 6). What this lane adds is the derived assertion that replaces the hand check — `source-text-hygiene.test.ts` over every `.ts` file in `src/` and `test/` — and what that assertion then FOUND: four more raw U+001F separators in `src/application/product-command.ts`, `src/application/intelligence-command.ts` and `src/live/auth.ts`, each sitting under a Wave 5 Medium 10 comment claiming the separator had been written so the file "stays greppable". The comment described a fix that was never applied. All four are escapes now, same runtime value. |
-| **Two undisclosed sweep residuals** — `\p{Mn}`, `\p{Me}` and `\p{Cn}` carried a credential shape past the guard | The zero-ink sweep named five properties and argued `\p{Zs}` out on the merits, but non-spacing marks (1,796 code points), enclosing marks (13) and unassigned code points (810,961) were in neither the set nor any residual list. U+0301 and U+0378 are the two the review named. | CLOSED, not disclosed. A combining mark leaves every credential character intact and a reader strips the mark, so it is exactly this class. Marks are removed from an `NFKD`-decomposed copy BEFORE the pipeline — `NFKC` composes base + mark into a precomposed `Lu` letter, so a late erase misses it — and all three categories join the erase set as well. Measured after the fix: 1,809 marks swept, 0 survivors; 815 sampled unassigned code points, 0 survivors; no new refusal on accented prose in five languages or on any legitimate string the shipped suite pins. The fold is a SCAN COPY, so stored and served text is byte-unchanged. `\p{Zs}` still not folded, and `Xsk-…`/`9sk-…` still reach a written `hq-snapshot.json` — both pinned as disclosed rather than described. **Corrected at round nine (High 1): that closing sentence was incomplete — `\p{Co}` PRIVATE USE (137,468 code points) was also open, on no stated argument at all, and is closed at round nine.** |
+| **Two undisclosed sweep residuals** — `\p{Mn}`, `\p{Me}` and `\p{Cn}` carried a credential shape past the guard | The zero-ink sweep named five properties and argued `\p{Zs}` out on the merits, but non-spacing marks (2,059 code points), enclosing marks (13) and unassigned code points (814,730) were in neither the set nor any residual list. **Those two figures read 1,796 and 810,961 until Wave 5 correction round thirteen (Low 6)**: they were the sizes on an older ICU, and on the shipped runtime (Node v22.22.2, ICU 78.2, Unicode 17.0) they are 2,059 and 814,730. `\p{Me}` 13, `\p{Co}` 137,468 and `\p{Zs}` 17 were exact. They are now measured against the running engine and parsed back out of the prose by `redaction-invisible-classes.test.ts`, so the pair cannot drift apart again; the guarantee never moved with them, because the erase set is expressed as the PROPERTIES. U+0301 and U+0378 are the two the review named. | CLOSED, not disclosed. A combining mark leaves every credential character intact and a reader strips the mark, so it is exactly this class. Marks are removed from an `NFKD`-decomposed copy BEFORE the pipeline — `NFKC` composes base + mark into a precomposed `Lu` letter, so a late erase misses it — and all three categories join the erase set as well. Measured after the fix: 1,809 marks swept, 0 survivors; 815 sampled unassigned code points, 0 survivors; no new refusal on accented prose in five languages or on any legitimate string the shipped suite pins. The fold is a SCAN COPY, so stored and served text is byte-unchanged. `\p{Zs}` still not folded, and `Xsk-…`/`9sk-…` still reach a written `hq-snapshot.json` — both pinned as disclosed rather than described. **Corrected at round nine (High 1): that closing sentence was incomplete — `\p{Co}` PRIVATE USE (137,468 code points) was also open, on no stated argument at all, and is closed at round nine.** |
 
 ### What the second seventh-round lane does NOT claim
 
@@ -3482,7 +3514,7 @@ A fresh read-only hostile review of `6ce93df` returned **0 Critical / 1 High /
 
 | Finding | What was wrong | What was done |
 |---|---|---|
-| **HIGH 1** — a PREFIX replay of HQ's own commitment ledger defeated all four commitment checks at once, permanently, and cleared a latched safe mode | `DROP TABLE hq_integrity_checkpoints`, replay the table's own DDL out of `sqlite_master`, and re-insert a PREFIX of its own genuine rows at the rowids they already carried. No hash is recomputed — every row written back is one HQ itself wrote — and no header write is needed, because round seven's yes/no witness stays true. `AUTOINCREMENT` rebuilds `sqlite_sequence` from those explicit rowids, so `elidedCommitmentLedgerRows`' `rows === top === mark` identity holds at a DIFFERENT number; `truncatedImmutableLedgers` compares `MAX(rowid)` against that same rebuilt mark and is satisfied; `regressedImmutableLedgers` reads `ledger_marks` out of the checkpoints just erased, and the surviving oldest checkpoint's own mark for this table is always at or below its own rowid; `contradictedChainCommitment` takes the maximum over the SURVIVING commitments, which the attacker chose. The `rows === 0` witness branch never runs, because the ledger is not empty. Measured by the review on a real file through the real facade: **18 statements** took commitments **7 → 1** and evidence **9 → 4**, with `boot=false []`, FULL Founder assessment `false []`, reboot `false []` and `releaseKillSwitch` **ADMITTED**; a file latched at `["append_only_guard_missing","evidence_chain_broken"]` read `false []` at boot, at full assessment and across two further reboots after a 25-statement rollback over three ledgers; and once the commitment ledger was rolled back this way, rows could be erased from any of the 33 declared ledgers with no finding at any depth. | The header slot now records HOW FAR the commitment ledger has ever reached, not merely THAT it has been reached. `application_id` carries the signature `0x4851` (`HQ`) in its high 16 bits and the greatest rowid the ledger has ever held in its low 16 bits, raised by `recordCommitmentWitness` and never lowered. `elidedCommitmentLedgerRows` reports a ledger holding fewer rows, or a lower greatest rowid, than that mark. A `DROP TABLE` cannot lower a number in the database header, and a replay cannot raise the ledger to meet it. Reproduced independently at this lane before the fix (7 statements at `6ce93df`, 8 at the merged head where the ledger carries a fourth guard; commitments 4 → 1, `elided=false`, `regressed=[]`, `truncated=[]`, `contradicted=null`, `boot=false [] full=false [] reboot=false []`, release ADMITTED) and closed after it (`boot=true [append_only_guard_missing] full=true`, release refused, across three restarts). |
+| **HIGH 1** — a PREFIX replay of HQ's own commitment ledger defeated all four commitment checks at once, permanently, and cleared a latched safe mode | `DROP TABLE hq_integrity_checkpoints`, replay the table's own DDL out of `sqlite_master`, and re-insert a PREFIX of its own genuine rows at the rowids they already carried. No hash is recomputed — every row written back is one HQ itself wrote — and no header write is needed, because round seven's yes/no witness stays true. `AUTOINCREMENT` rebuilds `sqlite_sequence` from those explicit rowids, so `elidedCommitmentLedgerRows`' `rows === top === mark` identity holds at a DIFFERENT number; `truncatedImmutableLedgers` compares `MAX(rowid)` against that same rebuilt mark and is satisfied; `regressedImmutableLedgers` reads `ledger_marks` out of the checkpoints just erased, and the surviving oldest checkpoint's own mark for this table is always at or below its own rowid; `contradictedChainCommitment` takes the maximum over the SURVIVING commitments, which the attacker chose. The `rows === 0` witness branch never runs, because the ledger is not empty. Measured by the review on a real file through the real facade: **18 statements** took commitments **7 → 1** and evidence **9 → 4**, with `boot=false []`, FULL Founder assessment `false []`, reboot `false []` and `releaseKillSwitch` **ADMITTED**; a file latched at `["append_only_guard_missing","evidence_chain_broken"]` read `false []` at boot, at full assessment and across two further reboots after a 25-statement rollback over three ledgers; and once the commitment ledger was rolled back this way, rows could be erased from any of the 33 declared ledgers with no finding at any depth. | The header slot now records HOW FAR the commitment ledger has ever reached, not merely THAT it has been reached. `application_id` carries the signature `0x4851` (`HQ`) in its high 16 bits and the greatest rowid the ledger has ever held in its low 16 bits, raised by `recordCommitmentWitness` and never lowered. `elidedCommitmentLedgerRows` reports a ledger holding fewer rows, or a lower greatest rowid, than that mark. A `DROP TABLE` cannot lower a number in the database header. **"and a replay cannot raise the ledger to meet it" stood here and was FALSE — see round thirteen's HIGH 2 below**: the mark is a COUNT, so a replay that PADS the prefix up to it with copies of a surviving row meets it exactly, and is silent from the very next boot. What the mark still closes is the UNPADDED replay this row measured. Reproduced independently at this lane before the fix (7 statements at `6ce93df`, 8 at the merged head where the ledger carries a fourth guard; commitments 4 → 1, `elided=false`, `regressed=[]`, `truncated=[]`, `contradicted=null`, `boot=false [] full=false [] reboot=false []`, release ADMITTED) and closed after it (`boot=true [append_only_guard_missing] full=true`, release refused, across three restarts). |
 | **LOW 1** — the phase document stated an anchor that would reopen the wave's own Critical | This page wrote the negative lookbehind with an underscore inside the character class. The code (`src/live/redaction.ts`) has never had the underscore and must not: `_` inside the class is the `\b` behaviour that carried `OPENAI_KEY_sk-…` onto the unauthenticated artifact (round four, Critical C1). The code was stronger than the document said, which is the direction a future reader "corrects" the wrong way. | The `_` is dropped from that sentence, and the drift is now machine-checked: `redaction-narrow-spaces.test.ts` reads every negative lookbehind out of `redaction.ts` itself, asserts they are all `(?<![A-Za-z0-9])`, and asserts this document nowhere spells the underscore form — which is why the sentence above describes it in words rather than quoting it. The behaviour on both sides of the boundary is pinned beside it: `OPENAI_KEY_sk-…` and `_sk-…` refused, `Xsk-…` and `9sk-…` admitted as disclosed. |
 | **LOW 2** — the `\p{Zs}` residual was retained on a justification whose only worked example does not hold | The comment said folding the class "would join ordinary prose into fabricated credential shapes (`...ask -driven-workflow`)". The review reverted-to-test it on a scratch copy with `\p{Zs}` folded across a 40-string corpus: exactly **1** verdict changed and that string was contrived, while the doc's own example was still ACCEPTED — the `(?<![A-Za-z0-9])` anchor sees the `a` of `ask`, and the run is far too short for `{16,}`. Meanwhile the residual carried a whole key to the unauthenticated artifact for all seventeen members, and "a space is visible, so it hides nothing" is at its weakest for U+2007 FIGURE SPACE and U+200A HAIR SPACE. | The fifteen `\p{Zs}` separators that are not a plain space — U+1680, U+2000–U+200A, U+202F, U+205F, U+3000 — are erased from the scan copy. U+0020 and U+00A0 are deliberately left alone: those two are what prose is made of, and folding them would join every word of every sentence. The whole-plane sweep's `\p{Zs}` survivor count moves **17 → 2**, and the two are now named rather than counted. The false-positive cost was measured rather than assumed, and so was the mechanism. |
 
@@ -4121,6 +4153,154 @@ was the enumeration in the prose that was partial. The reviewer's finding was
 raised against `48dd026`, where the cited file did not exist at all; round twelve
 created it, and this round completes its engine half.
 
+### HIGH 2 — a PADDED prefix replay meets the header witness, and three sentences said it could not
+
+**Reproduced at `237fc76`.** The round-ten witness records the greatest rowid
+HQ's commitment ledger has ever reached, and `elidedCommitmentLedgerRows` reports
+`top < mark || rows < mark`. That is a COUNT, and a count is met by putting the
+right NUMBER of rows back rather than the right rows: `DROP TABLE
+hq_integrity_checkpoints`, replay the DDL out of `sqlite_master`, re-insert a
+PREFIX of the genuine rows, then PAD up to the mark `W` with copies of a
+surviving row at the erased rowids, changing only the UNIQUE `id`. Every
+commitment written back is one HQ itself made, so `no_overclaim` has nothing to
+refuse. Measured: 13 statements at `237fc76` (14 at this head, where the ledger
+carries `no_rowid_skip` as a seventh object to replay) took six genuine
+commitments to two plus four copies, with `rows === top === sqlite_sequence ===
+W`, `elided false`, `regressed []`, `truncated []`, `contradicted null`, and
+`p2`/`p3`/`p4` each `boot=false [] assess=false [] release=ADMITTED`.
+
+Three places said this could not happen, verbatim: *"A `DROP TABLE` cannot lower
+it and a replay cannot raise the ledger to meet it."* All three are corrected —
+this page, `HQ_COMMITMENT_WITNESS_MARK`'s docblock, and
+`reliability-commitment-prefix-replay.test.ts`'s header.
+
+**It is DISCLOSED rather than closed, and the reason is exact rather than an
+apology.** The attacker reads the genuine ledger before destroying it, so any
+predicate over the FILE's own content can be satisfied by writing content that
+satisfies it. The only predicate that could not be met is one over content the
+attacker cannot reconstruct, and there is none: the header slot carries 32 bits,
+16 of which are the signature. Two candidate closures were designed and rejected
+on the merits, and both are recorded so a later round does not rediscover them:
+
+1. **An "every checkpoint advances something" invariant.** True of
+   `recordIntegrityCheckpoint` by construction, and it does catch a pad built
+   from COPIES. Rejected because two processes that read the same state before
+   either writes produce two checkpoints committing identical quantities — an
+   ordinary concurrent boot — so the check can raise a PERMANENT finding over an
+   untampered file. That is the fabricating direction, which is the subject of
+   this round's HIGH 1 and is forbidden as strictly as the reassuring one. It
+   also buys little: the pad can be built from DISTINCT rows whose committed
+   quantities rise, which `no_overclaim` permits because they stay under the
+   file's real marks.
+2. **A content digest in the header's low bits.** Sixteen bits is a 65,536-way
+   collision search an attacker runs offline in under a second. Widening it means
+   either shrinking the signature — which round ten already measured as a real
+   loss in the false-alarm direction — or coupling `PRAGMA user_version`, which
+   round ten rejected because it would let ONE statement defeat both marks.
+
+What the mark still closes is the UNPADDED replay, which is what round ten
+measured; that case stays pinned in the same file, beside the executed
+disclosure of this one.
+
+### HIGH 4 and MEDIUM 2 — reported against `48dd026`, already closed at the merged head
+
+Both were reproduced by the reviewers against `48dd026` and both were closed by
+round ten, which the merge brought in. Re-executed at `237fc76` rather than
+taken on trust:
+
+- **HIGH 4** — four caller-supplied IDENTIFIER fields stored unscanned.
+  `registerExecutionWorker({ workerId: 'ghp_…' })`, `setIntelligenceBudget({
+  scopeId: 'ghp_…' })`, `recordModelObservation({ providerId: 'ghp_…' })`,
+  `recordModelObservation({ modelId: 'ghp_…' })` and `engageKillSwitch('ghp_…',
+  …)` are each refused `invalid_input` naming the exact field
+  (`String matches a known credential shape (at stored_text.workerId)`, and so
+  on). `callerTextRefusal` scans every own string field of every facade write's
+  input, and `facade-write-scan.test.ts` derives coverage PER (method,
+  parameter) pair with no curated vocabulary — the 18-name `FREE_TEXT_PARAMETERS`
+  list the finding names is gone. Not a defect at this head.
+- **MEDIUM 2** — the served depth statement's "46 statements". The served
+  sentence quotes no total at all now; it interpolates
+  `STRUCTURAL_STATEMENT_BASE` (44 = 33 identity reads + 11 fixed reads) and
+  states the seek term as a rule, with 44 + 2 = 46 and 44 + 4 = 48 both explained
+  as the two files' totals. `integrity-statement-truth.test.ts` pins it against
+  instrumented counts on two files with different seek terms and parses the
+  numbers back out of the prose: changing the constant from 44 to 45 in a scratch
+  copy fails two of its tests. Not a defect at this head.
+
+### MEDIUM 3, MEDIUM 4 and MEDIUM 5 — a stale count and three unpinned defences
+
+- **MEDIUM 3.** `BACKUP_REFUSAL_REASONS` holds SIXTEEN reasons, and round
+  twelve's pin already reads one sentence on this page and compares it. A SECOND
+  sentence claimed `ten` exercised of `thirteen` total, and went on saying so
+  after the constant moved, because no regex reached it. The
+  sentence is corrected to "thirteen of the sixteen", and the pin now sweeps
+  EVERY `"<number word> of the <number word>"` on this page whose sentence is
+  about these refusals and checks BOTH halves of each. Reverting the sentence in
+  a scratch copy fails it.
+- **MEDIUM 4.** `return seq` on an unparseable payload, in `verifyEvidenceChain`.
+  Mutated to `continue` it left 3425 tests green and turned a Founder assessment
+  that reported `evidence_chain_broken` into a clean one. Pinned in
+  `evidence-link-defences.test.ts`, with the exact seq asserted and the
+  no-false-alarm case (a payload that differs only in whitespace) beside it.
+- **MEDIUM 5.** The `prev_hash` comparison, at BOTH its sites — the walk and
+  `evidenceEntryLinkStands`. A row whose `prev_hash` column is forged while its
+  own `hash` stays correct over the REAL previous hash passes every other test in
+  both functions; without the comparison, `evidenceEntryLinkStands` answers
+  `true` for it, which would corroborate a verdict-clearing claim. Both sites are
+  pinned in the same file, and each mutation fails exactly its own test.
+
+### The LOW findings
+
+- **LOW 1 — a residual priced ABOVE its real cost, which is as much a false
+  claim as one priced below it.** `operator/evidence.ts` still read "Dropping
+  `hq_integrity_checkpoints` outright remains the other route, and still costs
+  the restart and the second Founder act the round-five text priced it at." The
+  round-ten header witness closed that route entirely. Re-executed at `237fc76`
+  — one `DROP TABLE`, nothing else — `p2`, `p3`, `p4` and `p5` each read
+  `boot=true [append_only_guard_missing] assess=true release=REFUSED`. The
+  sentence is corrected and the measurement is pinned in
+  `reliability-commitment-witness.test.ts`.
+- **LOW 2 — the drop-everything residual was priced two statements and one
+  restart too cheap.** Re-executed step by step on one warmed file, and written
+  out above beside the sentence it corrects: 33 `DROP TABLE`s alone, and 33 plus
+  `PRAGMA user_version = 0`, are both still `boot=true assess=true
+  release=REFUSED`; it takes `PRAGMA application_id = 0` as well — 35 statements
+  — and then ONE restart and ONE Founder assessment before the file reads clean.
+- **LOW 3 — the `application_id` encoding described here was the superseded
+  one.** Round ten replaced the single closed-set value `0x48514350` with a
+  16-bit signature plus a 16-bit mark, and this page went on describing the old
+  encoding with no correction marker, against its own convention. Corrected in
+  place, with the specificity cost and the one given-up mark value named.
+- **LOW 4 — dead public surface.** `readCommitmentWitness` was exported and
+  re-exported by `store/index.ts` with five hits, all inside `integrity.ts`, no
+  consumer and no test. It is module-private now, for the condition round six
+  made `integrityCheckpointLedgerPresent` module-private for; the two questions
+  callers ask (`commitmentWitnessPresent`, `committedCheckpointMark`) stay
+  exported.
+- **LOW 5 — an unpinned but contained defence.** Removing
+  `.filter(isHqIntegrityFinding)` from `rowToRecordedVerdict` left the suite
+  green and let a forged finding name reach `standingIntegrityVerdict`'s public
+  output. Pinned in `reliability-verdict-durability.test.ts` by a LEGAL append
+  carrying a forged name, with the containment (`carryRecordedVerdict`
+  re-filters, so no safe-mode decision sees it) asserted in the same test rather
+  than implied.
+- **LOW 6 — two Unicode category sizes measured on an older ICU.** `\p{Mn}` is
+  **2,059** and `\p{Cn}` **814,730** on the shipped runtime (Node v22.22.2, ICU
+  78.2, Unicode 17.0), not 1,796 and 810,961; `\p{Me}` 13, `\p{Co}` 137,468 and
+  `\p{Zs}` 17 were exact. All three sites are corrected, the figures now name the
+  Unicode version they were measured on, and
+  `redaction-invisible-classes.test.ts` measures every one of them against the
+  running engine and parses them back out of `redaction.ts`'s docblock. The
+  guarantee never moved with the numbers: the erase set is expressed as the
+  PROPERTIES, so a category that grows is covered the day the engine grows it.
+- **LOW 7 — recorded on `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md`.** The
+  enforcement-safe read audit described `#governingBudgetScopes` by its canonical
+  term alone, omitting `#durableTaskProjectScopes` and `#recordedScopesForTask`,
+  both of which are load-bearing elsewhere on that same page. Corrected there.
+- **LOW 8 — already closed at the merged head.** `integrity-statement-truth.test.ts`
+  carries `FILE_BACKED_BATTERY_TIMEOUT_MS = 60_000` on all six of its file-backed
+  batteries, as of `237fc76`. Not a defect at this head.
+
 ### What round thirteen adds to the NOT-fixed list
 
 - **`no_rowid_skip` is a step, not a boundary**, at the same price as every
@@ -4143,3 +4323,18 @@ created it, and this round completes its engine half.
   `MAX(rowid) + 1` and widen the gap. Neither is closed, for the reason round
   seven recorded: the only bound available for that check is the number being
   written.
+- **A PADDED prefix replay of the commitment ledger is silent from the very next
+  boot** — 13 statements at `237fc76`, 14 at this head. Executed and asserted in
+  `reliability-commitment-prefix-replay.test.ts`, with the two candidate closures
+  that were designed and rejected on the merits written out beside it. See HIGH 2
+  above for why no predicate over the file's own content can close it.
+- **`UPDATE op_tasks SET id` still detaches a task from its mission and project
+  ceilings at three statements** — `DROP TRIGGER trg_op_tasks_no_reidentify`, the
+  `UPDATE`, re-create — and no read-side derivation can hold it, because
+  `hq_mission_plan_items.task_id` names the task BY ID and there is no second key
+  to resolve it by. Priced and asserted in `budget-scope-identity.test.ts`; the
+  full record is on `PHASE_14_COST_INTELLIGENCE_OPTIMIZATION.md`.
+- **A verdict row's FORGED finding name still reaches nothing, but the row still
+  lands.** Appending to `hq_reliability_verdicts` is the write its guards
+  deliberately permit; what round thirteen pins is that the name is dropped at the
+  reader rather than that the append is refused.

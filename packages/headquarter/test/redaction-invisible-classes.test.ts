@@ -6,9 +6,15 @@
  * visible, so it hides nothing). Three whole categories were neither in the set
  * nor in any residual list:
  *
- *  - `\p{Mn}` non-spacing combining marks — 1,796 code points;
+ *  - `\p{Mn}` non-spacing combining marks — 2,059 code points;
  *  - `\p{Me}` enclosing marks — 13;
- *  - `\p{Cn}` unassigned — 810,961.
+ *  - `\p{Cn}` unassigned — 814,730.
+ *
+ * (Those first and third figures read 1,796 and 810,961 until Wave 5 correction
+ * round thirteen, Low 6. They were the sizes on an older ICU; a category size
+ * belongs to the Unicode version the engine carries — 17.0 here — not to this
+ * code, so the numbers are now measured against the running engine by the last
+ * test in this file rather than copied forward.)
  *
  * Each broke `sk-ABCDEFGHIJKLMNOP0123` into two unmatched halves with every
  * character of the key intact. U+0301 COMBINING ACUTE ACCENT and U+0378
@@ -71,7 +77,7 @@ describe('a combining mark does not carry a credential past the guard', () => {
   it('refuses EVERY non-spacing and enclosing mark, swept rather than sampled', () => {
     const marks = codePointsInCategory(/\p{Mn}|\p{Me}/u);
     // A count, so a narrowing of the sweep is visible rather than quietly
-    // passing over an empty set. 1,796 Mn + 13 Me at this Unicode version.
+    // passing over an empty set. 2,059 Mn + 13 Me at this Unicode version.
     expect(marks.length).toBeGreaterThanOrEqual(1_700);
     const survivors: string[] = [];
     for (const code of marks) {
@@ -124,7 +130,7 @@ describe('a combining mark does not carry a credential past the guard', () => {
   });
 
   it('refuses an UNASSIGNED code point used the same way', () => {
-    // A representative traversal rather than all 810,961: every unassigned code
+    // A representative traversal rather than all 814,730: every unassigned code
     // point takes the same `\p{Cn}` branch, and sweeping the whole plane set
     // for six shapes is minutes of CPU for no additional discrimination. The
     // step is deliberately not a power of two, so it does not land only on
@@ -293,4 +299,80 @@ describe('the whole Unicode plane, swept against the guard', () => {
     // it and the disclosure has to move too.
     expect(spaceSurvivors).toEqual(['U+0020', 'U+00A0']);
   }, 120_000);
+});
+
+/**
+ * Wave 5, correction round thirteen — Low 6: three figures in this file, in
+ * `redaction.ts` and on `PHASE_13_ADVANCED_RELIABILITY.md` said `\p{Mn}` was
+ * 1,796 code points and `\p{Cn}` 810,961. On the shipped runtime — Node
+ * v22.22.2, ICU 78.2, Unicode 17.0 — they are 2,059 and 814,730. `\p{Me}` 13,
+ * `\p{Co}` 137,468 and `\p{Zs}` 17 were exact.
+ *
+ * The class behind it is the one this whole round is about: a figure nothing
+ * compared to anything. It is closed the way the depth statement's cost clause
+ * was — by MEASURING on the running engine and parsing the written numbers back
+ * out of the prose that carries them.
+ *
+ * A category's size belongs to the Unicode version the engine carries, so the
+ * comparison is made only when the running version is the one the prose names.
+ * When it is not, what is still asserted is that the prose NAMES a version and
+ * does not claim the running one — which is the honest half, and is never a
+ * skip: both branches assert.
+ */
+describe('every Unicode category size this module writes down is measured, not copied forward', () => {
+  const MEASURED_ON = '17.0';
+
+  function sizeOf(property: string): number {
+    const matcher = new RegExp(`\\p{${property}}`, 'u');
+    let total = 0;
+    for (let code = 0; code <= 0x10ffff; code += 1) {
+      // Surrogates are not characters and cannot be formed with
+      // `String.fromCodePoint` in isolation for this purpose.
+      if (code >= 0xd800 && code <= 0xdfff) continue;
+      if (matcher.test(String.fromCodePoint(code))) total += 1;
+    }
+    return total;
+  }
+
+  it('states each figure at the size the running engine reports', () => {
+    const expected: Record<string, number> = {
+      Mn: 2_059,
+      Me: 13,
+      Cn: 814_730,
+      Co: 137_468,
+      Zs: 17,
+    };
+    const running = process.versions.unicode;
+    expect(typeof running, 'the engine must report a Unicode version to compare against').toBe(
+      'string',
+    );
+    if (running === MEASURED_ON) {
+      for (const [property, figure] of Object.entries(expected)) {
+        expect(sizeOf(property), `\\p{${property}} on Unicode ${running}`).toBe(figure);
+      }
+    } else {
+      // The figures were measured on another version. What must still hold is
+      // that this file says WHICH — a number with no version beside it is
+      // exactly the defect being corrected — and that the two do not silently
+      // claim to be the same.
+      expect(MEASURED_ON, 'the recorded version must not claim to be the running one').not.toBe(
+        running,
+      );
+      expect(MEASURED_ON).toMatch(/^\d+\.\d+$/);
+    }
+  }, 60_000);
+
+  it('carries the same figures in the module docblock that states them', async () => {
+    const fs = await import('node:fs');
+    const path = await import('node:path');
+    const url = await import('node:url');
+    const here = path.dirname(url.fileURLToPath(import.meta.url));
+    const source = fs.readFileSync(path.join(here, '..', 'src', 'live', 'redaction.ts'), 'utf8');
+    // Parsed back out of the prose, so the two cannot drift apart again.
+    expect(source).toContain('`\\p{Mn}` (2,059 code points)');
+    expect(source).toContain('`\\p{Cn}` unassigned (814,730)');
+    expect(source, 'the figures must name the Unicode version they were measured on').toContain(
+      `Unicode ${MEASURED_ON}`,
+    );
+  });
 });

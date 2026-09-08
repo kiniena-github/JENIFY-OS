@@ -2160,13 +2160,38 @@ describe('the page’s count of the backup guard’s refusals is the constant’
     }
   });
 
+  /**
+   * EVERY place the page states the pair, not the one phrasing this regex was
+   * first written for (Wave 5 correction round thirteen, Medium 3).
+   *
+   * Round twelve added this pin and it read `"<n> of the <m> are exercised"`.
+   * A SECOND sentence on the same page said "ten of the thirteen backup path
+   * protections are all exercised", and it went on saying it after the constant
+   * moved to sixteen and the exercised set to thirteen, because no regex
+   * reached it. A pin that reads one phrasing of a claim is the same partial
+   * enumeration this whole correction round is about, so the sweep below finds
+   * every `"<number word> of the <number word>"` on the page whose sentence is
+   * about these refusals and checks BOTH halves of each.
+   */
   it('states how many are exercised, and names the ones that are not', () => {
     const page = fs.readFileSync(PHASE_13_PAGE, 'utf8');
-    const match = /(\w+) of the \w+ are exercised/.exec(page);
-    expect(match, 'the page must state how many refusals are exercised').toBeTruthy();
-
     const driven = exercised();
     const notDriven = BACKUP_REFUSAL_REASONS.filter((reason) => !driven.includes(reason));
+
+    const pairs = [
+      ...page.matchAll(/(\w+) of the (\w+)\s+(?:are exercised|backup path protections)/g),
+    ];
+    expect(pairs.length, 'the page must state the exercised/total pair at least once').toBeGreaterThan(
+      0,
+    );
+    for (const pair of pairs) {
+      expect(NUMBER_WORDS[pair[1]!.toLowerCase()], `"${pair[0]}" — exercised count`).toBe(driven.length);
+      expect(NUMBER_WORDS[pair[2]!.toLowerCase()], `"${pair[0]}" — total count`).toBe(
+        BACKUP_REFUSAL_REASONS.length,
+      );
+    }
+    const match = pairs[0];
+    expect(match, 'the page must state how many refusals are exercised').toBeTruthy();
     expect(NUMBER_WORDS[match![1]!.toLowerCase()]).toBe(driven.length);
     // And each unexercised one has to be admitted by name, with its reason —
     // a count that quietly absorbs a newly-unexercised reason is the failure.

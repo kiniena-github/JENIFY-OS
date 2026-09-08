@@ -26,7 +26,15 @@
  * The answer is a number that only ever goes UP and does not live in any table:
  * the greatest rowid the commitment ledger has ever reached, carried in the low
  * 16 bits of the same database-header slot as the round-seven witness. A
- * `DROP TABLE` cannot lower it and a replay cannot raise the ledger to meet it.
+ * `DROP TABLE` cannot lower it.
+ *
+ * **"and a replay cannot raise the ledger to meet it" stood here and was
+ * FALSE** (Wave 5 correction round thirteen, High 2). The witness is a COUNT, so
+ * it is met by putting the right NUMBER of rows back rather than the right rows:
+ * pad the prefix up to the mark with copies of a surviving row at the erased
+ * rowids. Executed, and disclosed at its measured price in the last describe
+ * block of this file, together with the two candidate closures that were
+ * designed and rejected on the merits.
  *
  * Every attack below is executed against a real FILE through a RAW
  * `better-sqlite3` connection that never ran HQ's code, because each claim is a
@@ -558,5 +566,160 @@ describe('the sentence that crosses to the Founder says what the code does', () 
     expect(SAFE_MODE_STATEMENT).toContain('replaying a PREFIX of its own real rows');
     // The residual is in the same sentence as the guarantee, not a page away.
     expect(SAFE_MODE_STATEMENT).toContain('back to a lower mark');
+  });
+});
+
+/**
+ * Wave 5, correction round thirteen — High 2: the header mark can be MET by
+ * padding, and three places said it could not.
+ *
+ * The sentence "a `DROP TABLE` cannot lower it and a replay cannot raise the
+ * ledger to meet it" stood verbatim in this file's header, in
+ * `HQ_COMMITMENT_WITNESS_MARK`'s docblock and on
+ * `PHASE_13_ADVANCED_RELIABILITY.md`. Its second half is false. The witness is a
+ * COUNT — the greatest rowid the ledger has ever reached — and a count is met by
+ * putting the right NUMBER of rows back, not the right rows: drop the table,
+ * replay its own DDL, re-insert a PREFIX of the genuine rows, then pad up to the
+ * mark with copies of a surviving row at explicit rowids. `rows`, `top` and
+ * `sqlite_sequence` are all the mark again, so both `top < witness.mark` and
+ * `rows < witness.mark` are false.
+ *
+ * ## Why it is DISCLOSED rather than closed
+ *
+ * No check computable from the file can close it, and the reason is exact. The
+ * attacker reads the genuine ledger before destroying it, so any predicate over
+ * the file's own content can be satisfied by writing content that satisfies it;
+ * the only predicate that could not be met is one over content the attacker
+ * cannot reconstruct, and there is none — the header carries 32 bits, 16 of
+ * which are the signature. Two candidate closures were designed and rejected on
+ * the merits, and both are recorded rather than left for a later round to
+ * rediscover:
+ *
+ *  1. **A "each checkpoint advances something" invariant.** It is true of
+ *     `recordIntegrityCheckpoint` by construction and it does catch a pad built
+ *     from COPIES. It is rejected because two processes that read the same state
+ *     before either writes produce two checkpoints committing identical
+ *     quantities — a legitimate concurrent boot — so the check can raise a
+ *     PERMANENT finding over an untampered file. A fabricated finding is
+ *     forbidden in the alarm direction exactly as in the reassurance one, which
+ *     is the whole subject of this correction round. And it buys little even if
+ *     it were safe: the pad can be built from DISTINCT rows whose committed
+ *     quantities rise, which `no_overclaim` permits because they stay under the
+ *     file's real marks.
+ *  2. **A content digest in the header's low bits.** Sixteen bits is a 65,536-way
+ *     collision search an attacker runs offline in under a second, and widening
+ *     it means either shrinking the signature — which round ten already measured
+ *     as a real loss in the false-alarm direction — or coupling
+ *     `PRAGMA user_version`, which round ten rejected because it would let ONE
+ *     statement defeat both marks.
+ *
+ * So the sentence is corrected and the residual is priced by execution below.
+ */
+describe('the header mark is a COUNT, and a padded replay meets it', () => {
+  it('is silent from the very next boot, at a counted price', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx, 6);
+      fx.db.close();
+
+      const raw = fx.raw();
+      const table = HQ_INTEGRITY_CHECKPOINT_TABLE;
+      const mark = committedCheckpointMark(raw);
+      const before = shape(raw, table);
+      expect(mark).toBeGreaterThan(2);
+      expect(before).toEqual({ rows: mark, top: mark, highWater: mark });
+
+      const rows = raw.prepare(`SELECT * FROM "${table}" ORDER BY rowid`).all() as Record<
+        string,
+        unknown
+      >[];
+      const objects = raw
+        .prepare(
+          `SELECT type, sql FROM sqlite_master
+            WHERE (name = ? OR tbl_name = ?) AND sql IS NOT NULL
+            ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END`,
+        )
+        .all(table, table) as { type: string; sql: string }[];
+
+      let statements = 0;
+      raw.exec('PRAGMA foreign_keys = OFF');
+      raw.exec(`DROP TABLE "${table}"`);
+      statements += 1;
+      for (const object of objects) {
+        raw.exec(object.sql);
+        statements += 1;
+      }
+      const keep = 2;
+      const columns = Object.keys(rows[0] ?? {});
+      const insert = raw.prepare(
+        `INSERT INTO "${table}" (${columns.map((column) => `"${column}"`).join(', ')})
+         VALUES (${columns.map(() => '?').join(', ')})`,
+      );
+      for (const row of rows.slice(0, keep)) {
+        insert.run(columns.map((column) => row[column] as never));
+        statements += 1;
+      }
+      // The pad: copies of the last SURVIVING row, at the explicit rowids the
+      // erased rows held, with only the UNIQUE `id` changed so the ledger's own
+      // `no_replace` guard is satisfied. Every commitment written back is one HQ
+      // itself made, so `no_overclaim` has nothing to refuse.
+      const template = rows[keep - 1]!;
+      for (let seq = keep + 1; seq <= mark; seq += 1) {
+        const clone: Record<string, unknown> = {
+          ...template,
+          seq,
+          id: `${String(template.id)}-pad-${seq}`,
+        };
+        insert.run(columns.map((column) => clone[column] as never));
+        statements += 1;
+      }
+
+      // The state the four in-file readings AND the header witness all accept:
+      // present, guarded, self-consistent, and holding the right NUMBER of the
+      // wrong rows.
+      expect(shape(raw, table)).toEqual(before);
+      expect(committedCheckpointMark(raw)).toBe(mark);
+      expect(elidedCommitmentLedgerRows(raw)).toBe(false);
+      expect(regressedImmutableLedgers(raw)).toEqual([]);
+      expect(truncatedImmutableLedgers(raw)).toEqual([]);
+      expect(contradictedChainCommitment(raw)).toBeNull();
+      // Four of the six commitments HQ made are gone, and four copies of one
+      // commitment stand where they were.
+      const distinct = (
+        raw
+          .prepare(`SELECT COUNT(DISTINCT chain_length) AS n FROM "${table}"`)
+          .get() as { n: number }
+      ).n;
+      expect(distinct).toBe(keep);
+      expect(statements).toBe(1 + objects.length + keep + (mark - keep));
+      raw.close();
+
+      // The disclosure, executed. Asserted rather than described, so that
+      // CLOSING this route fails here and sends whoever closed it to the
+      // residual list instead of leaving a stale price on the page.
+      expectClean(fx, ['padded-one', 'padded-two', 'padded-three']);
+    } finally {
+      fx.cleanup();
+    }
+  });
+
+  /**
+   * And the half that DOES hold, kept beside it so the correction does not read
+   * as "the witness buys nothing": a replay that does not pad — the round-ten
+   * attack — is still blocking, which is the case the mark was built for.
+   */
+  it('still refuses the same replay when it is not padded', () => {
+    const fx = fileFixture();
+    try {
+      warm(fx, 6);
+      fx.db.close();
+      const raw = fx.raw();
+      replayPrefix(raw, HQ_INTEGRITY_CHECKPOINT_TABLE, 2);
+      expect(elidedCommitmentLedgerRows(raw)).toBe(true);
+      raw.close();
+      expectPermanentlyBlocking(fx, ['unpadded-one', 'unpadded-two']);
+    } finally {
+      fx.cleanup();
+    }
   });
 });

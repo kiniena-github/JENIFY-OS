@@ -1300,3 +1300,71 @@ describe('the unauthenticated artifact never says "fine" while HQ has said other
     }
   });
 });
+
+/**
+ * Wave 5, correction round thirteen — Low 5: the vocabulary filter on the
+ * verdict READER reached this head unpinned.
+ *
+ * `rowToRecordedVerdict` reads every stored finding through
+ * `isHqIntegrityFinding`, so a row appended by a raw writer cannot introduce a
+ * finding name outside the closed vocabulary. Removing that `.filter(...)` left
+ * the whole suite green at `237fc76`, and it changes the answer: a forged name
+ * reaches `standingIntegrityVerdict`'s PUBLIC output, which is what the
+ * reliability views, the refusals and the unauthenticated artifact are keyed
+ * by.
+ *
+ * It is CONTAINED — `carryRecordedVerdict` re-filters, so the forged name does
+ * not reach a safe-mode decision — and the containment is asserted here too, so
+ * the pin states the real reach rather than implying a worse one.
+ */
+describe('a verdict row’s findings are read through the closed vocabulary', () => {
+  it('drops a forged finding name from the reader’s own output', () => {
+    const fx = fileFixture();
+    try {
+      breakChainByLegalAppend(fx);
+      expectOk(fx.ops.assessHqIntegrity({ requestedBy: 'founder' }));
+      const raw = fx.raw();
+      const standing = standingIntegrityVerdict(raw)!;
+      expect(standing.safeMode).toBe(true);
+      expect([...standing.findings]).toContain('evidence_chain_broken');
+
+      // An APPEND is the write this ledger's guards deliberately permit, so no
+      // trigger has to be dropped: the forged name rides a legal insert.
+      raw
+        .prepare(
+          `INSERT INTO hq_reliability_verdicts
+             (id, assessed_at, depth, safe_mode, findings, process_id, assessed_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          'verdict-forged-vocabulary',
+          '2030-01-01T00:00:00.000Z',
+          'full',
+          1,
+          JSON.stringify(['evidence_chain_broken', 'the_founder_must_call_this_number']),
+          'attacker',
+          'attacker',
+        );
+
+      const after = standingIntegrityVerdict(raw)!;
+      expect(after.safeMode, 'an ENGAGED verdict stands whoever appended it').toBe(true);
+      expect(
+        [...after.findings],
+        'a name outside the closed vocabulary never reaches the reader’s output',
+      ).toEqual(['evidence_chain_broken']);
+      raw.close();
+
+      // And the containment, stated rather than implied: the safe-mode decision
+      // the next process takes carries only vocabulary names either way.
+      const process = fx.reopen('after-forged-name');
+      const posture = process.ops.hqReliabilityPosture().integrity;
+      expect(posture.safeMode).toBe(true);
+      for (const observation of posture.observations) {
+        expect(HQ_INTEGRITY_FINDINGS as readonly string[]).toContain(observation.finding);
+      }
+      process.db.close();
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
