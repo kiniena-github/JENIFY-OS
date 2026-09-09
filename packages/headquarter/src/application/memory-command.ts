@@ -19,13 +19,14 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import { canonicalJson } from '../operator/approvals.js';
 import type { MemoryKind, MemoryPrivacy, MemoryRecord } from '../memory/schema.js';
 import type { ArchiveStatus, DateConfidence, RelatedRefs } from '../archive/schema.js';
 
-export const MEMORY_COMMAND_CAPABILITY = {
+export const MEMORY_COMMAND_CAPABILITY = deepFreeze({
   id: 'hq.memory_command',
   description:
     'Founder memory command — records and supersedes canonical company memory records. ' +
@@ -33,18 +34,18 @@ export const MEMORY_COMMAND_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the memory-command capability — a CONFIGURATION action. */
 export function registerMemoryCommandCapability(db: HqDatabase): void {
   new CapabilityRegistry(db).register({ ...MEMORY_COMMAND_CAPABILITY });
 }
 
-export const MEMORY_COMMAND_RESERVED_CONTRACT = {
+export const MEMORY_COMMAND_RESERVED_CONTRACT = deepFreeze({
   riskClass: MEMORY_COMMAND_CAPABILITY.riskClass,
   sideEffect: MEMORY_COMMAND_CAPABILITY.sideEffect,
   idempotent: MEMORY_COMMAND_CAPABILITY.idempotent,
-} as const;
+} as const);
 
 /** Which contract fields the registry's CURRENT row disagrees with, if any. */
 export function memoryCommandContractDrift(capability: Capability): string[] {

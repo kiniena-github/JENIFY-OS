@@ -52,6 +52,7 @@
  */
 
 import type { HumanPrincipal, HumanPrincipalPort } from '../application/principals.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 /* ------------------------------------------------------------------ */
 /* The account, as the host resolved it                                */
@@ -151,14 +152,46 @@ export interface ControlRequest {
  * `actorAuthentication` is here for the same reason as the identity keys —
  * it is the marker recording how much is known about the caller, and a client
  * that could set it could upgrade its own trust level.
+ *
+ * **Five `*By` spellings were missing** (Wave 5 correction round six, Medium 7;
+ * this sentence corrected at round seven, Low 7, because it counted `workerId`
+ * among the five it added and then excluded it three paragraphs down, and never
+ * named `assessedBy`, which the array really does add). The five ADDED are
+ * `setBy`, `observedBy`, `recordedBy`, `issuedBy` and `assessedBy`; `workerId`
+ * was reported with them and is deliberately NOT here, for the reason below.
+ * The list held `requestedBy` and stopped there, so those spellings were
+ * accepted:
+ * executed against the previous head, `requestedBy`/`principalId`/`actor`/
+ * `founderId` answered 400 with the store digest unchanged, and the other five
+ * answered 201 with the digest CHANGED. There is NO authority effect — every
+ * actor a control route passes to the facade is `founder.principal.id` and the
+ * body field is never read — but the module's own stated rule is that such a
+ * key is "REFUSED if any is present — not ignored, refused, so a client that
+ * believes it can name a principal learns immediately that it cannot", and
+ * `setBy`/`observedBy`/`recordedBy`/`issuedBy` are literally the FACADE's
+ * parameter names for the acting principal. A client that spelled one and got a
+ * 201 learned the opposite of the truth.
+ *
+ * `workerId`, the sixth spelling the review reported, is deliberately NOT here, because
+ * adding it would be wrong rather than strict: on the workforce and
+ * collaboration routes `workerId` names the worker the Founder is acting UPON —
+ * the object of the request, not a claim about who is making it — and reserving
+ * it took eleven real behaviours out of the product. Tried, measured, reverted.
+ * The rule this list encodes is "a client may not name WHO IS ACTING", and
+ * `workerId` does not.
  */
-export const CLIENT_IDENTITY_KEYS: readonly string[] = [
+export const CLIENT_IDENTITY_KEYS: readonly string[] = deepFreeze([
   'principalId',
   'principal',
   'founderId',
   'founder',
   'isFounder',
   'requestedBy',
+  'setBy',
+  'observedBy',
+  'recordedBy',
+  'issuedBy',
+  'assessedBy',
   'by',
   'actor',
   'actorAuthentication',
@@ -171,7 +204,7 @@ export const CLIENT_IDENTITY_KEYS: readonly string[] = [
   'permissions',
   'sessionToken',
   'token',
-];
+]);
 
 export type ClientIdentityScan = { ok: true } | { ok: false; key: string };
 
@@ -218,7 +251,7 @@ export function scanForClientIdentity(body: unknown, depth = 0): ClientIdentityS
 /* Origin / CSRF                                                       */
 /* ------------------------------------------------------------------ */
 
-export const STATE_CHANGING_METHODS: readonly string[] = ['POST', 'PUT', 'PATCH', 'DELETE'];
+export const STATE_CHANGING_METHODS: readonly string[] = deepFreeze(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 export type OriginRejection =
   | 'origin_missing'
@@ -535,7 +568,13 @@ export function loadFounderBindings(raw: unknown): FounderMapResult {
           'A guessed username or email is never accepted in their place.',
       };
     }
-    const accountKey = `${realmId} ${accountId}`;
+    // U+001F UNIT SEPARATOR, written as an ESCAPE: a literal 0x00 makes this
+    // file binary to grep/git grep/ripgrep, which then skip its content
+    // entirely, and a RAW 0x1F is invisible to a reader even though git still
+    // treats the file as text. The separator was raw here until round seven's
+    // derived source-hygiene assertion found it (Low NEW-7's own class).
+    // Same runtime value; the file stays text (Wave 5 Medium 10).
+    const accountKey = `${realmId}\u001f${accountId}`;
     if (seenAccounts.has(accountKey)) {
       return {
         ok: false,
@@ -585,7 +624,7 @@ export type FounderResolution =
   | { ok: false; reason: FounderDenial; message: string };
 
 /** HTTP status each denial maps to. Anything authenticated-but-refused is 403. */
-export const FOUNDER_DENIAL_STATUS: Readonly<Record<FounderDenial, number>> = {
+export const FOUNDER_DENIAL_STATUS: Readonly<Record<FounderDenial, number>> = deepFreeze({
   unauthenticated: 401,
   founder_map_unconfigured: 403,
   founder_map_malformed: 403,
@@ -593,7 +632,7 @@ export const FOUNDER_DENIAL_STATUS: Readonly<Record<FounderDenial, number>> = {
   not_founder: 403,
   principal_unknown: 403,
   principal_inactive: 403,
-};
+});
 
 export interface FounderResolutionDeps {
   sessions: SessionResolverPort;
@@ -696,7 +735,7 @@ export const STEP_UP_MAX_SESSION_AGE_MS = 5 * 60_000;
  * A denial is never an authorization and is never step-up-gated: making it
  * harder to STOP something than to allow it would be exactly backwards.
  */
-export const STEP_UP_RISK_CLASSES: readonly string[] = ['founder_gate', 'destructive'];
+export const STEP_UP_RISK_CLASSES: readonly string[] = deepFreeze(['founder_gate', 'destructive']);
 
 export type StepUpFailure =
   | 'step_up_required'

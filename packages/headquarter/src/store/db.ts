@@ -224,13 +224,146 @@ export function connectHqDatabaseUnmigrated(path: string = DEFAULT_HQ_DB_PATH): 
 }
 
 /**
+ * The table names a handle carried BEFORE `migrateHqDatabase` ran on it.
+ *
+ * Keyed by the handle, so it cannot be reached, replayed or forged through any
+ * exported surface, and it disappears with the connection.
+ */
+const TABLES_BEFORE_MIGRATION = new WeakMap<HqDatabase, ReadonlySet<string>>();
+
+/**
+ * HQ's own `user_version` stamp, and the CLOSED set of values that mean "HQ
+ * ensured this file".
+ *
+ * It lives HERE rather than in `integrity.ts` because BOTH readings of the mark
+ * have to be the same reading (Wave 5 correction round six, Low 7).
+ * `migrateHqDatabase` recorded "any non-zero value" while
+ * `hqSchemaEnsuredMarkPresent` read the closed set, so a foreign application's
+ * `user_version = 7` made `schemaEnsuredMarkBeforeMigration` TRUE and
+ * `hqSchemaEnsuredMarkPresent` FALSE — two spellings of "HQ has been here" that
+ * disagreed. The outer `established` gate absorbed it, so it was not
+ * exploitable at that head; it was one refactor from being so, and a mark with
+ * two meanings is not a mark. `integrity.ts` imports these rather than
+ * declaring its own.
+ *
+ * `0x48510001` is HQ's own: `0x4851` is "HQ" in ASCII, the low half is the
+ * schema generation. A later build that raises the generation adds the new
+ * value to the set beside the old one — a deliberate reviewed act, never an
+ * arithmetic comparison that would quietly accept a foreign stamp again.
+ *
+ * The cost, stated: a file stamped by an EARLIER build of this wave carries
+ * `user_version = 1`, which is not a member, so such a file reads as unmarked.
+ * The ledger half of the discriminator still answers for it, and the first
+ * writable construction re-stamps it.
+ */
+export const HQ_SCHEMA_ENSURED_MARK = 0x48510001;
+export const HQ_SCHEMA_ENSURED_MARKS: readonly number[] = Object.freeze([HQ_SCHEMA_ENSURED_MARK]);
+
+/** True when `value` is a `user_version` HQ itself stamped. One spelling, two readers. */
+export function isHqSchemaEnsuredMark(value: number): boolean {
+  return Number.isInteger(value) && HQ_SCHEMA_ENSURED_MARKS.includes(value);
+}
+
+/**
+ * The same, for HQ's own schema-ensured mark in `PRAGMA user_version`. Same
+ * WeakMap discipline, same reason, same instant — see
+ * `schemaEnsuredMarkBeforeMigration`.
+ */
+const MARK_BEFORE_MIGRATION = new WeakMap<HqDatabase, boolean>();
+
+/**
+ * What this handle's file carried before HQ's own migration touched it, or null
+ * when this handle has not been migrated in this process.
+ *
+ * **This exists because of a boot-ORDER hole, and the hole was in the one
+ * ledger that matters most** (Wave 5 correction round four, High H1).
+ * `op_evidence` — the hash-chained audit log — is created by
+ * `migrateHqDatabase`, which runs BEFORE the facade constructor takes its
+ * boot-time immutability census. So the census, which correctly reports a
+ * DROPPED ledger for the other declared tables, could never see `op_evidence`
+ * absent: by the time it looked, the migration had already re-created it,
+ * empty. Executed: raw-view `absentImmutableTables` returned
+ * `["op_evidence"]`, and after `openHqDatabase()` it returned `[]`.
+ *
+ * The consequence was categorical. `DROP TABLE op_evidence` read clean at BOTH
+ * depths — `safeMode: false`, `observations: []`, `chainVerified: true` — over
+ * an audit log that had been destroyed and rebuilt empty, and the same act
+ * CLEARED an already-latched safe mode and re-admitted `releaseKillSwitch`.
+ *
+ * Observing here is the ordering fix: the fact is captured at the only instant
+ * it is still true. The census reads it through
+ * `observeImmutabilityAsFound`. A handle opened read-only, or connected without
+ * migrating, records nothing and the census falls back to reading the file as
+ * it stands — which is correct, because nothing has re-created anything on it.
+ */
+export function tableNamesBeforeMigration(db: HqDatabase): ReadonlySet<string> | null {
+  return TABLES_BEFORE_MIGRATION.get(db) ?? null;
+}
+
+/**
+ * The same WeakMap discipline for HQ's own schema-ensured MARK: what
+ * `PRAGMA user_version` said before this handle's migration ran.
+ *
+ * Added by the Wave 5 round-four RECONCILIATION, because the two lanes' fixes
+ * only compose with it. One lane made the first-boot discriminator read the
+ * mark as well as the ledger catalogue, so that dropping EVERY declared ledger
+ * no longer reads as a fresh file. The other made `op_evidence`'s absence a
+ * question asked of the PRE-migration catalogue, because the migration
+ * re-creates that one table before the census looks. Put together without this,
+ * the widest attack — drop every declared ledger — reports all the others and stays
+ * silent about the audit log itself, which is the one it destroyed.
+ *
+ * The mark has to be read at the same instant as the catalogue, and for exactly
+ * the same reason: the facade STAMPS it at the end of its construction, so a
+ * second facade over the same handle would otherwise see a mark this process
+ * had just written and read a genuine first boot as an established file with
+ * `op_evidence` lost. Recorded here, that cannot happen — this is what the file
+ * said before HQ touched it.
+ *
+ * Null when this handle has not been migrated in this process, on the same
+ * fail-safe reading as `tableNamesBeforeMigration`: "I could not look" is not
+ * "nothing was there".
+ */
+export function schemaEnsuredMarkBeforeMigration(db: HqDatabase): boolean | null {
+  return MARK_BEFORE_MIGRATION.get(db) ?? null;
+}
+
+/**
  * Apply the schema and column upgrades to an already-connected database.
  *
  * Idempotent: the DDL is `CREATE TABLE IF NOT EXISTS` throughout and
  * `ensureColumns` adds only genuinely missing columns, so a migrating open and
  * an explicit later migration produce the same schema.
+ *
+ * The pre-migration table census is taken FIRST and recorded against the
+ * handle — see `tableNamesBeforeMigration` for why that ordering is
+ * load-bearing. It is a read of `sqlite_master`, so it costs one statement and
+ * changes nothing.
  */
 export function migrateHqDatabase(db: HqDatabase): HqDatabase {
+  try {
+    const rows = db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+      .all() as { name: string }[];
+    TABLES_BEFORE_MIGRATION.set(db, new Set(rows.map((row) => row.name)));
+    // HQ's own schema-ensured mark, read at the SAME instant and for the same
+    // reason — see `schemaEnsuredMarkBeforeMigration`. Only a value HQ ITSELF
+    // stamps counts (Wave 5 correction round six, Low 7): this used to accept
+    // any non-zero value on the argument that it was the fail-closed reading,
+    // and it was not — it made a FOREIGN application's `user_version` evidence
+    // that HQ had been here, which is the false-alarm direction, and it
+    // disagreed with `hqSchemaEnsuredMarkPresent`, which has always read the
+    // closed set. `isHqSchemaEnsuredMark` is now the one spelling both use.
+    const version = db.prepare(`PRAGMA user_version`).get() as Record<string, unknown> | undefined;
+    const value = Number(Object.values(version ?? {})[0] ?? 0);
+    MARK_BEFORE_MIGRATION.set(db, isHqSchemaEnsuredMark(value));
+  } catch {
+    // A handle that cannot even read its own catalogue records nothing rather
+    // than an empty set: "I could not look" must not read as "nothing was
+    // there", which would make every declared ledger look dropped. The mark is
+    // recorded in the same try for the same reason — either both facts are
+    // observed at that instant or neither is.
+  }
   db.exec(DDL);
   ensureColumns(db);
   return db;
@@ -261,6 +394,28 @@ export function openHqDatabaseReadOnly(path: string = DEFAULT_HQ_DB_PATH): HqDat
   const db = new Database(path, { readonly: true, fileMustExist: true });
   // A connection-scoped read setting; it writes nothing to the file.
   db.pragma('foreign_keys = ON');
+  // The SAME durability posture the writing open establishes, and for the same
+  // reason it is set there: `synchronous` is a property of the CONNECTION, not
+  // of the file, so a handle that never sets it reports whatever the SQLite
+  // build happens to default to.
+  //
+  // Leaving it unset was a fabricated defect claim (Wave 5 correction round
+  // three, Medium A5). `hq:snapshot` is this open, and this open reported
+  // `synchronous = 1` where the writer reports 2 — so EVERY unauthenticated
+  // snapshot of a perfectly healthy WAL + FULL store published
+  // `durabilityMeetsRequirement: false` and a `durability_below_requirement`
+  // finding about a store that met the requirement, and a genuine degradation
+  // was permanently indistinguishable from that noise.
+  //
+  // Setting it writes nothing (executed: a read-only handle accepts the pragma
+  // and the file is untouched) and claims nothing the handle cannot see: WAL is
+  // a real, persistent property of the FILE and is read verbatim, while
+  // `synchronous` is this connection's own and is now the declared one. What a
+  // read-only handle still cannot speak for is the WRITER's connection —
+  // `readDurabilityPosture` says so on the posture itself.
+  // Spelled exactly as `connectHqDatabaseUnmigrated` spells it, so the two HQ
+  // opens cannot drift into establishing different postures.
+  db.pragma('synchronous = FULL');
   return db;
 }
 

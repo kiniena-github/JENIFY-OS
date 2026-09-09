@@ -78,9 +78,18 @@ import { EXECUTION_PROVIDER_KEY, readProviderBinding } from '../../operator/prov
 import type { OperatorTask } from '../../operator/queue.js';
 import {
   assertDispatchEvidenceGrant,
+  capabilityRowFor,
+  approvalRecordFor,
+  assignabilityProblemFor,
+  declaredProviderFor,
   gatewayActionHistoryFor,
   killSwitchEngagedFor,
+  policyContextFor,
+  reconciliationAuthorityRefusalFor,
+  specialistRecordFor,
   taskEvidenceRowsFor,
+  taskMetaFor,
+  taskRowFor,
   writeDispatchOutcome,
 } from '../../application/service.js';
 import type {
@@ -109,6 +118,7 @@ import {
   type GitHubLabelResult,
   type GitHubTarget,
 } from './transport.js';
+import { deepFreeze } from '../../contracts/freeze.js';
 
 /** The only provider this adapter will ever dispatch. */
 export const DISPATCH_PROVIDER: ProviderId = 'CLAUDE';
@@ -118,13 +128,13 @@ export const DISPATCH_PROVIDER: ProviderId = 'CLAUDE';
  * a typo in a string literal would silently defeat the duplicate-dispatch guard,
  * which is the one guard whose failure costs a duplicate public issue.
  */
-export const CLAUDE_DISPATCH_EVIDENCE = {
+export const CLAUDE_DISPATCH_EVIDENCE = deepFreeze({
   refused: 'claude_github_dispatch_refused',
   attempted: 'claude_github_dispatch_attempted',
   succeeded: 'claude_github_dispatch_succeeded',
   failed: 'claude_github_dispatch_failed',
   correlated: 'claude_github_result_correlated',
-} as const;
+} as const);
 
 /** Actor recorded on evidence written by this adapter. Never a human's name. */
 export const DISPATCH_ACTOR = 'hq-claude-dispatch';
@@ -254,11 +264,21 @@ export function claudeDispatchEligibility(
   taskId: string,
   now: Date = new Date(),
 ): EligibilityVerdict {
-  const task = ops.queue.get(taskId);
+  // Both reads through the enforcement-safe function bindings, never the
+  // patchable public convenience surfaces (Wave 5 correction round fifteen,
+  // Medium 1). The kill-switch and gateway-history reads below were already
+  // hardened, each with a comment saying "this verdict decides a
+  // publication" — and the two reads that produce the task and its capability
+  // sat above them on `ops.queue.get` / `ops.queue.capabilities.get`. The
+  // publication itself is protected further down the path (`claimNext`
+  // re-reads `#capabilityOf`; a hostile review got zero GitHub issues out of
+  // two attempts), but the verdict a Founder READS was forgeable, and a
+  // forgeable eligibility verdict is what a Founder acts on.
+  const task = taskRowFor(ops, taskId);
   if (!task) {
     return { eligible: false, code: 'unknown_task', message: `Unknown task: ${taskId}` };
   }
-  const capability = ops.queue.capabilities.get(task.capabilityId);
+  const capability = capabilityRowFor(ops, task.capabilityId);
   if (!capability) {
     return {
       eligible: false,
@@ -335,9 +355,27 @@ export function claudeDispatchEligibility(
     };
   }
 
-  const classification = classifyCapability(capability, ops.policyContext);
+  // Enforcement-safe read (Wave 5 correction round eighteen, High A). This was
+  // the LAST patchable read on this lane, and it was the one that decided
+  // whether the hardened approval check below runs at all: `requiresApproval`
+  // is false for an `external_side_effect` capability that carries a standing
+  // pre-approval, so a context naming the task's capability skipped the gate
+  // entirely. `ops.policyContext` is a configurable prototype accessor and the
+  // instance also takes an own property of that name; both spellings turned
+  // `{"eligible":false,"code":"approval_invalid"}` into `{"eligible":true}` on
+  // an approval expiring in the year 2000. The previous census excused it
+  // because `freezePolicyContext` returns a FROZEN object — a fact about the
+  // value, not about the accessor that produces it.
+  const classification = classifyCapability(capability, policyContextFor(ops));
   if (classification.requiresApproval) {
-    const rejection = validateApproval(ops.queue.approvalFor(taskId), taskActionDigest(task), now);
+    // Enforcement-safe read (Wave 5 correction round sixteen, Medium B-6).
+    // `ops.queue.approvalFor` is a prototype slot, and the two reads directly
+    // above this one had already been migrated off the patchable surfaces for
+    // exactly this reason. On an approval row with `expires_at: 2000-01-01`,
+    // patching it turned `{"eligible":false,"code":"approval_invalid"}` into
+    // `{"eligible":true}` — a false readiness verdict printed to the Founder
+    // by `src/cli/claude-dispatch.ts`.
+    const rejection = validateApproval(approvalRecordFor(ops, taskId), taskActionDigest(task), now);
     if (rejection) {
       return {
         eligible: false,
@@ -741,8 +779,23 @@ export function executorReadiness(
   capabilityId: string | null,
 ): ExecutorReadiness {
   const problems: string[] = [];
-  const specialist = ops.directory.getSpecialist(workerId);
-  const declaredProvider = ops.queue.providerOf(workerId);
+  // Enforcement-safe reads (Wave 5 correction round sixteen, Medium B-6 /
+  // B-7; round seventeen, Medium 2). This verdict is Founder-facing and it
+  // states PROVIDER IDENTITY — law 10 — the handover freeze, and whether a
+  // worker exists at all. `ops.queue.providerOf` and
+  // `ops.queue.assignabilityProblem` are prototype slots; neither was
+  // exploited by the review, and both were migrated because what is being
+  // closed is the class, not the list of call sites somebody remembered.
+  //
+  // `ops.directory.getSpecialist` sat on the line above that sentence for one
+  // round and was not migrated with them. It is an own-property closure, which
+  // the round-sixteen scan classified as unpatchable — backwards, since an own
+  // property is assignable directly and needs no prototype at all. Patching it
+  // moved `registered`, `active` and `hasCapability` on this verdict from
+  // `false,false,false` to `true,true,true` for a worker the directory has
+  // never heard of.
+  const specialist = specialistRecordFor(ops, workerId);
+  const declaredProvider = declaredProviderFor(ops, workerId);
 
   if (!specialist) {
     problems.push(
@@ -782,7 +835,7 @@ export function executorReadiness(
   }
 
   if (specialist) {
-    const assignability = ops.queue.assignabilityProblem(workerId);
+    const assignability = assignabilityProblemFor(ops, workerId);
     if (assignability != null) problems.push(assignability);
   }
 
@@ -840,7 +893,9 @@ function releaseHandoffClaim(
 ): ClaimReleaseOutcome {
   let claimedBy = 'unknown';
   try {
-    const task = ops.queue.get(taskId);
+    // Canonical, not the patchable read: this decides whether HQ calls
+    // `releaseClaim` and with which fence.
+    const task = taskRowFor(ops, taskId);
     if (!task || task.claimedBy == null) return { kind: 'not_held' };
     if (task.status !== 'assigned' && task.status !== 'running') return { kind: 'not_held' };
     claimedBy = task.claimedBy;
@@ -1082,7 +1137,13 @@ export function dispatchClaudeTask(ops: HeadquarterOperations, options: Dispatch
     );
   }
 
-  const meta = ops.readMeta(taskId);
+  // Read through the module binding, not `ops.readMeta` (Wave 5 correction
+  // round eighteen, Low D). This moves no authority — but `title` and
+  // `project` are rendered into the BODY OF A REAL GITHUB ISSUE two lines
+  // below, so its consumer is an external publication, not the text of a
+  // verdict, and the census reason that called it the latter was wrong about
+  // where it goes.
+  const meta = taskMetaFor(ops, taskId);
   const dispatchedAt = now().toISOString();
   const issue = renderDispatchIssue({
     task: eligibility.task,
@@ -1614,7 +1675,10 @@ export function resolveUnknownDispatch(
   // boundary `approveTask` uses. No new identity mechanism: `'system'` and
   // registered workers are refused, and the id must resolve to a principal
   // holding approval authority.
-  const authorityRefusal = ops.reconciliationAuthorityRefusal(input.resolvedBy.trim());
+  // Enforcement-safe read (Wave 5 correction round eighteen, the audit High A
+  // asked for over the rest of this lane). This is the ONE authority gate on
+  // the terminal write below, and it was asked of a public prototype method.
+  const authorityRefusal = reconciliationAuthorityRefusalFor(ops, input.resolvedBy.trim());
   if (authorityRefusal) {
     return refuse('task_not_eligible', `Reconciliation refused: ${authorityRefusal}`, {
       resolvedBy: input.resolvedBy.trim(),

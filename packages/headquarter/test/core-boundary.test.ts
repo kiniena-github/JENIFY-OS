@@ -159,3 +159,42 @@ describe('the HQ core depends on nothing above it (Phase 2, Stage 0)', () => {
     expect(importers).toEqual(['src/store/db.ts']);
   });
 });
+
+/**
+ * Wave 5 Medium 10. A literal 0x00 was used as a composite-key separator in
+ * three source files. `grep`, `git grep` and ripgrep all treat a NUL as the
+ * marker of a binary file: they report "binary file matches" and skip the
+ * content, so the file becomes invisible to the repository's own text tooling
+ * and to any reviewer's honesty scan over it. The runtime value of U+001F is
+ * identical and the file stays text.
+ */
+describe('the shipped source stays text', () => {
+  /**
+   * Wave 5 correction round four, Low L9. This census was scoped to `src/`
+   * while the commit that added it claimed "no source file is binary to the
+   * repository's own text tooling". `test/connectors.github.test.ts` carried a
+   * literal NUL - a deliberate fixture, proving control characters are stripped
+   * from a title - so the claim was false of the package, and the file that
+   * PROVED the sanitizer was itself invisible to a reviewer's honesty scan.
+   *
+   * Narrowing the claim was the other option and was rejected: the fixture is
+   * spelled with a unicode escape now, which is the identical runtime value in
+   * a file that stays text, so the check can cover everything the claim did.
+   */
+  it('carries no raw NUL byte in ANY TypeScript file in the package', () => {
+    const everywhere = [
+      ...sourceFiles(srcRoot),
+      ...sourceFiles(join(packageRoot, 'test')),
+      ...sourceFiles(join(packageRoot, 'tools')),
+    ];
+    // Guards the walk itself: a broken glob would make this pass vacuously.
+    expect(everywhere.length).toBeGreaterThan(files.length);
+    const offenders = everywhere
+      .filter((file) => readFileSync(file).includes(0x00))
+      .map((file) => relative(packageRoot, file).split(sep).join('/'));
+    expect(
+      offenders,
+      'a NUL byte makes a file binary to grep/git grep/ripgrep, which then skip its content entirely',
+    ).toEqual([]);
+  });
+});

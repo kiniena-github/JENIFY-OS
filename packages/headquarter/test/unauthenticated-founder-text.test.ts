@@ -1,0 +1,1302 @@
+/**
+ * The unauthenticated artifact IS a Founder-text publication surface —
+ * disclosed rather than changed (Wave 5 correction round ten, NEW LOW; the
+ * disclosure and the pin both CORRECTED in round fourteen, High 4).
+ *
+ * `hq-snapshot.json` is served with no authentication at all, and
+ * `src/cli/snapshot.ts` writes the whole object `liveSnapshotFromOperations`
+ * returns — not a subset of it. The round-ten review named ONE field. Round ten
+ * measured FOUR and wrote "four fields, not one" into
+ * `PHASE_13_ADVANCED_RELIABILITY.md`, and this file pinned exactly two of them
+ * by planting canaries in two methods.
+ *
+ * **A fresh hostile review at `f348f9a` planted canaries across the whole
+ * Founder-writable facade and found the real number is far higher. Re-measured
+ * at the merged head with every plant executed rather than assumed — every
+ * facade call below is asserted to have RETURNED OK, because a canary that was
+ * never written proves nothing — it is 20 of 34.** The under-disclosure was the
+ * defect: the publication is intended, no credential can reach any of these
+ * fields (each is scanned at its facade write), and nothing about the behaviour
+ * is changed here.
+ *
+ * ## What this file now derives rather than lists
+ *
+ * The old pin planted canaries in two methods and asserted three `toContain`
+ * paths. A field added beside them published silently. This version:
+ *
+ *  - plants a distinct canary in EVERY Founder-writable text parameter of every
+ *    method the scenario exercises, and asserts the plant SUCCEEDED;
+ *  - asserts the crossing set EXACTLY, in both directions, so a new published
+ *    field and a newly-withheld one each fail;
+ *  - DERIVES the completeness of the plant from `service.ts` itself: every name
+ *    in each exercised method's own `callerTextRefusal(input, [...])` list must
+ *    be planted here or exempted with a reason, so a parameter added to one of
+ *    those methods fails this file rather than being published quietly;
+ *  - checks the phase document's table against the measured crossing set, so
+ *    the prose cannot drift from the behaviour in either direction.
+ *
+ * ## Round sixteen: the completeness test derived its scope from its own list
+ *
+ * The paragraph that used to stand here said the derivation was "complete for
+ * the METHODS the scenario exercises" and that a method added in a future phase
+ * "has to be added to `EXERCISED` here, and nothing in this file can force
+ * that". That was an accurate description of a whitelist and an inaccurate one
+ * of a guard: the completeness test computed
+ *
+ * ```ts
+ * const exercised = [...new Set(CANARIES.map((c) => c.field.split('.')[0]))];
+ * ```
+ *
+ * — the methods ALREADY IN THE LIST — so a method never added to `CANARIES` was
+ * never checked by anything. Measured at that head: **77** declared caller-text
+ * parameters on the facade, **38** in `CANARIES`, **46 declared and absent**
+ * across **25 entirely unexercised methods**. A fresh hostile review published
+ * `openCollaborationSession.title` to the unauthenticated artifact to prove it,
+ * and re-measuring found eight more crossing fields the disclosure did not
+ * name: `promoteProposal.project` / `.title`, `updateProject.name` /
+ * `.purpose` / `.stream`, `transitionProject.note`, all six `recordMemory.*`
+ * parameters, `recordTruth.statement`, `verifyTruth.limitations` and
+ * `acceptTruth.note`.
+ *
+ * `exercised` is now DERIVED from `methodBodies()`: every facade method that
+ * declares a `callerTextRefusal` list, whether or not this file has ever heard
+ * of it. Every parameter such a method declares must be PLANTED here or
+ * EXEMPTED with a written reason, and both halves are checked — an exemption
+ * must still name a parameter the method declares, and must give more than a
+ * phrase of argument. The census is **thirty-nine of eighty-two** at this head,
+ * and the two remaining exemptions are `amendMissionIntent.specifyPlanItems`
+ * (a structured object list with no free-text member) and
+ * `recoverInterruptedRuns.reason` (a closed five-member union type, proved by
+ * measuring that no canary ever reaches the store through it).
+ *
+ * **What this still does not claim.** It is a claim about caller text the
+ * facade itself declares it scans. A field published from a value HQ derives
+ * rather than one a caller typed is outside it by construction, and
+ * `facade-write-scan.test.ts` owns the enumeration over the call graph for the
+ * credential scan.
+ */
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { describe, expect, it } from 'vitest';
+import { CAPS, expectOk } from './application.fixture.js';
+import { intelligenceFixture } from './intelligence.fixture.js';
+import { liveSnapshotFromOperations } from '../src/live/snapshot.js';
+import { openHqDatabase, type HqDatabase } from '../src/store/db.js';
+import { HeadquarterOperations } from '../src/application/service.js';
+import {
+  MISSION_COMMAND_CAPABILITY,
+} from '../src/application/mission-command.js';
+import { PROJECT_COMMAND_CAPABILITY } from '../src/application/project-command.js';
+import { INTELLIGENCE_COMMAND_CAPABILITY } from '../src/application/intelligence-command.js';
+import {
+  RELIABILITY_COMMAND_CAPABILITY,
+  registerReliabilityCommandCapability,
+} from '../src/application/reliability-command.js';
+import { PRODUCT_COMMAND_CAPABILITY, registerProductCommandCapability } from '../src/application/product-command.js';
+import { MEMORY_COMMAND_CAPABILITY, registerMemoryCommandCapability } from '../src/application/memory-command.js';
+import {
+  COLLABORATION_COMMAND_CAPABILITY,
+  COLLABORATION_CONTRIBUTE_CAPABILITY,
+  registerCollaborationCommandCapability,
+  registerCollaborationContributeCapability,
+} from '../src/application/collaboration-command.js';
+import {
+  TRUTH_RECORD_CAPABILITY,
+  TRUTH_VERIFY_CAPABILITY,
+  registerTruthRecordCapability,
+  registerTruthVerifyCapability,
+} from '../src/application/truth-command.js';
+import {
+  WORKFORCE_ASSIGN_CAPABILITY,
+  registerWorkforceAssignCapability,
+} from '../src/application/workforce-command.js';
+import { taskActionDigest } from '../src/operator/approvals.js';
+import { taskRowFor } from '../src/application/service.js';
+import { fakeAdapter } from './action-gateway.fixture.js';
+import { AiMemberRegistry } from '../src/registry/members.js';
+import { MemberCapabilityRegistry } from '../src/registry/capabilities.js';
+import { ProviderDirectory } from '../src/providers/directory.js';
+import { declaredOnlyAdapter } from '../src/providers/declared.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SERVICE = path.join(HERE, '..', 'src', 'application', 'service.ts');
+const PHASE_13 = path.join(HERE, '..', '..', '..', 'docs', 'HEADQUARTER', 'PHASE_13_ADVANCED_RELIABILITY.md');
+const NOW = new Date('2026-09-08T09:00:00.000Z');
+
+/** Every path in a snapshot at which `needle` appears inside a string. */
+function pathsCarrying(value: unknown, needle: string, at = 'snapshot', out: string[] = []): string[] {
+  if (typeof value === 'string') {
+    if (value.includes(needle)) out.push(at);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => pathsCarrying(entry, needle, `${at}[${index}]`, out));
+    return out;
+  }
+  if (value && typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value)) pathsCarrying(entry, needle, `${at}.${key}`, out);
+  }
+  return out;
+}
+
+/**
+ * The measured answer, as one table: `method.parameter` -> does the canary reach
+ * the unauthenticated artifact, and if so at one path that proves it.
+ *
+ * `crosses: true` rows ARE the disclosure. `crosses: false` rows are just as
+ * load-bearing: they are what makes the payload carve-out from the credential
+ * scan defensible, and what would fail if a future phase started publishing one
+ * of them.
+ */
+interface Canary {
+  /** `method.parameter`, and the canary text is derived from it. */
+  field: string;
+  crosses: boolean;
+  /** One measured path, for a `crosses: true` row. Not the only one. */
+  at?: string;
+}
+
+const CANARIES: readonly Canary[] = [
+  { field: 'createProject.name', crosses: true, at: 'snapshot.projects.data[0].name' },
+  { field: 'createProject.purpose', crosses: true, at: 'snapshot.projects.data[0].purpose' },
+  { field: 'createProject.stream', crosses: true, at: 'snapshot.projects.data[0].stream' },
+  { field: 'commandMission.title', crosses: true, at: 'snapshot.missions.data[0].title' },
+  { field: 'commandMission.objective', crosses: true, at: 'snapshot.missions.data[0].intentHistory[0].objective' },
+  { field: 'commandMission.scope', crosses: true, at: 'snapshot.missions.data[0].scope' },
+  { field: 'commandMission.constraints', crosses: true, at: 'snapshot.missions.data[0].intentHistory[0].constraints[0]' },
+  { field: 'commandMission.acceptanceCriteria', crosses: true, at: 'snapshot.missions.data[0].intentHistory[0].acceptanceCriteria[0]' },
+  { field: 'commandMission.planItems', crosses: true, at: 'snapshot.missions.data[0].planItems[0].summary' },
+  { field: 'commandMission.project', crosses: true, at: 'snapshot.missions.data[0].project' },
+  { field: 'commandMission.instruction', crosses: false },
+  { field: 'amendMissionIntent.amendment', crosses: false },
+  { field: 'amendMissionIntent.objective', crosses: true, at: 'snapshot.missions.data[0].objective' },
+  { field: 'amendMissionIntent.constraints', crosses: true, at: 'snapshot.missions.data[0].constraints[0]' },
+  { field: 'amendMissionIntent.acceptanceCriteria', crosses: true, at: 'snapshot.missions.data[0].acceptanceCriteria[0]' },
+  { field: 'amendMissionIntent.addPlanItems', crosses: true, at: 'snapshot.missions.data[0].planItems[1].summary' },
+  { field: 'createTask.title', crosses: true, at: 'snapshot.operations.data.blocked[0].title' },
+  { field: 'createTask.project', crosses: true, at: 'snapshot.operations.data.blocked[0].project' },
+  { field: 'createTask.payload', crosses: false },
+  { field: 'denyTask.reason', crosses: true, at: 'snapshot.operations.data.blocked[0].blockReason' },
+  { field: 'failTask.reason', crosses: true, at: 'snapshot.activity.data[4].summary' },
+  { field: 'engageKillSwitch.reason', crosses: true, at: 'snapshot.operations.data.killSwitch.engagedScopes[0].reason' },
+  { field: 'engageKillSwitch.scope', crosses: true, at: 'snapshot.operations.data.killSwitch.engagedScopes[0].scope' },
+  { field: 'engageKillSwitch.founderId', crosses: true, at: 'snapshot.operations.data.killSwitch.engagedScopes[0].engagedBy' },
+  { field: 'registerExecutionWorker.displayName', crosses: true, at: 'snapshot.workforce.data[0].displayName' },
+  { field: 'registerExecutionWorker.vendor', crosses: true, at: 'snapshot.workforce.data[0].vendor' },
+  { field: 'setIntelligenceBudget.note', crosses: false },
+  { field: 'recordModelObservation.unitCostBasis', crosses: false },
+  { field: 'recordModelObservation.note', crosses: false },
+  { field: 'recordVerifiedBackup.backupPath', crosses: false },
+  { field: 'recordVerifiedBackup.note', crosses: false },
+  { field: 'postMissionMessage.body', crosses: false },
+  { field: 'postMissionMessage.refs', crosses: false },
+  { field: 'recordIntelligenceDecision.label', crosses: false },
+  { field: 'recordIntelligenceCost.basis', crosses: false },
+  { field: 'recordIntelligenceCost.note', crosses: false },
+  { field: 'recordIntelligenceCost.providerId', crosses: false },
+  { field: 'recordIntelligenceCost.modelId', crosses: false },
+  { field: 'approveTask.note', crosses: false },
+  { field: 'deactivateExecutionWorker.reason', crosses: false },
+  { field: 'assignTaskAsFounder.rationale', crosses: false },
+  { field: 'registerAiMember.displayName', crosses: false },
+  { field: 'registerAiMember.modelId', crosses: false },
+  { field: 'registerAiMember.modelVersion', crosses: false },
+  { field: 'registerAiMember.providerId', crosses: false },
+  { field: 'registerAiMember.toolMetadata', crosses: false },
+  { field: 'disableAiMember.reason', crosses: false },
+  { field: 'promoteProposal.project', crosses: true, at: 'snapshot.operations.data.queued[2].project' },
+  { field: 'promoteProposal.title', crosses: true, at: 'snapshot.operations.data.queued[2].title' },
+  { field: 'transitionMission.note', crosses: false },
+  { field: 'updateProject.name', crosses: true, at: 'snapshot.projects.data[1].name' },
+  { field: 'updateProject.purpose', crosses: true, at: 'snapshot.projects.data[1].purpose' },
+  { field: 'updateProject.stream', crosses: true, at: 'snapshot.projects.data[1].stream' },
+  { field: 'transitionProject.note', crosses: true, at: 'snapshot.projects.data[1].history[2].note' },
+  { field: 'createProduct.name', crosses: false },
+  { field: 'createProduct.problem', crosses: false },
+  { field: 'createProduct.summary', crosses: false },
+  { field: 'createProduct.targetUsers', crosses: false },
+  { field: 'moveProductLifecycle.note', crosses: false },
+  { field: 'registerProductArtifact.locator', crosses: false },
+  { field: 'registerProductArtifact.name', crosses: false },
+  { field: 'registerProductArtifact.note', crosses: false },
+  { field: 'openRun.label', crosses: false },
+  { field: 'recordRunOutcome.note', crosses: false },
+  { field: 'reconcileRun.note', crosses: false },
+  { field: 'recordIntelligenceOutcome.note', crosses: false },
+  { field: 'recordMemory.body', crosses: true, at: 'snapshot.memory.data[0].body' },
+  { field: 'recordMemory.project', crosses: true, at: 'snapshot.memory.data[0].project' },
+  { field: 'recordMemory.related', crosses: true, at: 'snapshot.memory.data[0].related.artifacts[0]' },
+  { field: 'recordMemory.sourceRefs', crosses: true, at: 'snapshot.memory.data[0].sourceRefs[0]' },
+  { field: 'recordMemory.tags', crosses: true, at: 'snapshot.memory.data[0].tags[0]' },
+  { field: 'recordMemory.title', crosses: true, at: 'snapshot.memory.data[0].title' },
+  { field: 'recordTruth.statement', crosses: true, at: 'snapshot.truth.data.records[0].statement' },
+  { field: 'verifyTruth.limitations', crosses: true, at: 'snapshot.truth.data.records[0].verifications[0].limitations' },
+  { field: 'acceptTruth.note', crosses: true, at: 'snapshot.truth.data.records[0].acceptances[0].note' },
+  { field: 'proposeAction.target', crosses: false },
+  { field: 'reconcileAction.note', crosses: false },
+  { field: 'openCollaborationSession.purpose', crosses: false },
+  { field: 'openCollaborationSession.title', crosses: true, at: 'snapshot.collaboration.data.recent[0].title' },
+  { field: 'recordContribution.artifactRefs', crosses: false },
+  { field: 'recordContribution.content', crosses: false },
+  { field: 'recordContribution.reason', crosses: false },
+];
+
+/**
+ * The canary text for one field — distinct per field, and searchable.
+ *
+ * LOWERCASE (Wave 5 correction round fifteen, Medium 4). It used to be
+ * `CANARY-<field>`, which cannot be planted in any parameter the facade
+ * normalises or slug-checks: `recordIntelligenceCost.providerId` is passed
+ * through `normalizeProviderId`, so an upper-case canary is STORED in a form
+ * this file's own search would never find, and `modelId`'s slug rule refuses
+ * an upper-case value outright. Both were exempted with a reason that was
+ * false — "bounded to a registered provider and to an observed model id; a
+ * canary in either is refused before any write" — and one of them was not
+ * refused at all. A lowercase canary survives normalisation unchanged, so the
+ * measurement is of the artifact rather than of the search.
+ */
+function canaryFor(field: string): string {
+  return `canary-${field.replace(/\./g, '-')}`.toLowerCase();
+}
+
+/**
+ * The methods this scenario exercises, and the caller-text parameters of each
+ * that are deliberately NOT planted, with the reason.
+ *
+ * A name here is a claim that the parameter cannot carry Founder free text, and
+ * each is checkable against the method's own validation:
+ *
+ *  - `recordIntelligenceCost.modelId` is bounded by a LOWERCASE-SLUG rule, and
+ *    that is the whole of its bound — measured, in
+ *    `intelligence-cost-identity.test.ts`, not supposed. It is planted here
+ *    like everything else, because the canary is lowercase; the entry stays in
+ *    `CANARIES` and is measured rather than exempted.
+ *
+ * The exemption this list USED to carry is gone, and it is worth recording
+ * why, because it is the failure this whole file exists to prevent (Wave 5
+ * correction round fifteen, Medium 4). It read: "`recordIntelligenceCost.providerId`
+ * and `.modelId` are bounded to a registered provider and to an observed model
+ * id; a canary in either is refused before any write." Measured: an
+ * UNREGISTERED provider, a NEVER-OBSERVED model and a canary providerId were
+ * all recorded — `provider_id` landed in `hq_intel_cost_entries` — and only
+ * the model id was refused, by the slug rule rather than by observation. The
+ * `crosses: false` verdict on the providerId survived, but for the wrong
+ * reason, and a verdict that survives for the wrong reason is a verdict nobody
+ * can rely on when the reason changes. Both are planted now.
+ *  - `amendMissionIntent.specifyPlanItems` is a structured object list (seq,
+ *    capabilityId, payload) with no free-text member; its summary text comes
+ *    from `addPlanItems`, which IS planted.
+ */
+const NOT_PLANTED: Record<string, { parameter: string; reason: string }[]> = {
+  amendMissionIntent: [
+    {
+      parameter: 'specifyPlanItems',
+      reason:
+        'A structured object list (seq, capabilityId, payload) with no free-text member. The plan ' +
+        'item TEXT comes from `addPlanItems`, which is planted and crosses.',
+    },
+  ],
+  recoverInterruptedRuns: [
+    {
+      parameter: 'reason',
+      reason:
+        "A CLOSED VOCABULARY, not free text: the parameter's type is " +
+        "`'process_interrupted' | 'stale_lease' | 'provider_outage' | 'partial_attempt' | " +
+        "'stale_fence'`, so no canary can be planted in it at all — the scenario proved that by " +
+        'measuring it as never reaching the store. `callerTextRefusal` scans it because it scans ' +
+        'every string field, not because a Founder types it.',
+    },
+  ],
+};
+
+interface Planted {
+  snapshot: unknown;
+  /** Every facade call the scenario made, and whether it returned ok. */
+  calls: { name: string; ok: boolean; error: string }[];
+  /**
+   * Every canary text that is actually IN THE STORE at the instant the
+   * snapshot is taken, found by sweeping every text column of every table
+   * (Wave 5 correction round fifteen, High 4).
+   *
+   * The docblock above warns that a canary which was never WRITTEN reads as
+   * "does not cross", and the first test checks every facade call returned ok.
+   * That was not enough, and the gap shipped: `engageKillSwitch.reason` was
+   * written successfully — and then the very next line of the scenario
+   * RELEASED the switch, so the state carrying it was gone before the
+   * snapshot. The row read `crosses: false`, and the shipped census told a
+   * reader that the Founder's stop-everything reason does not reach an
+   * unauthenticated file. It does.
+   *
+   * "Written ok" and "still in the store" are different properties, and only
+   * the second one makes a `crosses: false` verdict mean anything. This is the
+   * second one, swept from `sqlite_master` so a table added in a future phase
+   * is included without being named.
+   */
+  storedCanaries: Set<string>;
+  cleanup: () => void;
+}
+
+/**
+ * Every canary text present in any TEXT-ish column of any table in the file.
+ *
+ * Derived from `sqlite_master` and `PRAGMA table_info`, so it covers ledgers
+ * this file has never heard of. Values are compared as strings because SQLite
+ * columns are dynamically typed and HQ stores JSON blobs in TEXT columns.
+ */
+function canariesStillInStore(db: HqDatabase, needles: readonly string[]): Set<string> {
+  const found = new Set<string>();
+  const tables = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`)
+    .all() as { name: string }[];
+  for (const { name } of tables) {
+    let rows: Record<string, unknown>[] = [];
+    try {
+      rows = db.prepare(`SELECT * FROM "${name}"`).all() as Record<string, unknown>[];
+    } catch {
+      // A view or virtual table that will not plainly select is not a store of
+      // canary text; skipping it cannot hide one, because the canary would
+      // still have to have been written to a real table to get there.
+      continue;
+    }
+    for (const row of rows) {
+      for (const value of Object.values(row)) {
+        if (typeof value !== 'string') continue;
+        for (const needle of needles) if (value.includes(needle)) found.add(needle);
+      }
+    }
+  }
+  return found;
+}
+
+/**
+ * One scenario that writes a distinct canary into every field of `CANARIES`.
+ *
+ * Every call is recorded with its outcome, and the first test asserts they all
+ * returned ok — a canary that was never written would otherwise read as "does
+ * not cross" and quietly widen the disclosure's silence.
+ */
+function plantEveryCanary(): Planted {
+  // A local FAKE adapter, so `proposeAction`/`reconcileAction` are reachable
+  // and their canaries are MEASURED rather than exempted with "unreachable in
+  // this fixture" — which would be a measurement of the fixture (Wave 5
+  // correction round sixteen, High B-5). Nothing here leaves the process.
+  const adapter = fakeAdapter({ mode: 'unknown' });
+  // A provider directory holding ONE declared provider whose id is the canary
+  // itself. `registerAiMember.providerId` is bounded to a REGISTERED provider,
+  // so planting a canary the directory would refuse would measure the
+  // validator rather than the artifact — the exact false-exemption pattern
+  // round fifteen's Medium 4 reported. Registering the canary AS the provider
+  // keeps the measurement about the artifact.
+  const providers = new ProviderDirectory();
+  providers.register(
+    declaredOnlyAdapter({
+      providerId: canaryFor('registerAiMember.providerId'),
+      displayName: 'Canary Provider',
+      kind: 'cloud',
+      advertisedModels: [],
+    }),
+  );
+  const fx = intelligenceFixture({ actionAdapters: [adapter] });
+  const members = new AiMemberRegistry(fx.db, providers, new MemberCapabilityRegistry(fx.db));
+  const opsWithMembers = new HeadquarterOperations(fx.db, {
+    store: fx.store,
+    policyCtx: { preApprovedCapabilities: new Set<string>([CAPS.openPr]) },
+    actionAdapters: [adapter],
+    aiMemberRegistry: members,
+  });
+  const calls: { name: string; ok: boolean; error: string }[] = [];
+  const record = <T>(name: string, result: T): T => {
+    const outcome = result as { ok?: boolean; error?: unknown };
+    calls.push({
+      name,
+      ok: outcome?.ok === true,
+      error: outcome?.ok === true ? '' : JSON.stringify(outcome?.error ?? null),
+    });
+    return result;
+  };
+  const c = canaryFor;
+
+  registerReliabilityCommandCapability(fx.db);
+  registerProductCommandCapability(fx.db);
+  registerMemoryCommandCapability(fx.db);
+  registerCollaborationCommandCapability(fx.db);
+  registerCollaborationContributeCapability(fx.db);
+  registerTruthRecordCapability(fx.db);
+  registerTruthVerifyCapability(fx.db);
+  registerWorkforceAssignCapability(fx.db);
+  fx.principals.register({
+    id: 'founder',
+    displayName: 'Founder',
+    originateCapabilities: [
+      CAPS.readStatus,
+      CAPS.openPr,
+      CAPS.indexDoc,
+      MISSION_COMMAND_CAPABILITY.id,
+      PROJECT_COMMAND_CAPABILITY.id,
+      INTELLIGENCE_COMMAND_CAPABILITY.id,
+      RELIABILITY_COMMAND_CAPABILITY.id,
+      PRODUCT_COMMAND_CAPABILITY.id,
+      MEMORY_COMMAND_CAPABILITY.id,
+      COLLABORATION_COMMAND_CAPABILITY.id,
+      TRUTH_RECORD_CAPABILITY.id,
+      WORKFORCE_ASSIGN_CAPABILITY.id,
+    ],
+    approvalAuthority: true,
+    active: true,
+  });
+  // The workers that carry the collaboration, truth and action canaries. The
+  // grants are the canonical ones: `claude` contributes and records truth,
+  // `codex` verifies it — verification demands an independent principal, so a
+  // scenario in which one worker did both would measure nothing.
+  fx.store.upsertSpecialist({
+    id: 'claude',
+    displayName: 'Claude',
+    vendor: 'anthropic',
+    role: 'build_lead',
+    allowedCapabilities: [
+      CAPS.readStatus,
+      CAPS.openPr,
+      CAPS.indexDoc,
+      CAPS.dropIndex,
+      TRUTH_RECORD_CAPABILITY.id,
+      COLLABORATION_CONTRIBUTE_CAPABILITY.id,
+    ],
+    active: true,
+  });
+  fx.store.upsertSpecialist({
+    id: 'codex',
+    displayName: 'Codex',
+    vendor: 'openai',
+    role: 'reviewer_gatekeeper',
+    allowedCapabilities: [CAPS.readStatus, TRUTH_VERIFY_CAPABILITY.id, COLLABORATION_CONTRIBUTE_CAPABILITY.id],
+    active: true,
+  });
+
+  const project = expectOk(
+    record(
+      'createProject',
+      fx.ops.createProject({
+        name: c('createProject.name'),
+        purpose: c('createProject.purpose'),
+        stream: c('createProject.stream'),
+        requestedBy: 'founder',
+      }),
+    ),
+  ).project;
+
+  const mission = expectOk(
+    record(
+      'commandMission',
+      fx.ops.commandMission({
+        title: c('commandMission.title'),
+        objective: c('commandMission.objective'),
+        scope: c('commandMission.scope'),
+        constraints: [c('commandMission.constraints')],
+        acceptanceCriteria: [c('commandMission.acceptanceCriteria')],
+        planItems: [c('commandMission.planItems')],
+        project: c('commandMission.project'),
+        projectId: project.id,
+        instruction: c('commandMission.instruction'),
+        requestedBy: 'founder',
+      }),
+    ),
+  ).mission;
+
+  record(
+    'amendMissionIntent',
+    fx.ops.amendMissionIntent({
+      missionId: mission.id,
+      amendment: c('amendMissionIntent.amendment'),
+      objective: c('amendMissionIntent.objective'),
+      constraints: [c('amendMissionIntent.constraints')],
+      acceptanceCriteria: [c('amendMissionIntent.acceptanceCriteria')],
+      addPlanItems: [c('amendMissionIntent.addPlanItems')],
+      requestedBy: 'founder',
+    }),
+  );
+
+  const blocked = expectOk(
+    record(
+      'createTask',
+      fx.ops.createTask({
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'main', instruction: c('createTask.payload') },
+        idempotencyKey: 'canary-blocked',
+        requestedBy: 'claude',
+        title: c('createTask.title'),
+        project: c('createTask.project'),
+      }),
+    ),
+  );
+  record(
+    'denyTask',
+    fx.ops.denyTask({
+      taskId: blocked.task.id,
+      founderId: 'founder',
+      reason: c('denyTask.reason'),
+    }),
+  );
+
+  const failing = expectOk(
+    record(
+      'createTask (the failing one)',
+      fx.ops.createTask({
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'second' },
+        idempotencyKey: 'canary-failing',
+        requestedBy: 'claude',
+        title: 'an ordinary second task',
+      }),
+    ),
+  );
+  const claimed = expectOk(
+    record('claimNext', fx.ops.claimNext('claude', CAPS.openPr, undefined, failing.task.id)),
+  );
+  record('startTask', fx.ops.startTask(claimed.id, 'claude', claimed.fence));
+  record('failTask', fx.ops.failTask(claimed.id, 'claude', claimed.fence, c('failTask.reason')));
+
+  record('engageKillSwitch', fx.ops.engageKillSwitch('global', 'founder', c('engageKillSwitch.reason')));
+  record('releaseKillSwitch', fx.ops.releaseKillSwitch('global', 'founder'));
+  // A SECOND scope, engaged and DELIBERATELY LEFT ENGAGED (Wave 5 correction
+  // round fifteen, High 4).
+  //
+  // The scenario used to engage the global scope at the line above and release
+  // it at the line below, and then snapshot — measuring the one state in which
+  // there is provably nothing to publish. `engageKillSwitch.reason` therefore
+  // read `crosses: false`, and the shipped census said the Founder's
+  // stop-everything reason does not reach the unauthenticated artifact. It
+  // does: `snapshot.operations.data.killSwitch.engagedScopes[]` carries the
+  // reason, the scope and the engaging principal for every scope that is still
+  // engaged. The engaging PRINCIPAL is planted by registering one whose id is
+  // the canary, because `founderId` must resolve to a registered principal
+  // holding approval authority — a canary that the validator refuses would
+  // measure the validator, which is exactly the false-exemption pattern
+  // Medium 4 of the same review reported one file over.
+  fx.principals.register({
+    id: c('engageKillSwitch.founderId'),
+    displayName: 'Canary Founder',
+    originateCapabilities: [],
+    approvalAuthority: true,
+    active: true,
+  });
+  record(
+    'engageKillSwitch (left engaged)',
+    fx.ops.engageKillSwitch(
+      c('engageKillSwitch.scope'),
+      c('engageKillSwitch.founderId'),
+      c('engageKillSwitch.reason'),
+    ),
+  );
+
+  record(
+    'registerExecutionWorker',
+    fx.ops.registerExecutionWorker({
+      workerId: 'canary-worker',
+      displayName: c('registerExecutionWorker.displayName'),
+      vendor: c('registerExecutionWorker.vendor'),
+      role: 'parallel_implementer',
+      allowedCapabilities: [CAPS.openPr],
+      founderId: 'founder',
+    }),
+  );
+
+  record(
+    'setIntelligenceBudget',
+    fx.ops.setIntelligenceBudget({
+      scopeKind: 'deployment',
+      scopeId: 'deployment',
+      window: 'total',
+      ceilingMinorUnits: 100000,
+      currency: 'USD',
+      permittedTiers: ['deterministic_local', 'low_cost', 'standard', 'high', 'critical_review'],
+      setBy: 'founder',
+      note: c('setIntelligenceBudget.note'),
+    }),
+  );
+
+  record(
+    'recordModelObservation',
+    fx.ops.recordModelObservation({
+      providerId: 'anthropic',
+      modelId: 'canary-model',
+      locality: 'cloud',
+      availability: 'healthy',
+      unitCostProvenance: 'estimated',
+      unitCostMinorUnits: 25,
+      unitCostCurrency: 'USD',
+      unitCostUnitKind: 'requests',
+      unitCostBasis: c('recordModelObservation.unitCostBasis'),
+      source: 'founder_declared',
+      observedBy: 'founder',
+      note: c('recordModelObservation.note'),
+    }),
+  );
+
+  // A real HQ file, because `recordVerifiedBackup` verifies rather than trusts:
+  // the canary rides in the FILE NAME, which is the caller text it stores.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hq-canary-'));
+  const backupPath = path.join(dir, `${canaryFor('recordVerifiedBackup.backupPath')}.sqlite`);
+  const backup = openHqDatabase(backupPath);
+  void new HeadquarterOperations(backup);
+  backup.close();
+  record(
+    'recordVerifiedBackup',
+    fx.ops.recordVerifiedBackup({
+      backupPath,
+      requestedBy: 'founder',
+      note: c('recordVerifiedBackup.note'),
+    }),
+  );
+
+  record(
+    'postMissionMessage',
+    fx.ops.postMissionMessage({
+      threadId: mission.id,
+      author: 'founder',
+      body: c('postMissionMessage.body'),
+      refs: [c('postMissionMessage.refs')],
+    }),
+  );
+
+  const spending = expectOk(
+    record(
+      'createTask (the spending one)',
+      fx.ops.createTask({
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'third' },
+        idempotencyKey: 'canary-spending',
+        requestedBy: 'claude',
+        title: 'an ordinary third task',
+      }),
+    ),
+  );
+  const claimedSpender = expectOk(
+    record(
+      'claimNext (the spending one)',
+      fx.ops.claimNext('claude', CAPS.openPr, undefined, spending.task.id),
+    ),
+  );
+  record('startTask (the spending one)', fx.ops.startTask(claimedSpender.id, 'claude', claimedSpender.fence));
+  // A handoff names only the mission's OWN tasks, so the spending task is
+  // linked to the plan item `amendMissionIntent.addPlanItems` created.
+  record(
+    'linkMissionPlanItem',
+    fx.ops.linkMissionPlanItem({
+      missionId: mission.id,
+      planItemSeq: 2,
+      taskId: claimedSpender.id,
+      requestedBy: 'founder',
+    }),
+  );
+  const decision = record(
+    'recordIntelligenceDecision',
+    fx.ops.recordIntelligenceDecision({
+      taskId: claimedSpender.id,
+      workerId: 'claude',
+      fence: claimedSpender.fence,
+      tier: 'critical_review',
+      label: c('recordIntelligenceDecision.label'),
+      complexity: 'routine',
+      contextSize: 'medium',
+      workKind: 'coding',
+      idempotencyKey: 'canary-decision',
+    }),
+  );
+  record(
+    'recordIntelligenceCost',
+    fx.ops.recordIntelligenceCost({
+      taskId: claimedSpender.id,
+      workerId: 'claude',
+      fence: claimedSpender.fence,
+      providerId: c('recordIntelligenceCost.providerId'),
+      modelId: c('recordIntelligenceCost.modelId'),
+      provenance: 'estimated',
+      amountMinorUnits: 10,
+      currency: 'USD',
+      unitKind: 'requests',
+      basis: c('recordIntelligenceCost.basis'),
+      note: c('recordIntelligenceCost.note'),
+      idempotencyKey: 'canary-cost',
+    }),
+  );
+
+  /* ---------------------------------------------------------------- */
+  /* Round sixteen: the twenty-five methods the census never exercised  */
+  /* ---------------------------------------------------------------- */
+
+  const unassigned = expectOk(
+    record(
+      'createTask (the one an intent is recorded for)',
+      fx.ops.createTask({
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'fourth' },
+        idempotencyKey: 'canary-unassigned',
+        requestedBy: 'claude',
+        title: 'an ordinary fourth task',
+      }),
+    ),
+  );
+  record(
+    'assignTaskAsFounder',
+    fx.ops.assignTaskAsFounder({
+      taskId: unassigned.task.id,
+      workerId: 'claude',
+      founderId: 'founder',
+      rationale: c('assignTaskAsFounder.rationale'),
+    }),
+  );
+
+  const gated = expectOk(
+    record(
+      'createTask (the approval-gated one)',
+      fx.ops.createTask({
+        capabilityId: CAPS.indexDoc,
+        payload: { document: 'canary' },
+        idempotencyKey: 'canary-gated',
+        requestedBy: 'founder',
+        title: 'an ordinary gated task',
+      }),
+    ),
+  );
+  record(
+    'approveTask',
+    fx.ops.approveTask({
+      taskId: gated.task.id,
+      founderId: 'coo',
+      expectedActionDigest: taskActionDigest(taskRowFor(fx.ops, gated.task.id)!),
+      note: c('approveTask.note'),
+    }),
+  );
+
+  record(
+    'registerAiMember',
+    opsWithMembers.registerAiMember({
+      id: 'canary-member',
+      displayName: c('registerAiMember.displayName'),
+      providerId: c('registerAiMember.providerId'),
+      modelId: c('registerAiMember.modelId'),
+      modelVersion: c('registerAiMember.modelVersion'),
+      workerType: 'execution',
+      locality: 'cloud',
+      privacyClass: 'internal',
+      costClass: 'medium',
+      toolMetadata: { note: c('registerAiMember.toolMetadata') },
+      founderId: 'founder',
+    }),
+  );
+  record(
+    'disableAiMember',
+    opsWithMembers.disableAiMember({
+      memberId: 'canary-member',
+      reason: c('disableAiMember.reason'),
+      founderId: 'founder',
+    }),
+  );
+
+  record(
+    'deactivateExecutionWorker',
+    fx.ops.deactivateExecutionWorker({
+      workerId: 'canary-worker',
+      reason: c('deactivateExecutionWorker.reason'),
+      founderId: 'founder',
+    }),
+  );
+
+  const proposal = expectOk(
+    record(
+      'proposeMission (for the promotion)',
+      fx.ops.proposeMission({
+        threadId: mission.id,
+        capabilityId: CAPS.openPr,
+        payload: { branch: 'promoted' },
+        idempotencyKey: 'canary-promotion',
+        proposedBy: 'claude',
+      }),
+    ),
+  );
+  record(
+    'promoteProposal',
+    fx.ops.promoteProposal({
+      proposalId: proposal.id,
+      promotedBy: 'claude',
+      project: c('promoteProposal.project'),
+      title: c('promoteProposal.title'),
+    }),
+  );
+
+  record(
+    'transitionMission',
+    fx.ops.transitionMission({
+      missionId: mission.id,
+      to: 'working',
+      note: c('transitionMission.note'),
+      requestedBy: 'founder',
+    }),
+  );
+
+  const secondProject = expectOk(
+    record(
+      'createProject (the one that is updated and closed)',
+      fx.ops.createProject({
+        name: 'an ordinary second project',
+        purpose: 'carry the update and transition canaries',
+        requestedBy: 'founder',
+      }),
+    ),
+  ).project;
+  record(
+    'updateProject',
+    fx.ops.updateProject({
+      projectId: secondProject.id,
+      name: c('updateProject.name'),
+      purpose: c('updateProject.purpose'),
+      stream: c('updateProject.stream'),
+      requestedBy: 'founder',
+    }),
+  );
+  record(
+    'transitionProject',
+    fx.ops.transitionProject({
+      projectId: secondProject.id,
+      to: 'closed',
+      note: c('transitionProject.note'),
+      requestedBy: 'founder',
+    }),
+  );
+
+  const product = expectOk(
+    record(
+      'createProduct',
+      fx.ops.createProduct({
+        projectId: project.id,
+        productType: 'web',
+        name: c('createProduct.name'),
+        problem: c('createProduct.problem'),
+        targetUsers: c('createProduct.targetUsers'),
+        summary: c('createProduct.summary'),
+        requestedBy: 'founder',
+        idempotencyKey: 'canary-product',
+      }),
+    ),
+  ).product;
+  record(
+    'moveProductLifecycle',
+    fx.ops.moveProductLifecycle({
+      productId: product.id,
+      to: 'research',
+      note: c('moveProductLifecycle.note'),
+      requestedBy: 'founder',
+    }),
+  );
+  record(
+    'registerProductArtifact',
+    fx.ops.registerProductArtifact({
+      productId: product.id,
+      kind: 'specification',
+      name: c('registerProductArtifact.name'),
+      locator: c('registerProductArtifact.locator'),
+      note: c('registerProductArtifact.note'),
+      requestedBy: 'founder',
+      idempotencyKey: 'canary-artifact',
+    }),
+  );
+
+  const run = expectOk(
+    record(
+      'openRun',
+      fx.ops.openRun({
+        taskId: claimedSpender.id,
+        workerId: 'claude',
+        fence: claimedSpender.fence,
+        runKind: 'external_action',
+        label: c('openRun.label'),
+        idempotencyKey: 'canary-run',
+      }),
+    ),
+  ).run;
+  record('startRunAttempt', fx.ops.startRunAttempt({ runId: run.id, workerId: 'claude', fence: claimedSpender.fence }));
+  record(
+    'recordRunOutcome',
+    fx.ops.recordRunOutcome({
+      runId: run.id,
+      workerId: 'claude',
+      fence: claimedSpender.fence,
+      outcome: 'outcome_unknown',
+      note: c('recordRunOutcome.note'),
+    }),
+  );
+  record(
+    'reconcileRun',
+    fx.ops.reconcileRun({
+      runId: run.id,
+      decision: 'confirmed_failed',
+      note: c('reconcileRun.note'),
+      requestedBy: 'coo',
+    }),
+  );
+  record('recoverInterruptedRuns', fx.ops.recoverInterruptedRuns({ requestedBy: 'founder' }));
+
+  if (decision.ok) {
+    record(
+      'recordIntelligenceOutcome',
+      fx.ops.recordIntelligenceOutcome({
+        decisionId: decision.data.decision.id,
+        workerId: 'claude',
+        fence: claimedSpender.fence,
+        result: 'quality_met',
+        note: c('recordIntelligenceOutcome.note'),
+      }),
+    );
+  }
+
+  record(
+    'recordMemory',
+    fx.ops.recordMemory({
+      kind: 'decision',
+      title: c('recordMemory.title'),
+      body: c('recordMemory.body'),
+      project: c('recordMemory.project'),
+      missionId: mission.id,
+      related: { artifacts: [c('recordMemory.related')] },
+      sourceRefs: [c('recordMemory.sourceRefs')],
+      tags: [c('recordMemory.tags')],
+      requestedBy: 'founder',
+      idempotencyKey: 'canary-memory',
+    }),
+  );
+
+  const truth = expectOk(
+    record(
+      'recordTruth',
+      // Recorded by a WORKER, verified by an independent one, accepted by the
+      // Founder — the canonical three-principal shape. A truth the Founder
+      // recorded cannot be accepted by the Founder, so a single-actor scenario
+      // would have measured that refusal instead of the artifact.
+      fx.ops.recordTruth({
+        entityKind: 'mission',
+        entityId: mission.id,
+        statement: c('recordTruth.statement'),
+        requestedBy: 'claude',
+        idempotencyKey: 'canary-truth',
+      }),
+    ),
+  ).record;
+  // A real `op_evidence` id: a verification REFERENCES evidence and refuses
+  // without one, so an empty list would measure the refusal.
+  const evidenceId = (
+    fx.db.prepare(`SELECT id FROM op_evidence ORDER BY seq LIMIT 1`).get() as { id: string }
+  ).id;
+  record(
+    'verifyTruth',
+    fx.ops.verifyTruth({
+      truthId: truth.id,
+      method: 'reviewed',
+      verdict: 'confirmed',
+      evidenceRefs: [evidenceId],
+      limitations: c('verifyTruth.limitations'),
+      requestedBy: 'codex',
+      idempotencyKey: 'canary-verification',
+    }),
+  );
+  // The acceptance digest exists only while the record is exactly `verified`,
+  // current and uncontested, so it is read AFTER the verification above rather
+  // than taken from the record as first written.
+  const verified = fx.ops.getTruthRecord(truth.id);
+  record(
+    'acceptTruth',
+    fx.ops.acceptTruth({
+      truthId: truth.id,
+      expectedDigest: verified?.acceptanceDigest ?? '',
+      note: c('acceptTruth.note'),
+      requestedBy: 'founder',
+    }),
+  );
+
+  const action = record(
+    'proposeAction',
+    fx.ops.proposeAction({
+      taskId: claimedSpender.id,
+      adapterId: 'fake.local',
+      actionType: 'write_note',
+      target: c('proposeAction.target'),
+      payload: { note: 'an ordinary note' },
+      requestedBy: 'claude',
+      idempotencyKey: 'canary-action',
+    }),
+  );
+  if (action.ok) {
+    // Only an open or UNKNOWN attempt is reconciled, so the action is
+    // authorized and executed through the local fake adapter first — whose
+    // mode is `unknown`, which is exactly the state a reconciliation resolves.
+    record(
+      'authorizeAction',
+      fx.ops.authorizeAction({
+        actionId: action.data.action.id,
+        workerId: 'claude',
+        fence: claimedSpender.fence,
+      }),
+    );
+    record(
+      'executeAction',
+      fx.ops.executeAction({
+        actionId: action.data.action.id,
+        workerId: 'claude',
+        fence: claimedSpender.fence,
+      }),
+    );
+    record(
+      'reconcileAction',
+      fx.ops.reconcileAction({
+        actionId: action.data.action.id,
+        decision: 'confirmed_not_executed',
+        note: c('reconcileAction.note'),
+        requestedBy: 'coo',
+      }),
+    );
+  }
+
+  const session = record(
+    'openCollaborationSession',
+    fx.ops.openCollaborationSession({
+      missionId: mission.id,
+      title: c('openCollaborationSession.title'),
+      purpose: c('openCollaborationSession.purpose'),
+      requestedBy: 'founder',
+      idempotencyKey: 'canary-session',
+    }),
+  );
+  if (session.ok) {
+    record(
+      'admitCollaborator',
+      fx.ops.admitCollaborator({
+        sessionId: session.data.session.id,
+        workerId: 'claude',
+        role: 'builder',
+        requestedBy: 'founder',
+      }),
+    );
+    record(
+      'recordContribution',
+      fx.ops.recordContribution({
+        sessionId: session.data.session.id,
+        kind: 'handoff_request',
+        content: c('recordContribution.content'),
+        artifactRefs: [c('recordContribution.artifactRefs')],
+        handoff: { taskId: claimedSpender.id, toWorkerId: 'jules', reason: c('recordContribution.reason') },
+        requestedBy: 'claude',
+        idempotencyKey: 'canary-contribution',
+      }),
+    );
+  }
+
+  return {
+    snapshot: liveSnapshotFromOperations(fx.ops, { now: NOW.toISOString() }),
+    calls,
+    storedCanaries: canariesStillInStore(fx.db, CANARIES.map((canary) => canaryFor(canary.field))),
+    cleanup: () => {
+      fx.db.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+/** Every method body in `service.ts`, sliced from its declaration to the next. */
+function methodBodies(): Map<string, string> {
+  const lines = fs.readFileSync(SERVICE, 'utf8').split('\n');
+  const classStart = lines.findIndex((line) => /^export class HeadquarterOperations\b/.test(line));
+  expect(classStart).toBeGreaterThan(-1);
+  const starts: { name: string; line: number }[] = [];
+  for (let i = classStart; i < lines.length; i += 1) {
+    const match = /^ {2}(#?[A-Za-z_][A-Za-z0-9_]*)\s*[(<]/.exec(lines[i]!);
+    if (match && !['if', 'for', 'while', 'switch', 'catch', 'return', 'constructor', 'do', 'else', 'try'].includes(match[1]!)) {
+      starts.push({ name: match[1]!, line: i });
+    }
+  }
+  const bodies = new Map<string, string>();
+  starts.forEach((start, k) => {
+    const body = lines
+      .slice(start.line, k + 1 < starts.length ? starts[k + 1]!.line : lines.length)
+      .join('\n');
+    bodies.set(start.name, (bodies.get(start.name) ?? '') + body);
+  });
+  return bodies;
+}
+
+/** The names in one method's own `callerTextRefusal(…, [ … ])` declared list. */
+function declaredCallerText(body: string): string[] {
+  const names = new Set<string>();
+  for (const match of body.matchAll(/callerTextRefusal\([^,]+,\s*\[([^\]]*)\]/g)) {
+    for (const part of match[1]!.split(',')) {
+      const name = /'([A-Za-z_][A-Za-z0-9_]*)'/.exec(part);
+      if (name) names.add(name[1]!);
+    }
+  }
+  return [...names].sort();
+}
+
+describe('what Founder-typed text crosses to the unauthenticated artifact', () => {
+  it('plants every canary through the real facade, and every plant succeeds', () => {
+    const planted = plantEveryCanary();
+    try {
+      const refused = planted.calls.filter((call) => !call.ok);
+      expect(
+        refused.map((call) => `${call.name}: ${call.error}`),
+        'a canary that was never written would read as "does not cross"',
+      ).toEqual([]);
+      expect(planted.calls.length).toBeGreaterThanOrEqual(CANARIES.length / 2);
+
+      // ...AND every canary is still in the store when the snapshot is taken
+      // (Wave 5 correction round fifteen, High 4). "The facade accepted it" and
+      // "it is there to be published" are different properties, and the census
+      // shipped a `crosses: false` that rested on the first: the scenario
+      // engaged the kill switch, released it on the next line, and then
+      // measured. A canary the store no longer holds measures NOTHING about
+      // the artifact, so it is a failure here rather than a quiet `false`.
+      const missing = CANARIES.map((canary) => canary.field).filter(
+        (field) => !planted.storedCanaries.has(canaryFor(field)),
+      );
+      expect(
+        missing,
+        'a canary that is not in the store at snapshot time cannot be read as "does not cross"',
+      ).toEqual([]);
+    } finally {
+      planted.cleanup();
+    }
+  });
+
+  it('crosses EXACTLY the fields the disclosure names, in both directions', () => {
+    const planted = plantEveryCanary();
+    try {
+      const measured = CANARIES.filter(
+        (canary) => pathsCarrying(planted.snapshot, canaryFor(canary.field)).length > 0,
+      ).map((canary) => canary.field);
+      const declared = CANARIES.filter((canary) => canary.crosses).map((canary) => canary.field);
+      // Exact, not `toContain`: a field that starts publishing and a field that
+      // stops both fail here, which is what "in either direction" means.
+      expect(measured.sort()).toEqual(declared.sort());
+      // And the measured totals, so the phase document's numbers are taken from
+      // an execution rather than from a sentence.
+      expect(CANARIES.length).toBe(82);
+      expect(declared.length).toBe(39);
+    } finally {
+      planted.cleanup();
+    }
+  });
+
+  it('lands each published field at the path the disclosure names', () => {
+    const planted = plantEveryCanary();
+    try {
+      for (const canary of CANARIES) {
+        const paths = pathsCarrying(planted.snapshot, canaryFor(canary.field));
+        if (!canary.crosses) {
+          expect(paths, `${canary.field} must not cross`).toEqual([]);
+          continue;
+        }
+        expect(canary.at, `${canary.field} must name a measured path`).toBeTruthy();
+        expect(paths, `${canary.field}`).toContain(canary.at);
+      }
+    } finally {
+      planted.cleanup();
+    }
+  });
+
+  /**
+   * The completeness half. Every name a method's OWN `callerTextRefusal` list
+   * declares is Founder-writable text by that method's own reckoning, so it
+   * must either carry a canary here or be exempted with a reason. A parameter
+   * added to one of these methods therefore fails this file on the day it is
+   * added, rather than being published quietly beside the others.
+   */
+  it('plants a canary in every caller-text parameter the FACADE declares, not just the ones already listed', () => {
+    const bodies = methodBodies();
+    const planted = new Set(CANARIES.map((canary) => canary.field));
+    // THE INVERSION (Wave 5 correction round sixteen, High B-5).
+    //
+    // This line used to read:
+    //
+    //   const exercised = [...new Set(CANARIES.map((c) => c.field.split('.')[0]))];
+    //
+    // — the methods ALREADY IN THE LIST. A method never added to `CANARIES` was
+    // therefore never checked, and the docblock above called the result a
+    // derivation. Measured at that head: 77 declared caller-text parameters on
+    // the facade, 38 in `CANARIES`, 46 declared and absent across 25 methods
+    // that were entirely unexercised. One of them, `openCollaborationSession.title`,
+    // crosses to the unauthenticated artifact and the disclosure did not name
+    // it; `verifyTruth.limitations`, `acceptTruth.note`, `promoteProposal.*`,
+    // `updateProject.*`, `transitionProject.note` and all six `recordMemory.*`
+    // parameters do too.
+    //
+    // `exercised` is now DERIVED: every facade method that declares a
+    // `callerTextRefusal` list. A method that starts scanning caller text in a
+    // future phase fails this file on the day it is written, until every
+    // parameter it declares is either planted here or exempted in writing.
+    const exercised = [...bodies.entries()]
+      .filter(([name, body]) => !name.startsWith('#') && declaredCallerText(body).length > 0)
+      .map(([name]) => name);
+    expect(exercised.length).toBeGreaterThanOrEqual(37);
+    const unplanted: string[] = [];
+    for (const method of exercised) {
+      const body = bodies.get(method);
+      expect(body, `${method} must exist on the facade`).toBeDefined();
+      for (const parameter of declaredCallerText(body!)) {
+        if ((NOT_PLANTED[method] ?? []).some((entry) => entry.parameter === parameter)) continue;
+        if (!planted.has(`${method}.${parameter}`)) unplanted.push(`${method}.${parameter}`);
+      }
+    }
+    expect(unplanted, 'a caller-text parameter reaches the artifact unmeasured').toEqual([]);
+    // And the exemptions are real parameters carrying a real argument, not
+    // stale names: each must still be declared by its method, and each must say
+    // WHY in enough words to be checkable.
+    for (const [method, entries] of Object.entries(NOT_PLANTED)) {
+      const declared = declaredCallerText(bodies.get(method) ?? '');
+      for (const entry of entries) {
+        expect(declared, `${method}.${entry.parameter} is exempted but no longer declared`).toContain(
+          entry.parameter,
+        );
+        expect(entry.reason.length, `${method}.${entry.parameter}`).toBeGreaterThan(80);
+      }
+    }
+  });
+
+  /**
+   * The measured bound on the two parameters that used to be exempted with a
+   * false reason (Wave 5 correction round fifteen, Medium 4).
+   *
+   * The old exemption said both were "bounded to a registered provider and to
+   * an observed model id". Neither bound exists. This asserts what IS true, in
+   * the direction that matters: an UNREGISTERED provider and a NEVER-OBSERVED
+   * model are both recorded, and the value lands in `hq_intel_cost_entries` —
+   * so the `crosses: false` verdict above rests on the projection withholding
+   * it, not on the write refusing it.
+   */
+  it('records an unregistered provider and an unobserved model, and says so', () => {
+    const planted = plantEveryCanary();
+    try {
+      expect(planted.storedCanaries.has(canaryFor('recordIntelligenceCost.providerId'))).toBe(true);
+      expect(planted.storedCanaries.has(canaryFor('recordIntelligenceCost.modelId'))).toBe(true);
+      const recorded = planted.calls.find((call) => call.name === 'recordIntelligenceCost');
+      expect(recorded?.ok, 'the cost entry must have been written').toBe(true);
+    } finally {
+      planted.cleanup();
+    }
+  });
+
+  it('the phase document says so, in the section a reader would look in', () => {
+    // The disclosure is only worth having if it is written down where the
+    // privacy claim is made, and it is only worth having ACCURATE if the
+    // measurement is what is written. Both are checked.
+    const text = fs.readFileSync(PHASE_13, 'utf8');
+    expect(text).toContain('The unauthenticated artifact IS a Founder-text publication surface');
+    expect(text).toContain('thirty-nine fields, not four');
+    expect(text).toContain('unauthenticated-founder-text.test.ts');
+    for (const canary of CANARIES) {
+      if (!canary.crosses) continue;
+      expect(text, `${canary.field} is published and must be disclosed`).toContain(
+        `\`${canary.field}\``,
+      );
+    }
+  });
+});

@@ -7,7 +7,9 @@
  * vocabularies.
  */
 
-export const ACTIVITY_STATUSES = [
+import { deepFreeze } from './freeze.js';
+
+export const ACTIVITY_STATUSES = deepFreeze([
   'queued',
   'assigned',
   'running',
@@ -17,7 +19,7 @@ export const ACTIVITY_STATUSES = [
   'review_passed',
   'completed',
   'outcome_unknown',
-] as const;
+] as const);
 
 export type ActivityStatus = (typeof ACTIVITY_STATUSES)[number];
 
@@ -47,7 +49,7 @@ export type ActivityStatus = (typeof ACTIVITY_STATUSES)[number];
  * - A denied approval goes to `blocked` (with the denial reason), never
  *   silently back to `queued`.
  */
-export const ALLOWED_TRANSITIONS: Record<ActivityStatus, readonly ActivityStatus[]> = {
+export const ALLOWED_TRANSITIONS: Record<ActivityStatus, readonly ActivityStatus[]> = deepFreeze({
   queued: ['assigned', 'blocked', 'needs_approval'],
   assigned: ['running', 'queued', 'blocked', 'needs_approval'],
   running: [
@@ -64,7 +66,7 @@ export const ALLOWED_TRANSITIONS: Record<ActivityStatus, readonly ActivityStatus
   review_passed: ['completed'],
   completed: [],
   outcome_unknown: ['completed', 'review_failed', 'queued'],
-};
+});
 
 export function isActivityStatus(value: string): value is ActivityStatus {
   return (ACTIVITY_STATUSES as readonly string[]).includes(value);
@@ -91,7 +93,7 @@ export function isTerminal(status: ActivityStatus): boolean {
  * from `queued` (operator/queue.ts), so for a task in one of these statuses
  * no statement about its future claiming can be true.
  */
-export const QUEUED_UNREACHABLE_STATUSES: ReadonlySet<ActivityStatus> = (() => {
+export const QUEUED_UNREACHABLE_STATUSES: ReadonlySet<ActivityStatus> = deepFreeze((() => {
   // Grow the set of statuses that can eventually reach 'queued' until it
   // stops changing; everything left outside is beyond claiming forever.
   const canReachQueued = new Set<ActivityStatus>(['queued']);
@@ -107,7 +109,7 @@ export const QUEUED_UNREACHABLE_STATUSES: ReadonlySet<ActivityStatus> = (() => {
     }
   }
   return new Set(ACTIVITY_STATUSES.filter((status) => !canReachQueued.has(status)));
-})();
+})());
 
 /** What kind of thing an event is about. */
 export type ActivitySubjectKind = 'task' | 'project' | 'worker' | 'approval' | 'system';

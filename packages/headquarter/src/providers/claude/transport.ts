@@ -41,8 +41,22 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-/** `owner/repo`, the only repository identity this module accepts. */
-export const REPO_SLUG_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+/**
+ * `owner/repo`, the only repository identity this module accepts.
+ *
+ * **Frozen** (Wave 5 correction round six, Medium 6). It is exported, and
+ * `isValidTarget` — which decides the real GitHub dispatch target — calls
+ * `.test` on it. `test` lives on `RegExp.prototype`, so before the freeze a
+ * single `REPO_SLUG_PATTERN.test = () => true` installed an OWN property and
+ * turned `isValidTarget(hostile)` from `false` to `true`: permanent
+ * architectural law 3, a patchable convenience surface used as execution
+ * authority, reached through an exported constant. Freezing the object refuses
+ * the assignment (ESM is always strict, so it THROWS). The pattern has no `g`
+ * flag, so the now-immutable `lastIndex` changes nothing.
+ */
+export const REPO_SLUG_PATTERN = Object.freeze(
+  /^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/,
+);
 
 /**
  * The ONE host this lane will publish to (issue #221, Codex P1 on `1d5b3bf`).

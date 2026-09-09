@@ -20,7 +20,7 @@ import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { assertTransition, type ActivityStatus } from '../contracts/events.js';
-import { CapabilityRegistry, type Capability } from './capabilities.js';
+import { CapabilityRegistry, readStoredRiskClass, type Capability } from './capabilities.js';
 
 /**
  * Every AUTHORITY-BEARING mutation on the queue, handed only to the
@@ -265,7 +265,212 @@ function rowToTask(row: Record<string, unknown> | undefined): OperatorTask | nul
   };
 }
 
+/**
+ * The canonical `op_tasks` row, read straight from the database — the ONE task
+ * read every enforcement decision in the package goes through (Wave 5
+ * correction round fifteen, Critical 1).
+ *
+ * ## Why this exists, and why it is a module function
+ *
+ * `OperatorQueue.get` is a prototype method that `#200` documents as a
+ * DISPLAY read: "enforcement does NOT dispatch through this". That sentence
+ * was true of the queue and false of everything above it. A hostile review
+ * replaced `ops.queue.get` with a closure returning `{ ...real(id),
+ * capabilityId: 'bench.read_only' }` and:
+ *
+ *  - `control-api.ts`'s `approve` route looked the capability up by the FORGED
+ *    id, `STEP_UP_RISK_CLASSES` no longer matched, `verifyStepUp` never ran,
+ *    and a stale Founder session approved a `founder_gate` order with every
+ *    password rejected — `401 step_up_required` became
+ *    `200 {"ok":true,"status":"queued"}`;
+ *  - `approveTask` read the capability-scoped kill switch for the FORGED
+ *    capability, so an approval landed with `op_kill_switch.engaged = 1` on
+ *    the task's real capability.
+ *
+ * The capability ROW had been hardened (`capabilityRowFor` →
+ * `#capabilityFromStore`); the TASK row it is looked up BY had not. That is
+ * the recurring shape: a hardened read installed next to an unhardened
+ * sibling.
+ *
+ * An ES module binding cannot be reassigned by an importing module and there
+ * is no prototype on the path, so this is the same enforcement-safe recipe
+ * `capabilityRowFor` uses, published one layer lower so the queue's own
+ * `#getTask` and the service's `#taskRowFromStore` are literally the same
+ * computation and cannot drift.
+ *
+ * FAIL CLOSED on an unreadable payload: a row whose `payload` column does not
+ * parse is reported as ABSENT rather than throwing out of a decision, which is
+ * what `#taskRowFromStore` already did and what every caller of a canonical
+ * read in this package does.
+ */
+export function readOperatorTaskRow(db: HqDatabase, taskId: string): OperatorTask | null {
+  const row = db.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(taskId) as
+    | Record<string, unknown>
+    | undefined;
+  if (!row) return null;
+  try {
+    return rowToTask(row);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Module-private. Assigned once by `OperatorQueue`'s `static {}` block below,
+ * and reachable from no other module — the same recipe `service.ts` uses for
+ * `readCapabilityRow` and `readKillSwitchEngaged`, applied across a module
+ * boundary. It is what lets the facade hand this file the safe-mode verdict
+ * without putting a property on the queue, on its prototype, or on any object
+ * a caller holding `ops.queue` can reach.
+ */
+let addSafeModeGate: (queue: OperatorQueue, gate: () => boolean) => void;
+
+/**
+ * A claim refused because HQ has said it cannot stand behind its own record.
+ *
+ * A distinct class rather than a bare `Error`, so `HeadquarterOperations`
+ * translates it back to the typed `safe_mode_engaged` refusal a Founder
+ * already sees from `claimNext` rather than to a generic `operator_rejected`.
+ */
+export class SafeModeEngaged extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SafeModeEngaged';
+  }
+}
+
+/**
+ * A claim refused because the task carries a Founder assignment intent naming
+ * a DIFFERENT worker (Wave 5 correction round sixteen, Critical B-1).
+ *
+ * ## What was open
+ *
+ * The `assigned_to_other_worker` refusal existed in exactly one place —
+ * `HeadquarterOperations.claimNext`, which peeked at `this.queue
+ * .selectClaimable(...)` and then read the intent through `this.readMeta(...)`.
+ * Both are prototype slots. `HeadquarterOperations.prototype.readMeta = () =>
+ * null` turned
+ *
+ *     BASELINE claim by jules: {"code":"assigned_to_other_worker"}
+ *
+ * into
+ *
+ *     FORGED claim by jules:   {"ok":true,"claimedBy":"jules","fence":1}
+ *
+ * with `op_tasks` left at `claimed_by: jules, status: assigned, fence: 1` while
+ * `hq_op_task_meta` still named `claude`. `grep assignment src/operator/queue.ts`
+ * found three comment lines and no code: this file — the canonical claim
+ * boundary, and the ONLY code path that writes `op_tasks.claimed_by` — did not
+ * enforce the rule at all, so every caller that does not come through the
+ * facade was unguarded even without a patch.
+ *
+ * ## Why it is a class, and why the check is here
+ *
+ * Here, beside `assertAssignable` (deactivation) and `#assertProviderBinding`
+ * (provider identity), because those are the two neighbouring authorities with
+ * exactly the same property: they must hold for a caller holding a queue. The
+ * intent is read from `hq_op_task_meta` through a `#private` closure over
+ * `#db`, so no prototype and no public property participates in the answer.
+ *
+ * A distinct class rather than a bare `Error` so `claimNext` translates it back
+ * to the typed `assigned_to_other_worker` refusal — with the same `taskId` /
+ * `assignedTo` details the Founder-facing surface already renders — instead of
+ * a generic `operator_rejected`.
+ */
+export class AssignmentIntentViolation extends Error {
+  readonly taskId: string;
+  readonly assignedTo: string;
+  constructor(taskId: string, assignedTo: string, workerId: string) {
+    super(
+      `Task ${taskId} is assigned to ${assignedTo}; worker ${workerId} may not claim it`,
+    );
+    this.name = 'AssignmentIntentViolation';
+    this.taskId = taskId;
+    this.assignedTo = assignedTo;
+  }
+}
+
+/**
+ * Tell this queue how to ask whether HQ is in SAFE MODE (Wave 5 correction
+ * round ten, High 3).
+ *
+ * ## What was open
+ *
+ * `HeadquarterOperations.queue` is a `public readonly` field, and this file
+ * contained ZERO occurrences of `safeMode`. With safe mode genuinely latched,
+ * `ops.claimNext(...)` was refused `safe_mode_engaged` while
+ * `ops.queue.claim(...)` succeeded — and it was not one method: the whole
+ * lifecycle ran, `queue.claim` → `start` → `heartbeat` → `complete`, with the
+ * task reaching `running` under a latch that exists to stop exactly that. The
+ * phase document meanwhile told the Founder that a queued task is safe because
+ * "claiming it is refused, so nothing it carries can happen while safe mode
+ * stands", which was false as written.
+ *
+ * ## Why the enforcement is HERE
+ *
+ * Because this is the layer that actually owns the act. `claimNext` is a
+ * convenience wrapper; `OperatorQueue.claim` is the canonical execution
+ * boundary — it is where the kill switch is re-read (`#killSwitchEngagedInternal`),
+ * where least privilege is re-checked, and where the approval nonce is
+ * consumed. A refusal that lives only in the wrapper is a refusal a caller can
+ * step around, which is what happened.
+ *
+ * ## Why it cannot be patched off
+ *
+ * The gates live in a `#private` field. There is no property on the queue, on
+ * `OperatorQueue.prototype`, or on any object reachable from `ops.queue` that
+ * names them, and this function can only ADD one. Gates are OR-ed and a gate
+ * that throws counts as ENGAGED, so a caller that installs a permissive gate
+ * of its own cannot mask the facade's real one — the fail-closed direction.
+ *
+ * ## What is deliberately NOT gated
+ *
+ * `start`, `heartbeat`, `complete`, `fail`, `releaseClaim` and
+ * `sweepExpiredLeases` stay available, because the facade's own documented
+ * disposition leaves `startTask`, `heartbeat`, `submitResult` and `failTask`
+ * available on purpose: they belong to work that was claimed and started
+ * BEFORE the latch, and refusing them would strand a live execution with
+ * nowhere to report. Safe mode must never remove a way to STOP something or a
+ * way to FIND OUT what is wrong. Closing `claim` is what makes that asymmetry
+ * true rather than merely stated: with no new claim, no new execution begins,
+ * and the lifecycle the review ran end to end cannot start.
+ */
+export function installQueueSafeModeGate(queue: OperatorQueue, gate: () => boolean): void {
+  addSafeModeGate(queue, gate);
+}
+
 export class OperatorQueue {
+  /**
+   * Every safe-mode verdict this queue must consult before handing out a
+   * claim. `#private`, append-only through `installQueueSafeModeGate`, and
+   * OR-ed: see that function for why both properties matter.
+   */
+  readonly #safeModeGates: (() => boolean)[] = [];
+
+  static {
+    addSafeModeGate = (queue: OperatorQueue, gate: () => boolean): void => {
+      queue.#safeModeGates.push(gate);
+    };
+  }
+
+  /**
+   * Whether any installed gate says HQ cannot stand behind its own record.
+   *
+   * A gate that THROWS counts as engaged. "I could not find out" is not a
+   * reason to hand out work — the same fail-closed reading `carryRecordedVerdict`
+   * applies to a verdict whose findings it cannot parse.
+   */
+  #safeModeEngaged(): boolean {
+    for (const gate of this.#safeModeGates) {
+      try {
+        if (gate()) return true;
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * READ-ONLY capability view for callers holding a queue.
    *
@@ -299,6 +504,15 @@ export class OperatorQueue {
    * the chain attests order and integrity, never authority (issue #200, Codex
    * exact-head finding on `821c836` — the twelfth mechanism here, and the
    * first aimed at the audit record itself rather than at a decision).
+   *
+   * The READS here are patchable, and that stays safe only while nothing
+   * enforced dispatches through them. Phase 13 briefly broke that: the
+   * safe-mode assessment read `verifyChain` from this object, so replacing it
+   * cleared the `evidence_chain_broken` latch. The assessment now recomputes
+   * the chain through `HeadquarterOperations.#verifyEvidenceChainFromStore` —
+   * a `#private` closure over the database and the module-level
+   * `verifyEvidenceChain`, with no prototype to patch — and this handle is once
+   * again a convenience a caller can only lie to itself with.
    */
   readonly evidence: EvidenceReadOnly;
   /** The writer. Never reachable from anything a worker is handed. */
@@ -362,6 +576,17 @@ export class OperatorQueue {
    * for callers who never touch the service, so the check belongs here too.
    */
   readonly #grantedCapabilities: (workerId: string) => string[];
+  /**
+   * The ADVISORY assignment intent recorded for a task, read from
+   * `hq_op_task_meta` through a closure over `#db` (Wave 5 correction round
+   * sixteen, Critical B-1). See `AssignmentIntentViolation` for what was open.
+   *
+   * Returns null when no intent stands — and also when the table does not
+   * exist, which is the honest answer rather than a fail-open one: a queue
+   * constructed on a database that never ran `ensureApplicationSchema` has
+   * nowhere for an intent to have been recorded, so there is none to enforce.
+   */
+  readonly #assignmentIntentOf: (taskId: string) => string | null;
   readonly #listProviders: () => WorkerProviderRecord[];
 
   /**
@@ -425,16 +650,51 @@ export class OperatorQueue {
     // that dereference `#evidence`, and a caller is free to use them the moment
     // it is handed them. A `#private` field read before initialisation throws.
     this.#evidence = new EvidenceLog(db);
+    /**
+     * ONE TRANSACTION PER PRIVILEGED MUTATION (Wave 5 correction round
+     * fifteen, High 6).
+     *
+     * Every mutation on this surface pairs a canonical row write with an
+     * append to the hash-chained evidence log, and none of them was atomic.
+     * `#releaseKillSwitch` was the one a hostile review executed: with a
+     * `BEFORE INSERT ON op_evidence WHEN kind='kill_switch_released' ->
+     * RAISE(ABORT)` trigger in place, the `UPDATE op_kill_switch SET engaged =
+     * 0` had already committed when the append threw, and
+     * `HeadquarterOperations.releaseKillSwitch` caught the throw and reported
+     * `operator_rejected … the kill switch is STILL engaged`. Measured after
+     * that call: `op_kill_switch.engaged = 0`, `killSwitchEngaged` false, a
+     * task queued, `claimNext` CLAIMED, and zero `kill_switch_released` rows
+     * anywhere. HQ told the Founder the opposite of the truth about the one
+     * control they reach for to stop everything, AND lost the audit record of
+     * the release.
+     *
+     * The fix is structural rather than per-method: the wrapper is applied
+     * HERE, at the one place the privileged API is issued, so a mutation added
+     * to `PrivilegedQueueApi` in a future phase is atomic by construction
+     * instead of by somebody remembering. `deny`, `approve`, `reviewPass`,
+     * `reviewFail`, `reconcile`, `returnForFreshApproval` and `enqueue` all
+     * have the identical update-then-append shape and all get it.
+     *
+     * `reserve` is deliberately NOT wrapped: it IS the transaction primitive,
+     * and `appendEvidence` is a single statement with nothing to be atomic
+     * with. Nesting is safe — better-sqlite3 runs an inner `transaction()`
+     * as a SAVEPOINT — so a caller that already holds a reservation is
+     * unaffected.
+     */
+    const atomic = <A extends unknown[], R>(fn: (...args: A) => R): ((...args: A) => R) => {
+      const wrapped = db.transaction(fn as (...args: unknown[]) => R);
+      return (...args: A): R => wrapped(...args) as R;
+    };
     grantPrivileged?.({
-      approve: (taskId, by, opts) => this.#approve(taskId, by, opts),
-      deny: (taskId, reason, by) => this.#deny(taskId, reason, by),
-      engageKillSwitch: (scope, by, reason) => this.#engageKillSwitch(scope, by, reason),
-      releaseKillSwitch: (scope, by) => this.#releaseKillSwitch(scope, by),
-      reviewPass: (taskId, reviewerId, note) => this.#reviewPass(taskId, reviewerId, note),
-      reviewFail: (taskId, reviewerId, reason) => this.#reviewFail(taskId, reviewerId, reason),
-      reconcile: (taskId, decision, by, note) => this.#reconcile(taskId, decision, by, note),
-      returnForFreshApproval: (taskId) => this.#returnForFreshApproval(taskId),
-      enqueue: (req) => this.#enqueue(req),
+      approve: atomic((taskId, by, opts) => this.#approve(taskId, by, opts)),
+      deny: atomic((taskId, reason, by) => this.#deny(taskId, reason, by)),
+      engageKillSwitch: atomic((scope, by, reason) => this.#engageKillSwitch(scope, by, reason)),
+      releaseKillSwitch: atomic((scope, by) => this.#releaseKillSwitch(scope, by)),
+      reviewPass: atomic((taskId, reviewerId, note) => this.#reviewPass(taskId, reviewerId, note)),
+      reviewFail: atomic((taskId, reviewerId, reason) => this.#reviewFail(taskId, reviewerId, reason)),
+      reconcile: atomic((taskId, decision, by, note) => this.#reconcile(taskId, decision, by, note)),
+      returnForFreshApproval: atomic((taskId) => this.#returnForFreshApproval(taskId)),
+      enqueue: atomic((req) => this.#enqueue(req)),
       appendEvidence: (entry) => this.#evidence.append(entry),
       reserve: (fn) => this.#evidence.reserve(fn),
     });
@@ -452,9 +712,7 @@ export class OperatorQueue {
     // an attacker can reach participates in the enforcement path. The SQL is
     // the same as `WorkerProviderDirectory`'s; the read side of that class
     // stays exported for callers who legitimately want an object.
-    this.#getTask = (taskId: string): OperatorTask | null => rowToTask(
-      db.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(taskId) as Record<string, unknown> | undefined,
-    );
+    this.#getTask = (taskId: string): OperatorTask | null => readOperatorTaskRow(db, taskId);
     this.#capabilityOf = (capabilityId: string): Capability | null => {
       const row = db.prepare(`SELECT * FROM op_capabilities WHERE id = ?`).get(capabilityId) as
         | Record<string, unknown>
@@ -463,7 +721,7 @@ export class OperatorQueue {
       return {
         id: row.id as string,
         description: row.description as string,
-        riskClass: row.risk_class as Capability['riskClass'],
+        riskClass: readStoredRiskClass(row.risk_class),
         sideEffect: !!row.side_effect,
         idempotent: !!row.idempotent,
         enabled: !!row.enabled,
@@ -491,6 +749,19 @@ export class OperatorQueue {
         return [];
       }
         };
+    this.#assignmentIntentOf = (taskId: string): string | null => {
+      try {
+        const row = db
+          .prepare(`SELECT assigned_worker_id FROM hq_op_task_meta WHERE task_id = ?`)
+          .get(taskId) as { assigned_worker_id: string | null } | undefined;
+        const assigned = row?.assigned_worker_id ?? null;
+        return typeof assigned === 'string' && assigned.length > 0 ? assigned : null;
+      } catch {
+        // The application-layer table is not present on this handle. No intent
+        // can have been recorded, so there is none to enforce.
+        return null;
+      }
+    };
     this.#listProviders = (): WorkerProviderRecord[] => {
       const rows = db
         .prepare(
@@ -882,9 +1153,28 @@ export class OperatorQueue {
     leaseMs = 5 * 60_000,
     onlyTaskId?: string,
   ): OperatorTask | null {
-    // Deny-by-default, and FIRST: before any read, any state mutation, and
-    // crucially before the single-use approval nonce is consumed below, so a
-    // rejected claim can never burn an approval or inflate a fencing token.
+    // SAFE MODE, and first of all — before assignability, before least
+    // privilege, before the kill switch, and long before the single-use
+    // approval nonce below (Wave 5 correction round ten, High 3). A claim is
+    // the act that hands work to a worker, and HQ does not hand out work whose
+    // approval, payload and capability rows it has just told the Founder it
+    // cannot stand behind. Enforced HERE rather than only in
+    // `HeadquarterOperations.claimNext`, because this is the canonical
+    // boundary: the wrapper's refusal was steppable through the facade's own
+    // `public readonly queue`, and the entire claim → start → heartbeat →
+    // complete lifecycle ran under a genuinely latched safe mode. See
+    // `installQueueSafeModeGate`.
+    if (this.#safeModeEngaged()) {
+      throw new SafeModeEngaged(
+        'Cannot claim work: HQ is in SAFE MODE. A claim is the act that hands work to a worker, ' +
+          'and HQ does not hand out work against a record it has said it cannot stand behind. ' +
+          'Work already claimed may still start, heartbeat, report and fail.',
+      );
+    }
+    // Deny-by-default, and FIRST after the latch: before any read, any state
+    // mutation, and crucially before the single-use approval nonce is consumed
+    // below, so a rejected claim can never burn an approval or inflate a
+    // fencing token.
     assertAssignable(this.#db, workerId);
     // Least privilege, at the canonical boundary rather than only at the
     // service. Before selection, before any mutation, and before the
@@ -914,6 +1204,18 @@ export class OperatorQueue {
       }
       return null;
     }
+    // ASSIGNMENT INTENT, at the canonical boundary (Wave 5 correction round
+    // sixteen, Critical B-1). Before any mutation and before the single-use
+    // approval nonce can be consumed, beside the deactivation and
+    // provider-binding checks — the two neighbouring authorities with the same
+    // property. Read through `#assignmentIntentOf`, a closure over `#db`: the
+    // facade's copy of this rule dispatched through `this.readMeta`, a public
+    // prototype slot, and replacing it handed a Founder-assigned task to
+    // another worker.
+    const intendedFor = this.#assignmentIntentOf(selected.id);
+    if (intendedFor && intendedFor !== workerId) {
+      throw new AssignmentIntentViolation(selected.id, intendedFor, workerId);
+    }
     const candidate = { id: selected.id, fence: selected.fence };
     // Execution boundary (issue #53 correction A): an approval-gated task is
     // admitted only with a valid, unexpired, unconsumed approval bound to the
@@ -935,52 +1237,74 @@ export class OperatorQueue {
     const leaseExpires = new Date(Date.now() + leaseMs).toISOString();
     const claimNonce = uuid();
     const claimFence = candidate.fence + 1;
-    const res = this.#db
-      .prepare(
-        `UPDATE op_tasks
-         SET status = 'assigned', fence = fence + 1, claimed_by = ?, lease_expires_at = ?, claim_nonce = ?, updated_at = ?
-         WHERE id = ? AND status = 'queued' AND fence = ?`,
-      )
-      .run(workerId, leaseExpires, claimNonce, nowIso(), candidate.id, candidate.fence);
-    if (res.changes === 0) return null; // lost the race; caller may retry
-    // Consume the single-use approval nonce exactly once, with the claim —
-    // recording WHICH claim consumed it (issues #77/#79): worker, exact task,
-    // fencing token, and the per-claim nonce, written in the same atomic
-    // conditional UPDATE as the consumption itself. start() re-verifies this
-    // binding.
-    if (cap && approvalRequired(cap, this.#policyCtx) && task.approvalId) {
-      const consumed = this.#db
+    /**
+     * THE COMMIT REGION — all of it, or none of it (Wave 5 correction round
+     * sixteen, High B-4).
+     *
+     * A claim writes the conditional `op_tasks` UPDATE, consumes the
+     * single-use approval nonce, records the history event and appends TWO
+     * hash-chained evidence rows. None of that was atomic, and a failure at
+     * the appends left a task genuinely claimed, with its approval genuinely
+     * spent, and no audit trail saying so.
+     *
+     * The reservation starts HERE and not at the top of the method
+     * deliberately: everything above is a refusal path, and two of those paths
+     * (`#recordBindingRefusal`, `#rejectAtExecutionBoundary`) WRITE the
+     * refusal to the evidence log and then return. Wrapping the whole method
+     * would roll those records back on the throw that follows one of them —
+     * the audit record of a refusal is not part of the claim, and must survive
+     * the claim not happening.
+     */
+    return this.#evidence.reserve(() => {
+      const res = this.#db
         .prepare(
-          `UPDATE hq_approvals
-           SET consumed_at = ?, consumed_by = ?, consumed_task_id = ?, consumed_fence = ?, consumed_claim_nonce = ?
-           WHERE id = ? AND consumed_at IS NULL`,
+          `UPDATE op_tasks
+           SET status = 'assigned', fence = fence + 1, claimed_by = ?, lease_expires_at = ?, claim_nonce = ?, updated_at = ?
+           WHERE id = ? AND status = 'queued' AND fence = ?`,
         )
-        .run(nowIso(), workerId, candidate.id, claimFence, claimNonce, task.approvalId);
-      if (consumed.changes === 0) {
-        // Nonce raced/replayed: undo nothing destructive — surface loudly.
-        throw new Error(`Approval nonce ${task.approvalId} was already consumed (replay rejected)`);
+        .run(workerId, leaseExpires, claimNonce, nowIso(), candidate.id, candidate.fence);
+      if (res.changes === 0) return null; // lost the race; caller may retry
+      // Consume the single-use approval nonce exactly once, with the claim —
+      // recording WHICH claim consumed it (issues #77/#79): worker, exact task,
+      // fencing token, and the per-claim nonce, written in the same atomic
+      // conditional UPDATE as the consumption itself. start() re-verifies this
+      // binding.
+      if (cap && approvalRequired(cap, this.#policyCtx) && task.approvalId) {
+        const consumed = this.#db
+          .prepare(
+            `UPDATE hq_approvals
+             SET consumed_at = ?, consumed_by = ?, consumed_task_id = ?, consumed_fence = ?, consumed_claim_nonce = ?
+             WHERE id = ? AND consumed_at IS NULL`,
+          )
+          .run(nowIso(), workerId, candidate.id, claimFence, claimNonce, task.approvalId);
+        if (consumed.changes === 0) {
+          // Nonce raced/replayed. The throw now also rolls the claim back,
+          // which is the honest outcome: a claim that could not spend its
+          // approval never happened.
+          throw new Error(`Approval nonce ${task.approvalId} was already consumed (replay rejected)`);
+        }
+        this.#evidence.append({
+          taskId: candidate.id,
+          actor: workerId,
+          kind: 'approval_consumed',
+          payload: {
+            approvalId: task.approvalId,
+            consumedBy: workerId,
+            consumedTaskId: candidate.id,
+            consumedFence: claimFence,
+            claimNonce,
+          },
+        });
       }
+      this.#recordEvent(candidate.id, 'assigned', workerId, `Claimed by ${workerId}`);
       this.#evidence.append({
         taskId: candidate.id,
         actor: workerId,
-        kind: 'approval_consumed',
-        payload: {
-          approvalId: task.approvalId,
-          consumedBy: workerId,
-          consumedTaskId: candidate.id,
-          consumedFence: claimFence,
-          claimNonce,
-        },
+        kind: 'claimed',
+        payload: { fence: candidate.fence + 1, leaseExpires },
       });
-    }
-    this.#recordEvent(candidate.id, 'assigned', workerId, `Claimed by ${workerId}`);
-    this.#evidence.append({
-      taskId: candidate.id,
-      actor: workerId,
-      kind: 'claimed',
-      payload: { fence: candidate.fence + 1, leaseExpires },
+      return this.#getTask(candidate.id)!;
     });
-    return this.#getTask(candidate.id)!;
   }
 
   /**
@@ -1113,6 +1437,33 @@ export class OperatorQueue {
    * other than the executing/submitting/requesting worker — can reach the
    * terminal `completed` status. Only read-only, no-side-effect capabilities
    * complete directly.
+   *
+   * ALL OF IT, OR NONE OF IT (Wave 5 correction round sixteen, High B-4).
+   *
+   * This method reproduced the exact defect the `atomic` wrapper in the
+   * constructor was written to close, and it was outside that wrapper's reach
+   * because membership of `PrivilegedQueueApi` — not the update-then-append
+   * SHAPE — was what the wrapper keyed on. With a
+   * `BEFORE INSERT ON op_evidence WHEN kind =
+   * 'execution_result_submitted_for_review' -> RAISE(ABORT)` trigger standing:
+   *
+   * ```
+   * RESULT: {"code":"operator_rejected","msg":"blocked"}
+   * AFTER : status running / review_state pending / submitted_by claude / result committed
+   * evidence rows for that kind: 0
+   * RESUBMIT: {"code":"operator_rejected", "…already has a result awaiting independent review;
+   *            it cannot be re-submitted"}
+   * ```
+   *
+   * The caller was told the submission failed; it had not. The task sat in the
+   * independent reviewer's queue with ZERO hash-chained audit rows behind it,
+   * and `HeadquarterOperations.submitResult`'s `reviewState === 'pending'`
+   * guard then wedged it there permanently.
+   *
+   * The fence check and the capability read stay OUTSIDE the reservation:
+   * they take no lock and write nothing, and a refusal from either must not
+   * open a write transaction. `test/queue-mutation-atomicity.test.ts` derives
+   * the obligation from this file's own shape rather than from this list.
    */
   complete(
     taskId: string,
@@ -1129,30 +1480,34 @@ export class OperatorQueue {
       if (task.status !== 'running') {
         throw new Error(`Task ${taskId} is not running (status: ${task.status})`);
       }
+      return this.#evidence.reserve(() => {
+        this.#db.prepare(`UPDATE op_tasks SET result = ? WHERE id = ?`).run(JSON.stringify(result), taskId);
+        this.#db
+          .prepare(
+            `UPDATE op_tasks SET review_state = 'pending', submitted_by = ?, submitted_at = ?,
+               lease_expires_at = NULL, updated_at = ? WHERE id = ?`,
+          )
+          .run(workerId, nowIso(), nowIso(), taskId);
+        this.#recordEvent(taskId, 'running', workerId, 'Result submitted; awaiting independent review');
+        this.#evidence.append({
+          taskId,
+          actor: workerId,
+          kind: 'execution_result_submitted_for_review',
+          payload: { result, refs: evidenceRefs },
+        });
+        return this.#getTask(taskId)!;
+      });
+    }
+    return this.#evidence.reserve(() => {
       this.#db.prepare(`UPDATE op_tasks SET result = ? WHERE id = ?`).run(JSON.stringify(result), taskId);
-      this.#db
-        .prepare(
-          `UPDATE op_tasks SET review_state = 'pending', submitted_by = ?, submitted_at = ?,
-             lease_expires_at = NULL, updated_at = ? WHERE id = ?`,
-        )
-        .run(workerId, nowIso(), nowIso(), taskId);
-      this.#recordEvent(taskId, 'running', workerId, 'Result submitted; awaiting independent review');
       this.#evidence.append({
         taskId,
         actor: workerId,
-        kind: 'execution_result_submitted_for_review',
+        kind: 'execution_result',
         payload: { result, refs: evidenceRefs },
       });
-      return this.#getTask(taskId)!;
-    }
-    this.#db.prepare(`UPDATE op_tasks SET result = ? WHERE id = ?`).run(JSON.stringify(result), taskId);
-    this.#evidence.append({
-      taskId,
-      actor: workerId,
-      kind: 'execution_result',
-      payload: { result, refs: evidenceRefs },
+      return this.#transition(taskId, 'completed', workerId, 'Execution completed');
     });
-    return this.#transition(taskId, 'completed', workerId, 'Execution completed');
   }
 
   /**
@@ -1187,10 +1542,20 @@ export class OperatorQueue {
     return this.#transition(taskId, 'review_failed', reviewerId, `Independent review failed: ${reason}`);
   }
 
+  /**
+   * The append comes FIRST here, which is what made this one safe while
+   * `complete` was not: a blocked append threw before the row moved, so the
+   * caller's error and the record agreed. That is safety by ORDERING, and
+   * ordering is not a property a future edit preserves — a reservation is.
+   * Wrapped (Wave 5 correction round sixteen, High B-4), and the ordering kept
+   * as defence in depth.
+   */
   fail(taskId: string, workerId: string, fence: number, reason: string): OperatorTask {
     this.#assertFence(taskId, workerId, fence);
-    this.#evidence.append({ taskId, actor: workerId, kind: 'execution_failed', payload: { reason } });
-    return this.#transition(taskId, 'review_failed', workerId, `Execution failed: ${reason}`);
+    return this.#evidence.reserve(() => {
+      this.#evidence.append({ taskId, actor: workerId, kind: 'execution_failed', payload: { reason } });
+      return this.#transition(taskId, 'review_failed', workerId, `Execution failed: ${reason}`);
+    });
   }
 
   // ---- lease expiry / OUTCOME_UNKNOWN ----
@@ -1200,8 +1565,18 @@ export class OperatorQueue {
    * re-queued. A side-effect task whose worker went silent while
    * assigned/running becomes OUTCOME_UNKNOWN and waits for explicit
    * reconciliation — never a blind retry.
+   *
+   * ONE TRANSACTION for the whole sweep (Wave 5 correction round sixteen, High
+   * B-4). Each row pairs a status transition with a history event, and a
+   * multi-row sweep that fails midway used to leave some tasks swept, some
+   * not, and a returned list that described neither. Audited by shape in
+   * `test/queue-mutation-atomicity.test.ts`.
    */
   sweepExpiredLeases(): { requeued: string[]; outcomeUnknown: string[] } {
+    return this.#evidence.reserve(() => this.#sweepExpiredLeasesInternal());
+  }
+
+  #sweepExpiredLeasesInternal(): { requeued: string[]; outcomeUnknown: string[] } {
     const now = nowIso();
     const rows = this.#db
       .prepare(
@@ -1303,7 +1678,11 @@ export class OperatorQueue {
     expiresAt: string | null;
     consumedAt: string | null;
   } | null {
-    const task = this.get(taskId);
+    // `#getTask`, not the public `get` beside it: even a DISPLAY read should
+    // not be self-inconsistent, and this one is consumed by
+    // `validateApproval` (Wave 5 correction round sixteen, Medium B-6). The
+    // deciding caller reads `approvalRecordFor` instead.
+    const task = this.#getTask(taskId);
     if (!task) return null;
     const record = this.#getApprovalRecord(task.approvalId);
     if (!record) return null;
@@ -1371,7 +1750,22 @@ export class OperatorQueue {
    * needs_approval for a fresh Founder decision. The stale approval binding
    * is cleared either way; approvals themselves are immutable records.
    */
+  /**
+   * ALL OF IT, OR NONE OF IT (Wave 5 correction round sixteen, High B-4).
+   *
+   * The same update-then-append shape as `complete`, reached from `claim` and
+   * from `start`: an evidence append, an `approval_id` clear, a transition and
+   * a `block_reason`/claim-field write. A failure between any two of them left
+   * a task whose approval had been voided in the row but not in the log, or
+   * the reverse. Reserved here rather than in the two callers, because both of
+   * them THROW or return immediately afterwards and a reservation around the
+   * caller would roll this record back with the refusal it documents.
+   */
   #rejectAtExecutionBoundary(task: OperatorTask, rejection: ApprovalRejection): void {
+    this.#evidence.reserve(() => this.#rejectAtExecutionBoundaryInternal(task, rejection));
+  }
+
+  #rejectAtExecutionBoundaryInternal(task: OperatorTask, rejection: ApprovalRejection): void {
     this.#evidence.append({
       taskId: task.id,
       actor: 'system',

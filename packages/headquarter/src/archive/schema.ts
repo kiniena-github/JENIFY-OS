@@ -6,6 +6,8 @@
  * this system — records point at originals via sourceRef.
  */
 
+import { deepFreeze } from '../contracts/freeze.js';
+
 /** Cross-links to durable evidence. Identifiers only — never copies. */
 export interface RelatedRefs {
   issues?: number[];
@@ -15,24 +17,24 @@ export interface RelatedRefs {
   artifacts?: string[];
 }
 
-export const ARCHIVE_STATUSES = [
+export const ARCHIVE_STATUSES = deepFreeze([
   'CURRENT',
   'SUPERSEDED',
   'REJECTED',
   'EXPERIMENTAL',
   'ARCHIVED',
-] as const;
+] as const);
 
 export type ArchiveStatus = (typeof ARCHIVE_STATUSES)[number];
 
-export const DATE_CONFIDENCES = [
+export const DATE_CONFIDENCES = deepFreeze([
   /** Taken from an authoritative timestamp (Git commit, GitHub API, file metadata). */
   'exact',
   /** Derived from nearby evidence (surrounding commits, filename, referenced events). */
   'inferred',
   /** A best guess with no direct evidence; must be reviewed before being trusted. */
   'estimated',
-] as const;
+] as const);
 
 export type DateConfidence = (typeof DATE_CONFIDENCES)[number];
 

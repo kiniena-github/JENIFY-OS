@@ -7,29 +7,31 @@
  * This catalog may narrow routing; it never widens Operator authority.
  */
 
-export const HQ_CAPABILITY_KINDS = [
+import { deepFreeze } from '../contracts/freeze.js';
+
+export const HQ_CAPABILITY_KINDS = deepFreeze([
   'agent', 'skill', 'mcp', 'reference', 'library', 'platform', 'model', 'workflow',
-] as const;
+] as const);
 export type HqCapabilityKind = (typeof HQ_CAPABILITY_KINDS)[number];
 
-export const HQ_CAPABILITY_PRIORITIES = ['core', 'strong', 'later', 'reference_only'] as const;
+export const HQ_CAPABILITY_PRIORITIES = deepFreeze(['core', 'strong', 'later', 'reference_only'] as const);
 export type HqCapabilityPriority = (typeof HQ_CAPABILITY_PRIORITIES)[number];
 
-export const HQ_CAPABILITY_COSTS = [
+export const HQ_CAPABILITY_COSTS = deepFreeze([
   'free', 'free_tier', 'existing_subscription', 'paid_optional', 'usage_billed', 'compute_only', 'mixed',
-] as const;
+] as const);
 export type HqCapabilityCost = (typeof HQ_CAPABILITY_COSTS)[number];
 
-export const HQ_CAPABILITY_MODES = [
+export const HQ_CAPABILITY_MODES = deepFreeze([
   'native_agent', 'claude_plugin', 'agent_skill', 'mcp', 'web_reference',
   'npm_library', 'platform', 'local_model', 'workflow_rule',
-] as const;
+] as const);
 export type HqCapabilityMode = (typeof HQ_CAPABILITY_MODES)[number];
 
-export const HQ_CAPABILITY_DOMAINS = [
+export const HQ_CAPABILITY_DOMAINS = deepFreeze([
   'coding', 'design', 'ux', 'research', 'components', 'animation', 'image', 'video',
   'ios', 'product', 'retention', 'voice', 'local_ai', 'governance',
-] as const;
+] as const);
 export type HqCapabilityDomain = (typeof HQ_CAPABILITY_DOMAINS)[number];
 
 /**
@@ -89,7 +91,7 @@ export interface HqCapabilityDescriptor {
   provenance?: HqCapabilityProvenance;
 }
 
-export const HQ_CAPABILITY_STACK = [
+export const HQ_CAPABILITY_STACK = deepFreeze([
   {
     id: 'claude-code', title: 'Claude Code', kind: 'agent', priority: 'core',
     domains: ['coding', 'design', 'research', 'governance'],
@@ -188,19 +190,19 @@ export const HQ_CAPABILITY_STACK = [
   { id: 'wispr-analytics', title: 'Wispr Analytics', kind: 'platform', priority: 'later', domains: ['voice'], purpose: 'Voice-dictation workflow analytics if Jenify adopts voice-first operation.', cost: 'mixed', mode: 'platform', installRequired: true, accountRequired: true, community: true, reviewBeforeInstall: true },
   { id: 'animmaster-lib', title: 'Animmaster Lib', kind: 'reference', priority: 'later', domains: ['components', 'animation', 'design'], purpose: 'Optional advanced WebGL/3D/transition component reference.', cost: 'paid_optional', mode: 'web_reference', installRequired: false, accountRequired: false },
   { id: 'hyliox', title: 'Hyliox', kind: 'skill', priority: 'later', domains: ['design', 'coding'], purpose: 'Commercial premium website workflow to study; prefer Jenify-owned equivalent.', cost: 'paid_optional', mode: 'agent_skill', installRequired: true, accountRequired: true, source: 'https://hyliox.io/', reviewBeforeInstall: true },
-] as const satisfies readonly HqCapabilityDescriptor[];
+] as const satisfies readonly HqCapabilityDescriptor[]);
 
 export type HqCapabilityId = (typeof HQ_CAPABILITY_STACK)[number]['id'];
 
-export const HQ_CAPABILITY_ALIASES = {
+export const HQ_CAPABILITY_ALIASES = deepFreeze({
   'magic-mcp': '21st-mcp',
   'framer-motion': 'motion',
-} as const satisfies Readonly<Record<string, HqCapabilityId>>;
+} as const satisfies Readonly<Record<string, HqCapabilityId>>);
 
-export const HQ_CAPABILITY_INTENTS = [
+export const HQ_CAPABILITY_INTENTS = deepFreeze([
   'web.build', 'web.audit', 'research.deep', 'media.image', 'media.video',
   'mobile.ios', 'product.validate', 'skills.create', 'local_ai.evaluate',
-] as const;
+] as const);
 export type HqCapabilityIntent = (typeof HQ_CAPABILITY_INTENTS)[number];
 
 export interface HqCapabilityRecipeStage {
@@ -209,7 +211,7 @@ export interface HqCapabilityRecipeStage {
   optional?: boolean;
 }
 
-export const HQ_CAPABILITY_RECIPES: Readonly<Record<HqCapabilityIntent, readonly HqCapabilityRecipeStage[]>> = {
+export const HQ_CAPABILITY_RECIPES: Readonly<Record<HqCapabilityIntent, readonly HqCapabilityRecipeStage[]>> = deepFreeze({
   'web.build': [
     { name: 'reference', capabilityIds: ['mobbin', 'awwwards', 'cosmos', 'pinterest', 'namethatui'], optional: true },
     { name: 'design', capabilityIds: ['frontend-design', 'ui-ux-pro-max'] },
@@ -242,7 +244,7 @@ export const HQ_CAPABILITY_RECIPES: Readonly<Record<HqCapabilityIntent, readonly
   ],
   'skills.create': [{ name: 'author-and-evaluate', capabilityIds: ['anthropic-skill-creator'] }],
   'local_ai.evaluate': [{ name: 'candidates', capabilityIds: ['qwen-3-8', 'minimax-h3'], optional: true }],
-};
+});
 
 /**
  * Normalize a user-facing/display form ("Magic MCP", "Framer Motion",

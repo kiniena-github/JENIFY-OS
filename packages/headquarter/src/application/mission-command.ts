@@ -41,6 +41,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import { v4 as uuid } from 'uuid';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
@@ -71,7 +72,7 @@ import type { ActivityStatus } from '../contracts/events.js';
  * direction to a durable record — is a Founder-only act, and the policy
  * engine refuses standing pre-approvals for this class.
  */
-export const MISSION_COMMAND_CAPABILITY = {
+export const MISSION_COMMAND_CAPABILITY = deepFreeze({
   id: 'hq.mission_command',
   description:
     'Founder mission command — turns a Founder order into a canonical durable mission record. ' +
@@ -79,7 +80,7 @@ export const MISSION_COMMAND_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the mission-command capability — a CONFIGURATION action. */
 export function registerMissionCommandCapability(db: HqDatabase): void {
@@ -87,11 +88,11 @@ export function registerMissionCommandCapability(db: HqDatabase): void {
 }
 
 /** The definition fields that carry the Founder gate. */
-export const MISSION_COMMAND_RESERVED_CONTRACT = {
+export const MISSION_COMMAND_RESERVED_CONTRACT = deepFreeze({
   riskClass: MISSION_COMMAND_CAPABILITY.riskClass,
   sideEffect: MISSION_COMMAND_CAPABILITY.sideEffect,
   idempotent: MISSION_COMMAND_CAPABILITY.idempotent,
-} as const;
+} as const);
 
 /** Which contract fields the registry's CURRENT row disagrees with, if any. */
 export function missionCommandContractDrift(capability: Capability): string[] {
@@ -250,10 +251,33 @@ WHEN EXISTS (SELECT 1 FROM hq_mission_events WHERE id = NEW.id)
 BEGIN SELECT RAISE(ABORT, 'hq_mission_events is append-only'); END;
 
 -- Plan items are not append-only as a table (supersede and link legitimately
--- UPDATE their own columns), but two of their facts are write-once and the
--- engine now holds both: a row's identity can never be replaced out from
--- under its mission, and a linked task id can never be re-pointed. The link
--- path sets task_id only WHERE task_id IS NULL, so it never trips this.
+-- UPDATE their own columns), but three of their facts are write-once and the
+-- engine holds all three against every writer that has not first removed the
+-- guard: a row's identity is not replaced out from under its mission, a linked
+-- task id is not re-pointed, and -- since Wave 5 Medium 3 -- a row is not
+-- DELETED. The link path sets task_id only WHERE task_id IS NULL, so it never
+-- trips the relink guard.
+--
+-- "can never be" is what those three clauses said until round ten, Medium 1,
+-- and a trigger does not support an absolute: it is a row in sqlite_master
+-- that a writer holding the file can DROP, act under, and re-create, which is
+-- the count-preserving in-place rewrite class in Phase 13's residual list.
+-- What the engine holds is every route this repository has.
+--
+-- no_erase is not symmetry for its own sake. hq_mission_plan_items.task_id
+-- is the ONLY link from a task to its mission, and Phase 14 derives a task's
+-- budget scope through it (HeadquarterOperations #canonicalTaskScopes, read by
+-- #governingBudgetScopes). The
+-- pre-existing readers check that a row EXISTS, so a delete fails those
+-- closed; the budget derivation reads the absence as "this task belongs to no
+-- mission" and fails OPEN -- one DELETE unbound a task from an exhausted
+-- mission/project ceiling and turned a blocked proposal into within_ceiling
+-- with the full tier set. No code path in this repository deletes from this
+-- table (pinned by the source scan in application.mission-core.test.ts), so
+-- the guard costs nothing and closes that.
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_erase
+BEFORE DELETE ON hq_mission_plan_items
+BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items rows are never erased'); END;
 CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_replace
 BEFORE INSERT ON hq_mission_plan_items
 WHEN EXISTS (SELECT 1 FROM hq_mission_plan_items WHERE mission_id = NEW.mission_id AND seq = NEW.seq)
@@ -263,6 +287,68 @@ CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_relink
 BEFORE UPDATE OF task_id ON hq_mission_plan_items
 WHEN OLD.task_id IS NOT NULL
 BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items task link is write-once'); END;
+
+-- The OTHER end of the same link, and it was open (Wave 5 correction round
+-- four, High H2, route (b)). no_relink covers task_id only -- it is declared
+-- BEFORE UPDATE OF task_id -- so UPDATE hq_mission_plan_items SET
+-- mission_id = 'nowhere' WHERE task_id = ? was simply accepted, and it breaks
+-- the task-to-mission link just as completely as re-pointing the task would.
+-- A plan item's mission is set at INSERT and no code path anywhere in this
+-- repository changes it afterwards (the three UPDATE statements against this
+-- table name superseded_in_intent_seq, task_id/linked_by/linked_at, and the
+-- spec columns).
+CREATE TRIGGER IF NOT EXISTS trg_hq_mission_plan_items_no_remission
+BEFORE UPDATE OF mission_id ON hq_mission_plan_items
+BEGIN SELECT RAISE(ABORT, 'hq_mission_plan_items mission is write-once'); END;
+
+-- hq_missions is NOT append-only -- status, project_id and updated_at all move
+-- through the facade -- but a mission ROW is the thing a plan item joins to,
+-- and DELETE FROM hq_missions unbinds every task in it from every mission and
+-- project ceiling at once (Wave 5 correction round four, High H2, route (b)).
+-- Nothing in this repository deletes a mission: a terminal mission's record is
+-- history, and assignMissionToProject clears a link by setting the column.
+-- The no_replace guard closes the other half, an INSERT OR REPLACE that would
+-- swap a mission's row -- and with it its project -- out from under its items.
+CREATE TRIGGER IF NOT EXISTS trg_hq_missions_no_erase
+BEFORE DELETE ON hq_missions
+BEGIN SELECT RAISE(ABORT, 'hq_missions rows are never erased'); END;
+CREATE TRIGGER IF NOT EXISTS trg_hq_missions_no_replace
+BEFORE INSERT ON hq_missions
+WHEN EXISTS (SELECT 1 FROM hq_missions WHERE id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'hq_missions identity is write-once'); END;
+
+-- And the guard that makes the sentence above TRUE of an UPDATE, which it was
+-- not (Wave 5 correction round thirteen, High 3). no_replace is BEFORE INSERT,
+-- so it says nothing about a raw UPDATE hq_missions SET id -- and hq_missions
+-- declares a REDUCED base precisely because status, project_id and updated_at
+-- legitimately move, so no_rewrite does not stand here either. The consequence
+-- was executed: one UPDATE, no DDL, no row-count change and a clean
+-- structuralIntegrity, and the task's mission ceiling stopped binding --
+-- governedBy lost the mission, permittedTiers widened from one to all five,
+-- budgetDecision went blocked -> within_ceiling, and a refused critical_review
+-- write was accepted. Nothing in this repository ever updates a mission's id.
+CREATE TRIGGER IF NOT EXISTS trg_hq_missions_no_reidentify
+BEFORE UPDATE OF id ON hq_missions
+BEGIN SELECT RAISE(ABORT, 'hq_missions identity is write-once'); END;
+
+-- And the guard that makes the same sentence true of an INSERT that collides
+-- on the table's OTHER unique index (Wave 5 correction round fourteen, High 2).
+-- hq_missions declares UNIQUE(idempotency_key); no_replace tests NEW.id only,
+-- and REPLACE resolves a conflict on ANY unique index by DELETING the standing
+-- row without firing BEFORE DELETE while recursive_triggers is off -- the
+-- engine default, connection-scoped, and therefore true of every ordinary
+-- writer whatever HQ's own handle is set to. So no_erase did not fire either,
+-- and no_rowid_skip did not fire because the forgery kept the victim's rowid.
+-- Executed at 8481269 through the real facade: one INSERT OR REPLACE from an
+-- ordinary connection rewrote a mission's id to HIJACKED-MISSION with every
+-- declared guard still present and safeMode false at both depths in two later
+-- processes. Nothing in this repository REPLACEs a mission: commandMission
+-- inserts, and the idempotency key is looked up first.
+CREATE TRIGGER IF NOT EXISTS trg_hq_missions_no_replace_unique
+BEFORE INSERT ON hq_missions
+WHEN NEW.idempotency_key IS NOT NULL
+  AND EXISTS (SELECT 1 FROM hq_missions WHERE idempotency_key = NEW.idempotency_key)
+BEGIN SELECT RAISE(ABORT, 'hq_missions identity is write-once (unique idempotency_key already held)'); END;
 `;
 
 /**

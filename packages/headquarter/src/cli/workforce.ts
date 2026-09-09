@@ -96,7 +96,7 @@ import { MemberCapabilityRegistry } from '../registry/capabilities.js';
 import { ProviderDirectory } from '../providers/directory.js';
 import { declaredOnlyAdapter } from '../providers/declared.js';
 import { KNOWN_PROVIDERS } from '../providers/known.js';
-import type { Capability } from '../operator/capabilities.js';
+import { readStoredRiskClass, type Capability } from '../operator/capabilities.js';
 import {
   LOCAL_ADMIN_ACK_FLAG,
   LOCAL_ADMIN_INTERFACE_NOTICE,
@@ -233,7 +233,8 @@ export function executeWorkforceCommand(
       return {
         id: raw.id as string,
         description: raw.description as string,
-        riskClass: raw.risk_class as Capability['riskClass'],
+        // Through the vocabulary, never asserted — see `readStoredRiskClass`.
+        riskClass: readStoredRiskClass(raw.risk_class),
         sideEffect: !!raw.side_effect,
         idempotent: !!raw.idempotent,
         enabled: !!raw.enabled,

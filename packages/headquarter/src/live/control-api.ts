@@ -90,7 +90,7 @@
 import { founderConsole, type ApprovalCard } from '../application/console.js';
 import { hydrateRooms } from '../client/hydrate.js';
 import { liveSnapshotFromOperations } from './snapshot.js';
-import { capabilityRowFor } from '../application/service.js';
+import { capabilityRowFor, taskRowFor } from '../application/service.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import { taskActionDigest } from '../operator/approvals.js';
 import type { ProviderId, SecretsEnv } from '../routing/providers.js';
@@ -193,9 +193,57 @@ import {
   type ProductLifecycleState,
   type ProductRecord,
 } from '../application/product-command.js';
+import {
+  RELIABILITY_COMMAND_CAPABILITY,
+  RUN_FAILURE_CATEGORIES,
+  RUN_INTERRUPTION_REASONS,
+  RUN_KINDS,
+  RUN_OUTCOMES,
+  RUN_RECONCILE_DECISIONS,
+  RUN_STATES,
+  isRunInterruptionReason,
+  isRunReconcileDecision,
+  reliabilityCommandCapabilityState,
+  type RunInterruptionReason,
+  type RunRecord,
+} from '../application/reliability-command.js';
+import {
+  BUDGET_DECISIONS,
+  BUDGET_SCOPES,
+  BUDGET_WINDOWS,
+  CONTEXT_SIZES,
+  COST_PROVENANCES,
+  COST_UNIT_KINDS,
+  DECISION_RESULTS,
+  DECISION_STATES,
+  ESCALATION_TRIGGERS,
+  INTELLIGENCE_COMMAND_CAPABILITY,
+  INTELLIGENCE_TIERS,
+  LATENCY_REQUIREMENTS,
+  MODEL_AVAILABILITY_STATES,
+  MODEL_CAPABILITY_FACTS,
+  MODEL_LOCALITIES,
+  OBSERVATION_SOURCES,
+  PRIVACY_REQUIREMENTS,
+  TASK_COMPLEXITIES,
+  WORK_KINDS,
+  intelligenceCommandCapabilityState,
+  type BudgetScope,
+  type BudgetWindow,
+  type CostProvenance,
+  type CostUnitKind,
+  type DecisionRecord,
+  type IntelligenceTier,
+  type ModelAvailability,
+  type ModelCapabilityFact,
+  type ModelLocality,
+  type ObservationSource,
+} from '../application/intelligence-command.js';
+import { HQ_INTEGRITY_FINDINGS } from '../store/integrity.js';
 import { MEMORY_KINDS, isMemoryKind, isMemoryPrivacy } from '../memory/schema.js';
 import { isArchiveStatus } from '../archive/schema.js';
 import { PROVIDERS, providerConnectivity } from '../routing/providers.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 export const CONTROL_API_PREFIX = '/api/hq/control';
 
@@ -213,7 +261,7 @@ export const MAX_DENIAL_REASON_LENGTH = 500;
  */
 export const MAX_APPROVAL_NOTE_LENGTH = 500;
 
-export const CONTROL_ROUTES = {
+export const CONTROL_ROUTES = deepFreeze({
   session: `${CONTROL_API_PREFIX}/session`,
   approvals: `${CONTROL_API_PREFIX}/approvals`,
   /**
@@ -387,14 +435,77 @@ export const CONTROL_ROUTES = {
   productDetail: `${CONTROL_API_PREFIX}/products/detail`,
   productLifecycle: `${CONTROL_API_PREFIX}/products/lifecycle`,
   productArtifacts: `${CONTROL_API_PREFIX}/products/artifacts`,
-} as const;
+  /**
+   * Phase 13: advanced reliability. The GET is the Founder's whole picture of
+   * whether HQ can currently be believed — the latched integrity verdict and
+   * its categorical findings, the durability posture, this process's identity,
+   * what the run ledger is holding, the verified recovery points, and a COUNT
+   * of interrupted canonical work owned by other ledgers with the canonical
+   * path that resolves each. It re-assesses nothing and latches nothing: a GET
+   * must never be the thing that changes a safety posture.
+   *
+   * Two POSTs, and deliberately no more. `recover` classifies this ledger's
+   * runs whose carrying process is gone; `reconcile` closes one whose outcome
+   * HQ does not know, after a human checked the real world.
+   *
+   * What has NO route, and why:
+   *  - opening a run, starting an attempt and recording an outcome are WORKER
+   *    acts performed under a live fenced claim, exactly like authorize and
+   *    execute in Phase 8. A browser holds no claim, so it gets no route;
+   *  - a full integrity assessment and a verified-backup record are Founder
+   *    acts that read the local filesystem and re-latch a safety posture. They
+   *    belong to a process with the machine in front of it, not to a page;
+   *  - there is no route, and no facade method, that CLEARS safe mode by
+   *    assertion. Only an assessment that finds nothing blocking clears it.
+   *
+   * `reconcile` takes no step-up and `recover` takes none either, and that is
+   * a decision rather than an omission: neither can execute anything, both are
+   * appends to an append-only ledger, and a reconciliation is the act that
+   * RESOLVES an irreversible effect somebody already checked rather than one
+   * that causes it.
+   */
+  reliability: `${CONTROL_API_PREFIX}/reliability`,
+  reliabilityRecover: `${CONTROL_API_PREFIX}/reliability/recover`,
+  reliabilityReconcile: `${CONTROL_API_PREFIX}/reliability/reconcile`,
+  /**
+   * Phase 14: cost + intelligence optimization. The GET is the Founder's whole
+   * picture of what HQ knows about the intelligence it uses — the observation
+   * registry, the recorded budget policies, the routing decisions and their
+   * results, the cost ledger with every amount's provenance beside it, the
+   * truthful analytics, and the closed vocabularies a console would need to
+   * draw a form without inventing one. It writes nothing and activates
+   * nothing.
+   *
+   * Two POSTs, and deliberately no more. `observe` records what HQ has
+   * OBSERVED about a provider/model, including a unit cost with its
+   * provenance; `budget` records a ceiling and the tiers permitted under it.
+   *
+   * What has NO route, and why:
+   *  - recording a routing decision, escalating one, recording its outcome and
+   *    recording a cost entry are WORKER acts performed under a live fenced
+   *    claim, exactly like Phase 13's run writes and Phase 8's authorize and
+   *    execute. A browser holds no claim, so it gets no route;
+   *  - there is no route, and no facade method, that ACTIVATES a provider,
+   *    enables a paid service, buys credits or authorizes spend. A ceiling
+   *    blocks or asks; it never grants, and there is nothing here for a grant
+   *    to be expressed through.
+   *
+   * Neither POST takes step-up, and that is a decision rather than an
+   * omission: both append a row to an append-only ledger that reaches nothing
+   * outside HQ, neither can execute anything, and a ceiling that has to be
+   * lowered urgently should not need a fresh credential to lower.
+   */
+  intelligence: `${CONTROL_API_PREFIX}/intelligence`,
+  intelligenceObserve: `${CONTROL_API_PREFIX}/intelligence/observe`,
+  intelligenceBudget: `${CONTROL_API_PREFIX}/intelligence/budget`,
+} as const);
 
 /**
  * Every state-changing route, stated once so test obligations can enumerate
  * the write surface instead of inferring it from path shapes — a heuristic
  * that silently probed new POSTs as GETs when it guessed wrong.
  */
-export const CONTROL_WRITE_ROUTES: readonly string[] = [
+export const CONTROL_WRITE_ROUTES: readonly string[] = deepFreeze([
   CONTROL_ROUTES.orders,
   CONTROL_ROUTES.approve,
   CONTROL_ROUTES.deny,
@@ -424,7 +535,20 @@ export const CONTROL_WRITE_ROUTES: readonly string[] = [
   CONTROL_ROUTES.products,
   CONTROL_ROUTES.productLifecycle,
   CONTROL_ROUTES.productArtifacts,
-];
+  // Phase 13: recovery classification and run reconciliation. Both append to
+  // an append-only ledger and reach nothing outside HQ; the reliability READ
+  // is a GET and stays off the write surface.
+  CONTROL_ROUTES.reliabilityRecover,
+  CONTROL_ROUTES.reliabilityReconcile,
+  // Phase 14: recording a model/provider observation and setting a budget
+  // policy. Both append to an append-only ledger and reach nothing outside HQ;
+  // neither activates a provider or authorizes spend. The intelligence READ is
+  // a GET and stays off the write surface, and there is no third write,
+  // because routing decisions, escalations, outcomes and cost entries are
+  // worker acts under a live fenced claim and a browser holds no claim.
+  CONTROL_ROUTES.intelligenceObserve,
+  CONTROL_ROUTES.intelligenceBudget,
+]);
 
 export interface ControlResponse {
   status: number;
@@ -679,7 +803,12 @@ export function handleControlRequest(
  * its provider; without one, the routing contract answers, as it did before.
  */
 function isDispatchBlocked(deps: ControlApiDeps, taskId: string): boolean {
-  const task = deps.ops.queue.get(taskId);
+  // The canonical row, never `queue.get` (Wave 5 correction round fifteen,
+  // Critical 1). This verdict is rendered as a Founder-facing BLOCKED badge on
+  // the order card; the class rule is that no route in this file looks a task
+  // up through the patchable convenience read, so a display that becomes a
+  // decision cannot inherit a forged row.
+  const task = taskRowFor(deps.ops, taskId);
   if (!task) return false;
   return directOrderDispatchBlocked(task, deps.secretsEnv, {
     alreadyDispatched: dispatchHistory(deps.ops, taskId).state === 'dispatched',
@@ -715,7 +844,9 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.search ||
         path === CONTROL_ROUTES.ask ||
         path === CONTROL_ROUTES.products ||
-        path === CONTROL_ROUTES.productDetail)) ||
+        path === CONTROL_ROUTES.productDetail ||
+        path === CONTROL_ROUTES.reliability ||
+        path === CONTROL_ROUTES.intelligence)) ||
     (method === 'POST' &&
       (path === CONTROL_ROUTES.orders ||
         path === CONTROL_ROUTES.approve ||
@@ -742,7 +873,11 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
         path === CONTROL_ROUTES.commandCenterBrief ||
         path === CONTROL_ROUTES.products ||
         path === CONTROL_ROUTES.productLifecycle ||
-        path === CONTROL_ROUTES.productArtifacts));
+        path === CONTROL_ROUTES.productArtifacts ||
+        path === CONTROL_ROUTES.reliabilityRecover ||
+        path === CONTROL_ROUTES.reliabilityReconcile ||
+        path === CONTROL_ROUTES.intelligenceObserve ||
+        path === CONTROL_ROUTES.intelligenceBudget));
   if (!known) {
     // Deny by default, and say nothing about what does exist.
     return refusal(404, 'not_found', 'No such HQ control route.');
@@ -1084,6 +1219,14 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
     return productDetailRoute(request, deps, founder, audit, now);
   }
 
+  if (method === 'GET' && path === CONTROL_ROUTES.reliability) {
+    return reliabilityRoute(deps, founder, audit, now);
+  }
+
+  if (method === 'GET' && path === CONTROL_ROUTES.intelligence) {
+    return intelligenceRoute(deps, founder, audit, now);
+  }
+
   if (path === CONTROL_ROUTES.orders) return createOrder(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.approve) return approve(request, deps, founder, audit, now);
   if (path === CONTROL_ROUTES.missions) return commandMission(request, deps, founder, audit);
@@ -1121,6 +1264,18 @@ function route(request: ControlRequest, deps: ControlApiDeps): ControlResponse {
   if (path === CONTROL_ROUTES.products) return createProductRoute(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.productLifecycle) return moveProductLifecycleRoute(request, deps, founder, audit);
   if (path === CONTROL_ROUTES.productArtifacts) return registerArtifactRoute(request, deps, founder, audit);
+  if (path === CONTROL_ROUTES.reliabilityRecover) {
+    return recoverRunsRoute(request, deps, founder, audit, now);
+  }
+  if (path === CONTROL_ROUTES.reliabilityReconcile) {
+    return reconcileRunRoute(request, deps, founder, audit, now);
+  }
+  if (path === CONTROL_ROUTES.intelligenceObserve) {
+    return recordModelObservationRoute(request, deps, founder, audit);
+  }
+  if (path === CONTROL_ROUTES.intelligenceBudget) {
+    return setIntelligenceBudgetRoute(request, deps, founder, audit);
+  }
   return deny(request, deps, founder, audit);
 }
 
@@ -1258,6 +1413,42 @@ function controlAvailability(
       writable &&
       principal?.originateCapabilities.includes(PRODUCT_COMMAND_CAPABILITY.id) === true &&
       productCommandCapabilityState(capabilityRowFor(deps.ops, PRODUCT_COMMAND_CAPABILITY.id)) === 'enabled',
+    // Phase 13: recovering interrupted runs and reconciling one are the
+    // Founder gate itself (approval authority), so they ride `mayApprove`
+    // exactly as `actionReconcile` does — neither takes a capability grant,
+    // because neither is an origination of work.
+    //
+    // Both are advertised, because the comment above describes both and Phase 8
+    // already emits `actionReconcile` for the identical act. `reliabilityRecover`
+    // takes no step-up; `reliabilityReconcile` takes step-up unconditionally,
+    // exactly like `actionReconcile` — a flag here says a principal MAY reach
+    // the route, never that the route asks nothing further of them.
+    reliabilityRecover: mayApprove,
+    reliabilityReconcile: mayApprove,
+    // The reliability COMMAND capability (`hq.reliability_command`) gates the
+    // two acts that have no route at all — the full integrity assessment and
+    // the verified-backup record — so it is advertised as a fact about this
+    // principal, never as a button. Stated rather than omitted: a console that
+    // could not see the capability was missing would have no way to explain
+    // why an assessment it was told to run does not exist as a control.
+    reliabilityCommand:
+      writable &&
+      principal?.originateCapabilities.includes(RELIABILITY_COMMAND_CAPABILITY.id) === true &&
+      reliabilityCommandCapabilityState(capabilityRowFor(deps.ops, RELIABILITY_COMMAND_CAPABILITY.id)) ===
+        'enabled',
+    // Phase 14: the intelligence COMMAND capability (`hq.intelligence_command`)
+    // gates recording a model observation and setting a budget policy. It is
+    // advertised from exactly the conditions that decide those two writes —
+    // the originate grant AND the intact registry row, read enforcement-safe.
+    // There is deliberately no spend flag and no activation flag, because
+    // there is no such act here to grant: a ceiling blocks or asks, and no
+    // route or facade method can enable a paid provider.
+    intelligenceCommand:
+      writable &&
+      principal?.originateCapabilities.includes(INTELLIGENCE_COMMAND_CAPABILITY.id) === true &&
+      intelligenceCommandCapabilityState(
+        capabilityRowFor(deps.ops, INTELLIGENCE_COMMAND_CAPABILITY.id),
+      ) === 'enabled',
     mutationsEnabled: deps.mutationsEnabled !== false,
     trustedOriginConfigured: originsUsable,
     // Stated separately from `trustedOriginConfigured`, because they answer
@@ -1449,6 +1640,10 @@ function controlErrorStatus(code: string): number {
     case 'unknown_session':
     case 'unknown_contribution':
     case 'unknown_product':
+    // Phase 13: the run ledger does not hold that id.
+    case 'unknown_run':
+    // Phase 14: the routing-decision ledger does not hold that id.
+    case 'unknown_intelligence_decision':
       return 404;
     case 'invalid_mission_transition':
     case 'mission_status_changed':
@@ -1484,6 +1679,27 @@ function controlErrorStatus(code: string): number {
     // lifecycle admits.
     case 'product_lifecycle_conflict':
     case 'invalid_product_lifecycle_move':
+    // Phase 13: the run moved, or the request conflicts with what the ledger
+    // records about it.
+    case 'run_state_conflict':
+    case 'run_key_conflict':
+    case 'run_attempt_refused':
+    case 'stale_run_claim':
+    // Phase 14: the recorded policy conflicts with what was asked for. A
+    // ceiling that blocks, a tier the policy does not permit, a tier below the
+    // computed floor, a required reviewer tier a cheaper one cannot satisfy,
+    // and an escalation the tier order or the permitted set does not admit.
+    // None of these is a bad request: the request is well formed and the
+    // POLICY says no.
+    case 'budget_ceiling_blocks':
+    case 'tier_not_permitted':
+    case 'tier_below_policy_floor':
+    case 'review_tier_required':
+    case 'intelligence_routing_refused':
+    case 'escalation_refused':
+    // A second cost entry whose identity matches a recorded one and whose
+    // figure does not. The request is well formed; the RECORD says otherwise.
+    case 'cost_entry_conflict':
       return 409;
     case 'unknown_capability':
     case 'capability_disabled':
@@ -1497,6 +1713,10 @@ function controlErrorStatus(code: string): number {
     // The switch stops execution reachability; a 403 says "nothing in this
     // request will help until it is released" (the order-path mapping).
     case 'kill_switch_engaged':
+    // Phase 13: HQ has said, about ITSELF, that its stored record cannot
+    // currently be trusted. Like the kill switch, nothing in the request will
+    // help until that is resolved, so it is a 403 rather than a 400.
+    case 'safe_mode_engaged':
       return 403;
     default:
       return 400;
@@ -3446,7 +3666,17 @@ function approve(
   // Step-up is decided from the CANONICAL capability of the task named in the
   // request, never from a risk class the client sends. An unknown task is
   // refused here rather than being allowed to skip the check and fail later.
-  const task = deps.ops.queue.get(taskId);
+  //
+  // The TASK row comes from `taskRowFor`, not `queue.get` (Wave 5 correction
+  // round fifteen, Critical 1). Hardening the capability read below while
+  // leaving this line on the patchable public read hardened nothing: a
+  // capability is looked up BY a task, so `ops.queue.get = (id) => ({
+  // ...real(id), capabilityId: 'bench.read_only' })` made the enforcement-safe
+  // capability read return an honest row for the WRONG capability,
+  // `STEP_UP_RISK_CLASSES` stopped matching, `verifyStepUp` never ran, and a
+  // stale Founder session approved a `founder_gate` order with a verifier
+  // rejecting every password — measured, 401 -> 200, task CLAIMED.
+  const task = taskRowFor(deps.ops, taskId);
   if (!task) {
     audit('refused', 'unknown_task', founder);
     return refusal(404, 'unknown_task', `Unknown task: ${taskId}`);
@@ -3560,4 +3790,485 @@ function deny(
   }
   audit('allowed', 'denied', founder);
   return safe(json(200, { ok: true, taskId, status: result.data.status }));
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 13 — advanced reliability                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Everything the browser is told about one run.
+ *
+ * The derived record is already free of the durable reservation identities —
+ * `run_key` and `attempt_key` never leave the store, because a reservation is
+ * not a thing a reader needs and not a thing a caller should be able to echo
+ * back. What this projection additionally does is BOUND the history, so one
+ * long-lived run cannot make the response unbounded, and state the true total
+ * beside the page (the standing bounded-read rule).
+ *
+ * **`externalActionTaken: false` is a statement about the RELIABILITY LEDGER,
+ * not about the run's work** (Wave 5 review, Low finding C-4). It means: no
+ * path in this phase performs an external action, so reading or recording this
+ * row reached nothing outside HQ. It does NOT mean the work the run audits had
+ * no side effect — a `succeeded` run of a side-effecting capability is exactly
+ * a record that something outside HQ DID happen, and the Phase 8
+ * `hq_action_intents` / `hq_action_events` ledger is the only answer to what.
+ * The field is stamped per run rather than on the envelope because a run is
+ * what a reader picks up and copies; the docstring was silent about it, which
+ * is how a false reading of the name became available.
+ */
+const RUN_EVENT_WIRE_LIMIT = 50;
+
+function runView(run: RunRecord): Record<string, unknown> {
+  const events = run.events.slice(-RUN_EVENT_WIRE_LIMIT);
+  return {
+    id: run.id,
+    runKind: run.runKind,
+    taskId: run.taskId,
+    missionId: run.missionId,
+    actionId: run.actionId,
+    capabilityId: run.capabilityId,
+    workerId: run.workerId,
+    claimFence: run.claimFence,
+    processId: run.processId,
+    label: run.label,
+    openedAt: run.openedAt,
+    state: run.state,
+    outcome: run.outcome,
+    failureCategory: run.failureCategory,
+    attempts: run.attempts,
+    nextGeneration: run.nextGeneration,
+    lastCorrelationId: run.lastCorrelationId,
+    interruption: run.interruption,
+    reconciliation: run.reconciliation,
+    // The late worker statement, carried as what it is. It closes nothing —
+    // `state` and `outcome` beside it still say `needs_reconciliation` /
+    // `outcome_unknown` — so a Founder reading this page sees the testimony
+    // and the standing doubt at the same time.
+    workerReport: run.workerReport,
+    admitsAttempt: run.admitsAttempt,
+    needsReconciliation: run.needsReconciliation,
+    events,
+    eventTotal: run.events.length,
+    eventsTruncated: run.events.length > events.length,
+    externalActionTaken: false,
+  };
+}
+
+/**
+ * The reliability picture. A pure READ: it re-assesses nothing, latches
+ * nothing and writes nothing, so refreshing the page can never change what HQ
+ * refuses.
+ *
+ * It carries `safeMode` and the finding DETAIL, which the unauthenticated
+ * snapshot deliberately does not — this route is behind the resolved Founder,
+ * and a Founder who cannot see WHY HQ stopped trusting itself cannot fix it.
+ */
+function reliabilityRoute(
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const posture = deps.ops.hqReliabilityPosture();
+  const runs = deps.ops.listRunsBounded();
+  const backups = deps.ops.listVerifiedBackupsBounded();
+  audit('allowed', 'reliability_posture', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      posture,
+      runs: runs.runs.map(runView),
+      runTotal: runs.total,
+      runsTruncated: runs.truncated,
+      backups: backups.backups,
+      backupTotal: backups.total,
+      backupsTruncated: backups.truncated,
+      vocabulary: {
+        runKinds: [...RUN_KINDS],
+        runStates: [...RUN_STATES],
+        runOutcomes: [...RUN_OUTCOMES],
+        failureCategories: [...RUN_FAILURE_CATEGORIES],
+        interruptionReasons: [...RUN_INTERRUPTION_REASONS],
+        reconcileDecisions: [...RUN_RECONCILE_DECISIONS],
+        integrityFindings: [...HQ_INTEGRITY_FINDINGS],
+      },
+    }),
+  );
+}
+
+/**
+ * Classify the runs whose carrying process is gone.
+ *
+ * It never retries anything and it cannot: an interrupted attempt that could
+ * have reached the outside world becomes `outcome_unknown`, and the only path
+ * out of that is an explicit reconciliation by an independent principal.
+ */
+function recoverRunsRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const reason = stringField(request.body, 'reason');
+  if (reason !== undefined && !isRunInterruptionReason(reason)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      `reason must be one of: ${RUN_INTERRUPTION_REASONS.join(', ')}.`,
+    );
+  }
+  const result = deps.ops.recoverInterruptedRuns({
+    requestedBy: founder.principal.id,
+    reason: reason as RunInterruptionReason | undefined,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', `runs_recovered_${result.data.interruptedTotal}`, founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      report: result.data,
+      retriedAnything: false,
+      externalActionTaken: false,
+    }),
+  );
+}
+
+/**
+ * Close a run whose outcome HQ does not know, after a human checked the real
+ * world. Independence and the idempotency rule are enforced by the facade, not
+ * here — this route resolves the Founder, takes step-up, and forwards.
+ */
+function reconcileRunRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const runId = stringField(request.body, 'runId') ?? '';
+  const decision = stringField(request.body, 'decision') ?? '';
+  const note = stringField(request.body, 'note') ?? '';
+  if (!runId || !decision) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'runId and decision are required.');
+  }
+  if (!isRunReconcileDecision(decision)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(
+      400,
+      'invalid_input',
+      `decision must be one of: ${RUN_RECONCILE_DECISIONS.join(', ')}.`,
+    );
+  }
+  try {
+    assertBrowserSafe({ note }, 'reliability');
+  } catch {
+    audit('refused', 'unsafe_reliability_content', founder);
+    return refusal(
+      400,
+      'unsafe_reliability_content',
+      'The note looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+  // STEP-UP, unconditionally — the same block `reconcileActionRoute` takes,
+  // for the same reason and with the same status mapping. The two share their
+  // decision vocabulary BY IDENTITY (`RUN_RECONCILE_DECISIONS =
+  // ACTION_RECONCILE_DECISIONS`) because they are the same judgement:
+  // declaring whether an irreversible external side effect happened. And
+  // `confirmed_not_executed` here re-opens the run for another attempt
+  // generation, which is a grant to act again. This route was the only
+  // reconciliation route in HQ without step-up (Wave 5 High 4).
+  const stepUp = verifyStepUp(founder, stringField(request.body, 'stepUpPassword'), {
+    credentials: deps.credentials,
+    now: now(),
+  });
+  if (!stepUp.ok) {
+    audit('refused', stepUp.reason, founder);
+    const status = stepUp.reason === 'step_up_rate_limited' ? 429 : stepUp.reason === 'step_up_failed' ? 403 : 401;
+    return refusal(status, stepUp.reason, stepUp.message);
+  }
+  const result = deps.ops.reconcileRun({
+    runId,
+    decision,
+    note,
+    requestedBy: founder.principal.id,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', `run_reconciled_${decision}`, founder);
+  return safe(
+    json(200, {
+      ok: true,
+      run: runView(result.data.run),
+      externalActionTaken: false,
+    }),
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Phase 14 — cost + intelligence optimization                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Everything the browser is told about one routing decision.
+ *
+ * The derived record is already free of the durable dedupe identity
+ * (`decision_key` never leaves the store). What this projection adds is
+ * `externalActionTaken: false` and `grantsAuthority: false` on every entry, so
+ * a console cannot render a decision as a thing that happened outside HQ or as
+ * a thing that permits one.
+ */
+function decisionView(decision: DecisionRecord): Record<string, unknown> {
+  return {
+    id: decision.id,
+    taskId: decision.taskId,
+    missionId: decision.missionId,
+    projectId: decision.projectId,
+    tier: decision.tier,
+    floorTier: decision.floorTier,
+    requiredReviewTier: decision.requiredReviewTier,
+    satisfiesReviewRequirement: decision.satisfiesReviewRequirement,
+    escalatedFrom: decision.escalatedFrom,
+    escalatedAwayTo: decision.escalatedAwayTo,
+    escalationTrigger: decision.escalationTrigger,
+    // The binding HQ OBSERVED on the canonical task. A decision never proposes
+    // a provider and never changes one.
+    boundProvider: decision.boundProvider,
+    characteristics: decision.characteristics,
+    permittedTiers: decision.permittedTiers,
+    budgetDecision: decision.budgetDecision,
+    label: decision.label,
+    issuedAt: decision.issuedAt,
+    issuedBy: decision.issuedBy,
+    state: decision.state,
+    result: decision.result,
+    reviewedByTier: decision.reviewedByTier,
+    grantsAuthority: false,
+    externalActionTaken: false,
+  };
+}
+
+/**
+ * The intelligence picture. A pure READ: it records nothing, activates
+ * nothing, contacts nothing and spends nothing, so refreshing the page can
+ * never change what HQ permits.
+ *
+ * It carries amounts and ceilings, which the unauthenticated snapshot
+ * deliberately does not — this route sits behind the resolved Founder, and a
+ * Founder who cannot see what was spent cannot govern it.
+ */
+function intelligenceRoute(
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+  now: () => Date,
+): ControlResponse {
+  const posture = deps.ops.hqIntelligencePosture();
+  const observations = deps.ops.listModelObservationsBounded();
+  const decisions = deps.ops.listIntelligenceDecisionsBounded();
+  const costs = deps.ops.listIntelligenceCostEntriesBounded();
+  const budgets = deps.ops.listIntelligenceBudgetsBounded();
+  audit('allowed', 'intelligence_posture', founder);
+  return safe(
+    json(200, {
+      ok: true,
+      generatedAt: now().toISOString(),
+      posture,
+      observations: observations.observations,
+      observationTotal: observations.total,
+      observationsTruncated: observations.truncated,
+      decisions: decisions.decisions.map(decisionView),
+      decisionTotal: decisions.total,
+      decisionsTruncated: decisions.truncated,
+      costEntries: costs.entries,
+      costEntryTotal: costs.total,
+      costEntriesTruncated: costs.truncated,
+      budgets: budgets.budgets,
+      budgetTotal: budgets.total,
+      budgetsTruncated: budgets.truncated,
+      analytics: deps.ops.intelligenceAnalytics(),
+      vocabulary: {
+        tiers: [...INTELLIGENCE_TIERS],
+        complexities: [...TASK_COMPLEXITIES],
+        contextSizes: [...CONTEXT_SIZES],
+        workKinds: [...WORK_KINDS],
+        latencyRequirements: [...LATENCY_REQUIREMENTS],
+        privacyRequirements: [...PRIVACY_REQUIREMENTS],
+        costProvenances: [...COST_PROVENANCES],
+        costUnitKinds: [...COST_UNIT_KINDS],
+        observationSources: [...OBSERVATION_SOURCES],
+        modelLocalities: [...MODEL_LOCALITIES],
+        modelAvailability: [...MODEL_AVAILABILITY_STATES],
+        modelCapabilityFacts: [...MODEL_CAPABILITY_FACTS],
+        budgetScopes: [...BUDGET_SCOPES],
+        budgetWindows: [...BUDGET_WINDOWS],
+        budgetDecisions: [...BUDGET_DECISIONS],
+        decisionStates: [...DECISION_STATES],
+        decisionResults: [...DECISION_RESULTS],
+        escalationTriggers: [...ESCALATION_TRIGGERS],
+      },
+      // Stated on the wire, not merely in a doc: there is no route and no
+      // facade method behind either of these.
+      canActivatePaidProvider: false,
+      canAuthorizeSpend: false,
+    }),
+  );
+}
+
+/**
+ * Record one OBSERVATION about a provider/model.
+ *
+ * Registering an observation activates nothing and connects nothing. The
+ * amount/provenance lock lives at the facade (`normalizeCostFact`), so this
+ * route forwards rather than re-implementing it — a second copy of "HQ never
+ * invents a price" is exactly the drift the rule exists to prevent.
+ */
+function recordModelObservationRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const providerId = stringField(request.body, 'providerId') ?? '';
+  const modelId = stringField(request.body, 'modelId') ?? '';
+  const locality = stringField(request.body, 'locality') ?? '';
+  const availability = stringField(request.body, 'availability') ?? '';
+  const source = stringField(request.body, 'source') ?? '';
+  const provenance = stringField(request.body, 'unitCostProvenance') ?? '';
+  const unitKind = stringField(request.body, 'unitCostUnitKind') ?? '';
+  const currency = stringField(request.body, 'unitCostCurrency') ?? '';
+  const basis = stringField(request.body, 'unitCostBasis') ?? '';
+  const note = stringField(request.body, 'note') ?? '';
+  const facts = stringArrayField(request.body, 'capabilityFacts');
+  if (facts === 'invalid') {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'capabilityFacts must be a list of strings.');
+  }
+  const rawAmount = (request.body as Record<string, unknown> | undefined)?.['unitCostMinorUnits'];
+  if (rawAmount !== undefined && rawAmount !== null && !Number.isInteger(rawAmount)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'unitCostMinorUnits must be a whole number of minor units, or omitted.');
+  }
+  const rawContext = (request.body as Record<string, unknown> | undefined)?.['contextWindowTokens'];
+  if (rawContext !== undefined && rawContext !== null && !Number.isInteger(rawContext)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'contextWindowTokens must be a whole number, or omitted.');
+  }
+  try {
+    assertBrowserSafe({ providerId, modelId, basis, note }, 'intelligence');
+  } catch {
+    audit('refused', 'unsafe_intelligence_content', founder);
+    return refusal(
+      400,
+      'unsafe_intelligence_content',
+      'The provider id, model id, basis or note looks like it contains credential material, so it was ' +
+        'refused rather than stored.',
+    );
+  }
+  const result = deps.ops.recordModelObservation({
+    providerId,
+    modelId: modelId || null,
+    locality: locality as ModelLocality,
+    availability: availability as ModelAvailability,
+    capabilityFacts: (facts ?? []) as ModelCapabilityFact[],
+    contextWindowTokens: rawContext === undefined ? null : (rawContext as number | null),
+    unitCostProvenance: provenance as CostProvenance,
+    unitCostMinorUnits: rawAmount === undefined ? null : (rawAmount as number | null),
+    unitCostCurrency: currency || null,
+    unitCostUnitKind: unitKind as CostUnitKind,
+    unitCostBasis: basis || undefined,
+    source: source as ObservationSource,
+    observedBy: founder.principal.id,
+    note: note || undefined,
+    idempotencyKey: stringField(request.body, 'idempotencyKey'),
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', 'intelligence_observation_recorded', founder);
+  return safe(
+    json(result.data.deduplicated ? 200 : 201, {
+      ok: true,
+      deduplicated: result.data.deduplicated,
+      observation: result.data.observation as unknown as Record<string, unknown>,
+      activatesProvider: false,
+      externalActionTaken: false,
+    }),
+  );
+}
+
+/**
+ * Set a budget policy — a ceiling, a currency and the permitted tiers.
+ *
+ * A ceiling BLOCKS or DEMANDS A DECISION. This route cannot grant spend, and
+ * there is no field on it that could: raising a ceiling makes no provider
+ * available, enables no paid service and buys nothing. The response says so on
+ * the wire so a console cannot draw it as a purchase.
+ */
+function setIntelligenceBudgetRoute(
+  request: ControlRequest,
+  deps: ControlApiDeps,
+  founder: ResolvedFounder,
+  audit: Audit,
+): ControlResponse {
+  const scopeKind = stringField(request.body, 'scopeKind') ?? '';
+  const scopeId = stringField(request.body, 'scopeId') ?? '';
+  const window = stringField(request.body, 'window') ?? '';
+  const currency = stringField(request.body, 'currency') ?? '';
+  const note = stringField(request.body, 'note') ?? '';
+  const tiers = stringArrayField(request.body, 'permittedTiers');
+  if (tiers === 'invalid') {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'permittedTiers must be a list of strings.');
+  }
+  const ceiling = (request.body as Record<string, unknown> | undefined)?.['ceilingMinorUnits'];
+  if (!Number.isInteger(ceiling)) {
+    audit('refused', 'invalid_input', founder);
+    return refusal(400, 'invalid_input', 'ceilingMinorUnits must be a whole number of minor units.');
+  }
+  try {
+    assertBrowserSafe({ scopeId, note }, 'intelligence');
+  } catch {
+    audit('refused', 'unsafe_intelligence_content', founder);
+    return refusal(
+      400,
+      'unsafe_intelligence_content',
+      'The scope id or note looks like it contains credential material, so it was refused rather than stored.',
+    );
+  }
+  const result = deps.ops.setIntelligenceBudget({
+    scopeKind: scopeKind as BudgetScope,
+    scopeId,
+    window: window as BudgetWindow,
+    ceilingMinorUnits: ceiling as number,
+    currency,
+    permittedTiers: (tiers ?? []) as IntelligenceTier[],
+    setBy: founder.principal.id,
+    note: note || undefined,
+  });
+  if (!result.ok) {
+    audit('refused', result.error.code, founder);
+    return refusal(controlErrorStatus(result.error.code), result.error.code, result.error.message);
+  }
+  audit('allowed', `intelligence_budget_v${result.data.budget.version}`, founder);
+  return safe(
+    json(201, {
+      ok: true,
+      budget: result.data.budget as unknown as Record<string, unknown>,
+      grantsSpend: false,
+      activatesPaidProvider: false,
+      externalActionTaken: false,
+    }),
+  );
 }

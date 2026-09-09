@@ -50,6 +50,7 @@ import {
   MISSION_NOTE_REQUIRED_TARGETS,
   MISSION_PRIORITIES,
 } from '../contracts/mission.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 /**
  * The only paths any HQ page script may fetch, beside the freshness
@@ -57,7 +58,7 @@ import {
  * emitted page against it — that assertion is what makes invariant (1)
  * above load-bearing rather than a comment.
  */
-export const CONTROL_FETCH_TARGETS: readonly string[] = [
+export const CONTROL_FETCH_TARGETS: readonly string[] = deepFreeze([
   CONTROL_ROUTES.session,
   CONTROL_ROUTES.approvals,
   // Stage 4's authenticated read route. It belongs on this list for the same
@@ -121,7 +122,7 @@ export const CONTROL_FETCH_TARGETS: readonly string[] = [
   CONTROL_ROUTES.productDetail,
   CONTROL_ROUTES.productLifecycle,
   CONTROL_ROUTES.productArtifacts,
-];
+]);
 
 /**
  * The grant decision, as browser-executable source.

@@ -38,6 +38,7 @@ import { classifyCapability, type TaskClassification } from '../application/clas
 import { founderConsole, type FounderConsole } from '../application/console.js';
 import { directOrderDispatchBlocked } from './orders.js';
 import { dispatchHistory } from '../providers/claude/dispatch.js';
+import { taskRowFor } from '../application/service.js';
 import type { HeadquarterOperations } from '../application/service.js';
 import { missionBrowserView, type MissionBrowserView } from '../application/mission-command.js';
 import { projectBrowserView, type ProjectBrowserView } from '../application/project-command.js';
@@ -46,6 +47,14 @@ import { TRUTH_SNAPSHOT_LIMIT, type TruthSnapshotView } from '../application/tru
 import { COLLABORATION_SNAPSHOT_LIMIT, type CollaborationSnapshotView } from '../application/collaboration-command.js';
 import { SEARCH_SNAPSHOT_NOTE, type SearchIndexSnapshotView } from '../application/search-command.js';
 import { PRODUCT_SNAPSHOT_NOTE, type ProductFactorySnapshotView } from '../application/product-command.js';
+import {
+  RELIABILITY_SNAPSHOT_NOTE,
+  type ReliabilitySnapshotView,
+} from '../application/reliability-command.js';
+import {
+  INTELLIGENCE_SNAPSHOT_NOTE,
+  type IntelligenceSnapshotView,
+} from '../application/intelligence-command.js';
 import {
   COMMAND_CENTER_PROVENANCE,
   COMMAND_CENTER_SNAPSHOT_LIMIT,
@@ -281,6 +290,44 @@ export interface HqSnapshot {
    * do any of those, and the note says so on the artifact itself.
    */
   productFactory?: SnapshotSection<ProductFactorySnapshotView>;
+  /**
+   * The Phase 13 reliability posture: COUNTS over closed vocabularies and
+   * three booleans, and nothing else.
+   *
+   * Deliberately carries no run label, task/mission/action id, worker id,
+   * correlation id, process identity, backup path, digest or finding DETAIL.
+   * Each of those is either an operational identifier a stranger has no
+   * business correlating, or free text — and the Phase 9/11/12 rule applies
+   * unchanged: an unauthenticated artifact has no vocabulary that classifies
+   * free text for an unauthenticated reader, so it publishes none.
+   *
+   * `safeMode` crosses because it is a statement HQ makes about ITSELF, and a
+   * reader who is told everything is fine while it is not has been lied to.
+   * A concluded count is a count of RECORDS, not evidence that anything
+   * reached the outside world — no reliability path can perform an external
+   * action, and the note says so on the artifact itself.
+   */
+  reliability?: SnapshotSection<ReliabilitySnapshotView>;
+  /**
+   * The Phase 14 cost/intelligence posture: COUNTS over closed vocabularies
+   * and one boolean, and nothing else.
+   *
+   * It carries NO amount, currency, ceiling, provider id, model id, task /
+   * mission / project / decision id, label, basis or note — the section has no
+   * field that could hold one, which is the Phase 12/13 shape argument applied
+   * to money. A spend figure is exactly the kind of number a stranger would
+   * correlate, and an unauthenticated artifact has no vocabulary that
+   * classifies a currency amount for an unauthenticated reader, so it
+   * publishes none.
+   *
+   * `unknownAmountEntries` DOES cross, and that is deliberate: a reader shown
+   * a tidy count of recorded costs with no indication that some of them have
+   * no known amount would draw a false conclusion about how well HQ knows what
+   * it spends. A decision count is a count of RECORDS: no routing path selects
+   * a provider, spends anything or activates anything, and the note says so on
+   * the artifact itself.
+   */
+  intelligence?: SnapshotSection<IntelligenceSnapshotView>;
 }
 
 /**
@@ -356,6 +403,10 @@ export interface SnapshotSources {
   search?: { data: SearchIndexSnapshotView; provenance: Provenance };
   /** The Product Factory counts (Phase 12). Optional — omitted means no canonical handle was read. */
   productFactory?: { data: ProductFactorySnapshotView; provenance: Provenance };
+  /** The reliability counts (Phase 13). Optional — omitted means no canonical handle was read. */
+  reliability?: { data: ReliabilitySnapshotView; provenance: Provenance };
+  /** The cost/intelligence counts (Phase 14). Same optional semantics. */
+  intelligence?: { data: IntelligenceSnapshotView; provenance: Provenance };
   /**
    * Per-worker provider declarations (Phase 4). Optional: an omitted map
    * means the building context holds no declaration truth — every worker's
@@ -406,6 +457,8 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
       ...(sources.commandCenter ? [sources.commandCenter.provenance.mode] : []),
       ...(sources.search ? [sources.search.provenance.mode] : []),
       ...(sources.productFactory ? [sources.productFactory.provenance.mode] : []),
+      ...(sources.reliability ? [sources.reliability.provenance.mode] : []),
+      ...(sources.intelligence ? [sources.intelligence.provenance.mode] : []),
     ]),
     note: sources.note ?? null,
     counts: {
@@ -492,6 +545,12 @@ export function buildHqSnapshot(sources: SnapshotSources): HqSnapshot {
     ...(sources.productFactory
       ? { productFactory: section(sources.productFactory.provenance, sources.productFactory.data) }
       : {}),
+    ...(sources.reliability
+      ? { reliability: section(sources.reliability.provenance, sources.reliability.data) }
+      : {}),
+    ...(sources.intelligence
+      ? { intelligence: section(sources.intelligence.provenance, sources.intelligence.data) }
+      : {}),
   };
 
   // Fail closed: prove it before anyone can publish it.
@@ -573,7 +632,9 @@ function withDispatchBlocked(
   providerDispatchable?: (provider: ProviderId) => boolean | null,
 ): FounderConsole {
   const mark = <T extends { taskId: string }>(card: T): T => {
-    const task = ops.queue.get(card.taskId);
+    // Canonical, never `queue.get` — see `control-api.ts`'s `isDispatchBlocked`,
+    // which computes the same badge from the same row.
+    const task = taskRowFor(ops, card.taskId);
     if (!task) return card;
     return {
       ...card,
@@ -700,6 +761,22 @@ export function liveSnapshotFromOperations(
   // safe is therefore not a filter but the SHAPE of the section: it is
   // incapable of carrying a name, a locator, a digest or an id.
   const productFactory = ops.productFactorySummary();
+  // Phase 13 reliability: counts, three booleans and a finding map keyed by
+  // the closed integrity vocabulary. Same shape argument as Phase 12 — the
+  // section is incapable of carrying an id, a path, a digest or a detail
+  // string — plus one deliberate addition: safeMode crosses, because a
+  // reader told everything is fine while HQ has said otherwise about itself
+  // has been lied to, and that is the one thing this phase exists to prevent.
+  const reliability = ops.reliabilitySummary();
+  // Phase 14 cost/intelligence: counts over closed vocabularies and one
+  // boolean. Same shape argument as Phase 12 and 13, applied to money — the
+  // section is incapable of carrying an amount, a currency, a ceiling, a
+  // provider id or a model id, so there is nothing here to redact and nothing
+  // a reader could mistake for a spend figure. The one deliberate addition is
+  // `unknownAmountEntries`, because a reader shown a clean count of recorded
+  // costs without being told how many have no known amount has been given a
+  // false impression of how well HQ knows what it spends.
+  const intelligence = ops.intelligenceSummary();
 
   return buildHqSnapshot({
     workerProviders,
@@ -929,6 +1006,69 @@ export function liveSnapshotFromOperations(
               ? null
               : 'The hq_briefs ledger does not exist on this database handle, so no brief was ever issued ' +
                 'through it and none can be; briefs.total states that as 0 rather than implying an empty ledger.',
+          ]
+            .filter(Boolean)
+            .join(' ') || undefined,
+      },
+    },
+    reliability: {
+      data: reliability,
+      provenance: {
+        mode,
+        source:
+          'hq_reliability_runs / hq_reliability_run_events / hq_reliability_backups plus the latched ' +
+          'integrity verdict, via HeadquarterOperations.reliabilitySummary',
+        asOf: at,
+        note:
+          [
+            RELIABILITY_SNAPSHOT_NOTE,
+            reliability.storePresent
+              ? null
+              : 'This database predates the Phase 13 run ledger and was opened read-only, so no run store ' +
+                'exists to read. 0 states that absence; nothing was migrated.',
+            reliability.safeMode
+              ? 'HQ is in SAFE MODE: it has found that its own stored record cannot currently be trusted, ' +
+                'and it is refusing the acts that would add to, approve, release or execute against that ' +
+                'record. The findings map names the categories; no detail crosses.'
+              : null,
+            reliability.assessmentDepth === 'structural'
+              ? 'The verdict behind these counts came from a STRUCTURAL assessment — the schema catalogue and ' +
+                'the durability pragmas. It is not a claim that a full integrity_check has been run.'
+              : null,
+            reliability.needsReconciliation > 0
+              ? `${reliability.needsReconciliation} run(s) stand at an unknown outcome awaiting explicit ` +
+                'reconciliation. HQ never retries an uncertain outcome automatically.'
+              : null,
+          ]
+            .filter(Boolean)
+            .join(' ') || undefined,
+      },
+    },
+    intelligence: {
+      data: intelligence,
+      provenance: {
+        mode,
+        source:
+          'hq_intel_model_observations / hq_intel_decisions / hq_intel_decision_outcomes / ' +
+          'hq_intel_cost_entries / hq_intel_budgets via HeadquarterOperations.intelligenceSummary',
+        asOf: at,
+        note:
+          [
+            INTELLIGENCE_SNAPSHOT_NOTE,
+            intelligence.storePresent
+              ? null
+              : 'This database predates the Phase 14 intelligence and cost ledgers and was opened ' +
+                'read-only, so no store exists to read. 0 states that absence; nothing was migrated.',
+            intelligence.unknownAmountEntries > 0
+              ? `${intelligence.unknownAmountEntries} recorded cost entr(ies) have NO known amount. HQ ` +
+                'does not render an unknown cost as zero, does not estimate it and does not average it ' +
+                'in; it says it does not know.'
+              : null,
+            intelligence.tierPolicyRecorded
+              ? null
+              : 'No permitted-tier policy has been recorded, so the tier set in force is the free local ' +
+                'tier alone. HQ never treats the absence of a budget policy as permission to use a paid ' +
+                'one, and nothing here can activate one.',
           ]
             .filter(Boolean)
             .join(' ') || undefined,

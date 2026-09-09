@@ -28,8 +28,9 @@
 
 import type { HqDatabase } from '../store/db.js';
 import { ensureRegistrySchema } from './db.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
-export const MEMBER_CAPABILITY_DOMAINS = [
+export const MEMBER_CAPABILITY_DOMAINS = deepFreeze([
   'coding',
   'research',
   'design',
@@ -44,18 +45,18 @@ export const MEMBER_CAPABILITY_DOMAINS = [
   'local_execution',
   'translation',
   'data_analysis',
-] as const;
+] as const);
 
 export type MemberCapabilityDomain = (typeof MEMBER_CAPABILITY_DOMAINS)[number];
 
 /** Same values as `operator/RISK_CLASSES` — see module doc comment for why this is a separate copy. */
-export const MEMBER_RISK_CLASSES = [
+export const MEMBER_RISK_CLASSES = deepFreeze([
   'read_only',
   'reversible',
   'external_side_effect',
   'destructive',
   'founder_gate',
-] as const;
+] as const);
 
 export type MemberRiskClass = (typeof MEMBER_RISK_CLASSES)[number];
 

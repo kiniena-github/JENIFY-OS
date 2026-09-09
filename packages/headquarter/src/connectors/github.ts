@@ -17,12 +17,13 @@ import type { DateConfidence } from '../archive/schema.js';
 import { assertNoCredentialFields, isHost, sanitizeLocator, sanitizeText } from './safety.js';
 import { runConnectorSync, type ConnectorIndex, type RunConnectorSyncOptions } from './sync.js';
 import type { NormalizeResult, ObservedItem, PageFetcher, SourceConfidence, SyncOutcome } from './types.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 export const GITHUB_CONNECTOR_ID = 'github';
 export const GITHUB_SOURCE_SYSTEM = 'github.com';
 export const GITHUB_HOST = 'github.com';
 
-export const GITHUB_NATIVE_KINDS = ['repository', 'issue', 'pull_request', 'commit'] as const;
+export const GITHUB_NATIVE_KINDS = deepFreeze(['repository', 'issue', 'pull_request', 'commit'] as const);
 
 export type GitHubNativeKind = (typeof GITHUB_NATIVE_KINDS)[number];
 

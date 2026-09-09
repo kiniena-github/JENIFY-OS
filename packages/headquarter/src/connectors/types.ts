@@ -20,6 +20,7 @@
  */
 
 import type { DateConfidence } from '../archive/schema.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 /* ------------------------------------------------------------------ */
 /* Scope / policy                                                      */
@@ -29,7 +30,7 @@ import type { DateConfidence } from '../archive/schema.js';
  * Connector scopes defined by this lane. Deliberately read-only: there is no
  * write/delete scope, so a mutation cannot be expressed, let alone executed.
  */
-export const CONNECTOR_SCOPES = ['read'] as const;
+export const CONNECTOR_SCOPES = deepFreeze(['read'] as const);
 
 export type ConnectorScope = (typeof CONNECTOR_SCOPES)[number];
 
@@ -68,7 +69,7 @@ export function assertReadOnlyScope(scope: unknown): asserts scope is ConnectorS
 /* Connector run status                                                */
 /* ------------------------------------------------------------------ */
 
-export const CONNECTOR_STATUSES = [
+export const CONNECTOR_STATUSES = deepFreeze([
   /** The complete listing was read successfully; data is confirmed current. */
   'current',
   /** Some of the listing was read (pagination cut short, unusable items). */
@@ -83,7 +84,7 @@ export const CONNECTOR_STATUSES = [
   'blocked',
   /** The read neither clearly succeeded nor clearly failed. */
   'outcome_unknown',
-] as const;
+] as const);
 
 export type ConnectorStatus = (typeof CONNECTOR_STATUSES)[number];
 
@@ -96,7 +97,7 @@ export function isConfirmedCurrent(status: ConnectorStatus): boolean {
 /* Confidence and lifecycle                                            */
 /* ------------------------------------------------------------------ */
 
-export const SOURCE_CONFIDENCES = [
+export const SOURCE_CONFIDENCES = deepFreeze([
   /** Read directly from the authoritative source during this sync run. */
   'confirmed',
   /** Source-supplied metadata accepted but not independently corroborated. */
@@ -105,11 +106,11 @@ export const SOURCE_CONFIDENCES = [
   'cached',
   /** Shape accepted, but provenance could not be established. */
   'unverified',
-] as const;
+] as const);
 
 export type SourceConfidence = (typeof SOURCE_CONFIDENCES)[number];
 
-export const CONNECTOR_LIFECYCLES = [
+export const CONNECTOR_LIFECYCLES = deepFreeze([
   /** Present in the source at last observation. */
   'active',
   /** The source explicitly reported the item deleted/trashed. */
@@ -118,7 +119,7 @@ export const CONNECTOR_LIFECYCLES = [
   'missing_at_source',
   /** The last read of this item failed; the last known state is retained. */
   'unavailable',
-] as const;
+] as const);
 
 export type ConnectorLifecycle = (typeof CONNECTOR_LIFECYCLES)[number];
 
@@ -226,7 +227,7 @@ export function connectorRecordKey(provenance: {
 /* Problems, pages, outcomes                                           */
 /* ------------------------------------------------------------------ */
 
-export const CONNECTOR_PROBLEM_CODES = [
+export const CONNECTOR_PROBLEM_CODES = deepFreeze([
   'auth_required',
   'unreachable',
   'rate_limited',
@@ -234,7 +235,7 @@ export const CONNECTOR_PROBLEM_CODES = [
   'malformed_item',
   'blocked_by_policy',
   'unknown_outcome',
-] as const;
+] as const);
 
 export type ConnectorProblemCode = (typeof CONNECTOR_PROBLEM_CODES)[number];
 

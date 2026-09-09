@@ -21,6 +21,7 @@
  */
 
 import { ROLES, isProviderId, isRole, type ProviderId, type Role } from './providers.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 export interface RoleAssignment {
   role: Role;
@@ -55,7 +56,7 @@ export type RoleAssignments = Record<Role, RoleAssignment>;
  *
  *     JENIFY_ROLE_REVIEWER=CODEX
  */
-export const DEFAULT_ROLE_ASSIGNMENTS: RoleAssignments = {
+export const DEFAULT_ROLE_ASSIGNMENTS: RoleAssignments = deepFreeze({
   MANAGER: {
     role: 'MANAGER',
     primary: 'CLAUDE',
@@ -85,7 +86,7 @@ export const DEFAULT_ROLE_ASSIGNMENTS: RoleAssignments = {
     backup: [],
     rationale: 'Gemini holds the zero-cost research/alternative-review lane.',
   },
-};
+});
 
 /**
  * Runtime override, so the Founder can restaff a role without editing code:

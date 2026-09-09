@@ -34,6 +34,7 @@ import {
   type Occupant,
   type ZoneState,
 } from './state.js';
+import { deepFreeze } from '../../contracts/freeze.js';
 
 /**
  * What the floor's motion vocabulary means, stated on the page itself.
@@ -43,7 +44,7 @@ import {
  * checkable by the person reading it, and the last line is the one that
  * matters most — stillness here is evidence, not decoration.
  */
-export const MOTION_LEGEND: readonly { activity: string; means: string }[] = [
+export const MOTION_LEGEND: readonly { activity: string; means: string }[] = deepFreeze([
   { activity: 'Working', means: 'a task held by this worker is recorded assigned or running' },
   { activity: 'In review', means: 'a task held by this worker is recorded review_passed or review_failed' },
   { activity: 'Waiting on Founder', means: 'a task is recorded needs_approval and can move no further' },
@@ -62,7 +63,7 @@ export const MOTION_LEGEND: readonly { activity: string; means: string }[] = [
     means:
       'either no canonical event places this worker on a task, or the registry marks it inactive — each figure’s evidence says which',
   },
-];
+]);
 
 export const FLOOR_HONESTY_NOTE =
   'Nothing on this floor is animated for effect. A figure moves only while a canonical activity event says its ' +

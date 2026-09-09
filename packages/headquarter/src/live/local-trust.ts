@@ -53,6 +53,8 @@
  * `test/live-order-actor-trust.test.ts` proves each of those end to end.
  */
 
+import { deepFreeze } from '../contracts/freeze.js';
+
 /**
  * What is known about the actor behind a write.
  *
@@ -170,14 +172,14 @@ export const LOCAL_ADMIN_INTERFACE_NOTICE =
 export const LOCAL_ADMIN_ACK_FLAG = '--local-admin';
 
 /** Environment variables whose presence means "this is not a person's workstation". */
-export const CI_ENVIRONMENT_VARIABLES = [
+export const CI_ENVIRONMENT_VARIABLES = deepFreeze([
   'CI',
   'GITHUB_ACTIONS',
   'GITLAB_CI',
   'BUILDKITE',
   'JENKINS_URL',
   'TEAMCITY_VERSION',
-] as const;
+] as const);
 
 export type LocalInvocationRejection = 'ci_environment' | 'acknowledgement_missing';
 

@@ -67,6 +67,7 @@
  */
 
 import { v4 as uuid } from 'uuid';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { nowIso } from '../store/db.js';
 import { HeadquarterStore } from '../store/headquarter.js';
@@ -78,13 +79,27 @@ import {
   canonicalJson,
   taskActionDigest,
   validateApprovalClaimBinding,
+  type ApprovalRecordForValidation,
   type ApprovalRejection,
 } from '../operator/approvals.js';
-import { assertNoSecretLikeContent, type EvidenceEntry } from '../operator/evidence.js';
-import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import {
+  ensureEvidenceGuards,
+  verifyEvidenceChain,
+  type EvidenceEntry,
+} from '../operator/evidence.js';
+import {
+  CapabilityRegistry,
+  readStoredRiskClass,
+  type Capability,
+  type RiskClass,
+} from '../operator/capabilities.js';
+import {
+  AssignmentIntentViolation,
   GLOBAL_SCOPE,
   OperatorQueue,
+  SafeModeEngaged,
+  installQueueSafeModeGate,
+  readOperatorTaskRow,
   type OperatorTask,
   type PrivilegedQueueApi,
   type ReconcileDecision,
@@ -100,13 +115,220 @@ import { assertBrowserSafe } from '../live/redaction.js';
 import { PROVIDERS, type ProviderId } from '../routing/providers.js';
 
 /**
+ * The credential scan EVERY facade write applies to caller-supplied text.
+ *
+ * One function, and it is the SAME function the read boundary uses. That
+ * identity is the whole point (Wave 5 correction round four, High H3): the two
+ * boundaries used to be different checks, and the write side was the weaker
+ * one. `assertNoSecretLikeContent` is an `api_key: value` heuristic, so
+ * `sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345`, `ghp_...`, `-----BEGIN RSA PRIVATE
+ * KEY-----` and `Bearer ...` were all STORED as a run label or a decision
+ * label — and `control-api.ts`'s `safe()` then applied the strict, shape-based
+ * `assertBrowserSafe` to every response. The rows are append-only, so
+ * `GET /api/control/reliability` and `GET /api/control/intelligence` returned
+ * `500 internal` on every subsequent read, FOREVER, and no `DELETE`/`UPDATE`
+ * could take the row back out. One accepted write permanently bricked two
+ * Founder read routes.
+ *
+ * An asymmetric pair like that is the defect, not the individual check: any
+ * text a write accepts and a read refuses is a permanent outage waiting to be
+ * typed. So the strict scan is applied HERE, at every write, and a value that
+ * could never be served is refused before it is stored rather than after.
+ *
+ * The scan is strictly stronger than the one it replaces —
+ * `assertBrowserSafe` applies the shape rules AND then the same
+ * `assertNoSecretLikeContent` heuristic — so nothing that used to be refused is
+ * now accepted.
+ *
+ * **And it refuses ordinary prose the weak heuristic accepted. That cost is
+ * named here rather than left to be discovered** (Wave 5 correction round seven,
+ * Low 1). Two shapes carry it, both executed: `Bearer\s+[A-Za-z0-9._-]{16,}`
+ * matches "The bearer responsibilities were reassigned to the shift lead", and
+ * `sk-[A-Za-z0-9_-]{16,}` matches "Contract with Addis-Sk-Trading-Corporation
+ * renewed for 2027" — a plausible Ethiopian business name in a product whose
+ * first tenant is an Ethiopian factory. The refusal is `invalid_input`, there
+ * is no override, and rephrasing is the only remedy. It was NOT tightened,
+ * and that is a decision rather than an omission: this is the same function
+ * the READ boundary applies, so loosening it to admit the prose would loosen
+ * what may be PUBLISHED as well as what may be stored, and every candidate
+ * discriminator (require a digit in the run; require a longer run) is a real
+ * weakening of a fail-closed backstop that could not be shown not to admit a
+ * genuine credential. The exact refused strings are pinned in
+ * `credential-scan-cost.test.ts`, so the disclosure is enforced by the suite
+ * rather than asserted by a comment, and a future tightening has to move the
+ * disclosure with it.
+ *
+ * **Which writes it covers, exactly — and this sentence has now been falsified
+ * three times, so it is DERIVED rather than asserted** (Wave 5 correction
+ * round seven, Medium 2; round ten, Medium 2 and NEW MEDIUM B).
+ *
+ * Round four said "every facade write" while `createTask`'s `title` and
+ * `project`, `failTask`'s `reason` and `registerExecutionWorker`'s
+ * `displayName` all reached storage unscanned. Round seven fixed those four,
+ * re-stated the sentence as "now true of the facade, with ONE carve-out", and
+ * was falsified three more times by execution:
+ * `registerExecutionWorker`'s `workerId`, `engageKillSwitch`'s `scope`, and
+ * `setIntelligenceBudget`'s `scopeId` together with
+ * `recordModelObservation`'s `providerId` and `modelId`. Each of the seven was
+ * executed into a PERMANENT `500` on a Founder read route, because no HQ
+ * command can rewrite those columns.
+ *
+ * The reason it kept being wrong was the enforcement, not the wording: both
+ * derived assertions asked `body.includes('assertNoCredentialShape')`, a
+ * BOOLEAN PER METHOD, so one scanned parameter credited every other parameter
+ * of the same method. The sentence is now made true by CONSTRUCTION rather
+ * than by inspection — `callerTextRefusal` below scans every own field of
+ * every facade write's input, of whatever type — and `facade-write-scan.test.ts`
+ * derives the coverage PER PARAMETER, naming any (method, parameter) pair that
+ * reaches neither guard.
+ *
+ * **"Every STRING field" was the eighth spelling of the same mistake, and it
+ * was falsified by execution twice more** (Wave 5 correction round eleven,
+ * Medium 1). `Object.entries` reached every field, and the filter beside it
+ * then kept only `typeof value === 'string'` — so a `string[]` was enumerated
+ * by neither half of the derivation and scanned by neither guard. Executed
+ * against the previous head: `submitResult(..., ['sk-…'])` ACCEPTED, the value
+ * permanent in `op_evidence.payload`; `postMissionMessage({ refs: ['sk-…'] })`
+ * ACCEPTED, the value permanent in `hq_chat_messages.refs`. Neither bricked a
+ * route today, which is the definition of the latent half of this class rather
+ * than a defence of it. The type filter is gone: `assertNoCredentialShape`
+ * already walks arrays and nested objects to depth 64, so the whole input goes
+ * to it and the CLASS closes rather than the two instances.
+ *
+ * The ONE carve-out is now named at its call site rather than implied by a
+ * type filter: `createTask` passes `['payload']` as `deliberatelyUnscanned`,
+ * and `facade-write-scan.test.ts` DERIVES that list from the source and
+ * asserts there is exactly one of them.
+ * No control route serves a task payload — executed, and it bricked none while
+ * the title bricked two — the queue applies the evidence log's heuristic to it
+ * at `enqueue`, and the strict guard for it lives at the boundary that would
+ * PUBLISH it, the dispatch lane, whose independence from the submission guard
+ * two existing tests prove by writing a credential-shaped payload through
+ * `createTask` on purpose. The write sites and that single carve-out are
+ * enumerated by `facade-write-scan.test.ts`, which fails when a public method
+ * stores caller text without passing it through this function.
+ *
+ * **The other lane's count was wrong in three more places, and the claim is no
+ * longer counted at all** (round seven, High NEW-3, found independently of the
+ * Medium 2 above). `recordVerifiedBackup.note`,
+ * `recordIntelligenceOutcome.note` and `disableAiMember.reason` each bounded
+ * their caller text with `missionText` — which checks a LENGTH — and never
+ * reached this function. `recordVerifiedBackup` was live: `GET
+ * /api/hq/control/reliability` answered `200`, one accepted
+ * `recordVerifiedBackup({ note: 'sk-…' })` later it answered `500` for ever,
+ * because `hq_reliability_backups` carries `no_rewrite`/`no_erase`. So a SECOND
+ * derived assertion stands beside `facade-write-scan.test.ts`:
+ * `credential-scan-coverage.test.ts` enumerates every member of this file that
+ * calls `missionText` and names any that does not also call this scan. The two
+ * enumerate different things — public methods that store caller text, and
+ * length-bounded text fields — and neither subsumes the other, so both stand.
+ */
+function assertNoCredentialShape(fields: Record<string, unknown>): void {
+  assertBrowserSafe(fields, 'stored_text');
+}
+
+/**
+ * EVERY string a facade write accepts, scanned before that write does anything
+ * else — the mechanism that makes the sentence above true of the code rather
+ * than asserted about it (Wave 5 correction round ten, Medium 2 and NEW
+ * MEDIUM B).
+ *
+ * ## Why a per-METHOD credit was the root cause
+ *
+ * The two derived assertions that were supposed to enforce the sentence both
+ * asked `body.includes('assertNoCredentialShape')` — a BOOLEAN PER METHOD. One
+ * scanned parameter therefore credited every OTHER parameter of the same
+ * method, and a curated `FREE_TEXT_PARAMETERS` vocabulary decided which
+ * parameters were looked at in the first place. Two independent misses stacked,
+ * and three live outages sat underneath a green suite of 3297 tests:
+ *
+ *  - `registerExecutionWorker` scanned `{ displayName, vendor }` and stored an
+ *    unscanned `workerId` straight into `hq_specialists.id`, permanently
+ *    `500`-ing `/state`, `/workforce` and `/commandCenter` — from a CREATE-ONLY
+ *    command with no removal path, reachable as shipped through
+ *    `cli/direct-order.ts --register-worker`;
+ *  - `engageKillSwitch` scanned `{ reason }` and passed an unscanned `scope`
+ *    to the privileged queue, bricking `/state`, `/commandCenter` and
+ *    `/commandCenterInbox`. Outside safe mode `releaseKillSwitch` with the
+ *    byte-exact scope clears it; UNDER safe mode `releaseKillSwitch` is refused
+ *    `safe_mode_engaged` while `engageKillSwitch` still accepted the value, so
+ *    there the outage had no remedy at all;
+ *  - `setIntelligenceBudget` scanned `{ note }` and `recordModelObservation`
+ *    scanned `{ note, basis }`, while `scopeId`, `providerId` and `modelId`
+ *    were bounded only by `isIdentifierSlug` — and that slug rule admits
+ *    `sk-…` and `ghp_…` verbatim. Both tables are INSERT-only, so one accepted
+ *    FACADE write permanently `500`-ed `GET /intelligence`.
+ *
+ * ## What is applied instead
+ *
+ * A whole-input scan at the top of every facade write, so coverage is a
+ * property of the CALL rather than of a vocabulary somebody has to remember to
+ * extend. `Object.entries` reaches every own enumerable field of the input
+ * object, which means a parameter ADDED to an input type in a future phase is
+ * scanned the day it is added, with nobody having to notice it.
+ *
+ * EVERY own field is scanned, of whatever type, and the one deliberate
+ * carve-out is named rather than typed around (Wave 5 correction round eleven,
+ * Medium 1). It used to read only `typeof value === 'string'`, which kept
+ * `createTask`'s `Record<string, unknown>` payload out by accident — and kept
+ * `submitResult`'s `evidenceRefs` and `postMissionMessage`'s `refs` out by the
+ * same accident, both of which were executed into permanent append-only rows.
+ * `assertNoCredentialShape` walks arrays and nested objects itself, so handing
+ * it the whole input closes the class; `createTask` names `payload` in
+ * `deliberatelyUnscanned`, where the exemption is visible, reasoned at the
+ * call site, and derived by `facade-write-scan.test.ts`. Its guard stays at
+ * the boundary that would PUBLISH it (the dispatch lane), which two existing
+ * tests prove holds independently by writing a credential-shaped payload
+ * through `createTask` on purpose.
+ *
+ * `alreadyScanned` names the fields a method scans ITSELF, further down, with a
+ * message written for that field ("The approval note looks like it contains a
+ * credential…"). Those are skipped here so the specific refusal a Founder reads
+ * is still the one they used to read; they are covered, just not covered twice
+ * with a generic sentence in front of the specific one.
+ *
+ * `facade-write-scan.test.ts` derives the coverage from this call PER
+ * PARAMETER, so a string parameter that reaches neither this function nor an
+ * explicit scan is named there by method and by parameter.
+ */
+function callerTextRefusal(
+  // `object` rather than `Record<string, unknown>`: the callers hand in their
+  // own declared input types, which carry no index signature. Nothing is read
+  // off the shape — every field is reached through `Object.entries`.
+  fields: object,
+  alreadyScanned: readonly string[] = [],
+  /**
+   * The fields this method DELIBERATELY does not scan here, each of which must
+   * carry its reason at the call site and be named in
+   * `facade-write-scan.test.ts`, which derives the carve-out list from these
+   * literals rather than trusting a sentence about them.
+   *
+   * There is exactly one, `createTask.payload`, and the count is asserted from
+   * the source rather than written down.
+   */
+  deliberatelyUnscanned: readonly string[] = [],
+): OpsResult<never> | null {
+  const skip = new Set([...alreadyScanned, ...deliberatelyUnscanned]);
+  const scanned: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (!skip.has(key)) scanned[key] = value;
+  }
+  try {
+    assertNoCredentialShape(scanned);
+  } catch (error) {
+    return fail('invalid_input', errorMessage(error));
+  }
+  return null;
+}
+
+/**
  * The only actors an in-process system lane may append evidence under.
  *
  * Closed on purpose. Every name here denotes the SYSTEM recording its own act;
  * none is, or may become, a human principal or a registered worker — that is
  * enforced at the call, not merely intended. See `appendSystemEvidence`.
  */
-export const SYSTEM_EVIDENCE_ACTORS = ['system', 'hq-claude-dispatch'] as const;
+export const SYSTEM_EVIDENCE_ACTORS = deepFreeze(['system', 'hq-claude-dispatch'] as const);
 export type SystemEvidenceActor = (typeof SYSTEM_EVIDENCE_ACTORS)[number];
 
 /**
@@ -118,10 +340,10 @@ export type SystemEvidenceActor = (typeof SYSTEM_EVIDENCE_ACTORS)[number];
  * `DISPATCH_OUTCOME_EVIDENCE_KINDS` and are unreachable from here — see the
  * dispatch-evidence grant below.
  */
-export const SYSTEM_EVIDENCE_KINDS = [
+export const SYSTEM_EVIDENCE_KINDS = deepFreeze([
   'claude_github_dispatch_refused',
   'direct_order_dispatch_blocked',
-] as const;
+] as const);
 export type SystemEvidenceKind = (typeof SYSTEM_EVIDENCE_KINDS)[number];
 
 /**
@@ -158,12 +380,12 @@ export type SystemEvidenceKind = (typeof SYSTEM_EVIDENCE_KINDS)[number];
  * else, exactly as `PrivilegedQueueApi` is handed to whoever constructs the
  * queue, so it is not reachable from an `ops` object a worker holds.
  */
-export const DISPATCH_OUTCOME_EVIDENCE_KINDS = [
+export const DISPATCH_OUTCOME_EVIDENCE_KINDS = deepFreeze([
   'claude_github_dispatch_attempted',
   'claude_github_dispatch_succeeded',
   'claude_github_dispatch_failed',
   'claude_github_result_correlated',
-] as const;
+] as const);
 export type DispatchOutcomeEvidenceKind = (typeof DISPATCH_OUTCOME_EVIDENCE_KINDS)[number];
 
 /**
@@ -390,18 +612,20 @@ export function writeDispatchOutcome(
  * record describes actually happen". A holder of the grant that has not claimed
  * still may not report a publication.
  */
-export const CLAIM_BOUND_EVIDENCE_KINDS = [
+export const CLAIM_BOUND_EVIDENCE_KINDS = deepFreeze([
   'claude_github_dispatch_attempted',
   'claude_github_dispatch_succeeded',
-] as const;
+] as const);
 import { ensureApplicationSchema } from './db.js';
 import {
-  SpecialistDirectoryAdapter,
+  bindDirectoryReads,
+  specialistDirectoryReads,
   type NominationSourcePort,
   type WorkerAssignability,
   type WorkerDirectoryPort,
+  type WorkerDirectoryReads,
 } from './ports.js';
-import { narrowByRegistry, type MemberDirectorySource } from './registry-directory.js';
+import { composeDirectoryReads, type MemberDirectorySource } from './registry-directory.js';
 import { classifyCapability, type TaskClassification } from './classification.js';
 import {
   HumanPrincipalRegistry,
@@ -530,6 +754,190 @@ import {
   type ProductType,
 } from './product-command.js';
 import {
+  BACKUP_READ_LIMIT,
+  MAX_BACKUP_PATH_LENGTH,
+  MAX_RUN_LABEL_LENGTH,
+  MAX_RUN_NOTE_LENGTH,
+  RECONCILIATION_COMMITMENT_STATEMENT,
+  RECOVERY_SCOPE_STATEMENT,
+  RELIABILITY_COMMAND_CAPABILITY,
+  RUN_KINDS,
+  RUN_LEDGER_STATEMENT,
+  RUN_READ_LIMIT,
+  RUN_RECONCILED_EVIDENCE_KIND,
+  RUN_RECONCILE_DECISIONS,
+  RUN_RETRY_STATEMENT,
+  appendIntegrityVerdict,
+  assessHqBackupCandidate,
+  backupRecordKey,
+  backupRowToView,
+  classifyInterruptedRun,
+  deriveRunRecord,
+  ensureReliabilitySchema,
+  isReportableRunOutcome,
+  isRunFailureCategory,
+  isRunKind,
+  isRunReconcileDecision,
+  IMMUTABLE_LEDGER_ABSENT_EVIDENCE_KIND,
+  INTEGRITY_ASSESSED_EVIDENCE_KIND,
+  standingIntegrityVerdict,
+  loadBackupRecords,
+  loadRun,
+  loadRunByKey,
+  loadRunEvents,
+  loadRuns,
+  reliabilityCommandCapabilityState,
+  reliabilityCommandContractDrift,
+  reliabilitySchemaPresent,
+  uncommittedReconciliationWitnesses,
+  runAttemptGeneration,
+  runAttemptKey,
+  runIdempotencyKey,
+  summarizeReliability,
+  type BackupRecordView,
+  type HqCanonicalInterruptions,
+  type HqIntegrityView,
+  type HqRecoveryClassification,
+  type HqRecoveryReport,
+  type HqReliabilityPosture,
+  type ReliabilitySnapshotView,
+  type RunFailureCategory,
+  type RunEventKind,
+  type RunKind,
+  type RunOutcome,
+  type RunReconcileDecision,
+  type RunRecord,
+} from './reliability-command.js';
+import {
+  BUDGET_POLICY_STATEMENT,
+  BUDGET_SCOPES,
+  BUDGET_WINDOWS,
+  BUDGET_READ_LIMIT,
+  CONTEXT_SIZES,
+  COST_READ_LIMIT,
+  DECISION_READ_LIMIT,
+  DECISION_RESULTS,
+  DEFAULT_PERMITTED_TIERS,
+  ESCALATION_STATEMENT,
+  ESCALATION_TRIGGERS,
+  INTELLIGENCE_COMMAND_CAPABILITY,
+  INTELLIGENCE_LATENCY_STATEMENT,
+  INTELLIGENCE_ROUTING_STATEMENT,
+  INTELLIGENCE_TIERS,
+  LATENCY_REQUIREMENTS,
+  combineBudgetEvaluations,
+  MAX_COST_BASIS_LENGTH,
+  MAX_COST_MINOR_UNITS,
+  MAX_DECISION_LABEL_LENGTH,
+  MAX_INTEL_NOTE_LENGTH,
+  MAX_DECISION_ID_LENGTH,
+  MAX_MODEL_ID_LENGTH,
+  MAX_PROVIDER_ID_LENGTH,
+  MODEL_AVAILABILITY_STATES,
+  readStoredCostFact,
+  MODEL_CAPABILITY_FACTS,
+  MODEL_LOCALITIES,
+  OBSERVATION_READ_LIMIT,
+  OBSERVATION_SOURCES,
+  PRIVACY_REQUIREMENTS,
+  TASK_COMPLEXITIES,
+  WORK_KINDS,
+  COST_LEDGER_STATEMENT,
+  budgetKey,
+  budgetRowToRecord,
+  computeRoutingProposal,
+  costEntryKey,
+  costEntryToRecord,
+  decisionIdempotencyKey,
+  decisionOutcomeKey,
+  deriveDecisionRecord,
+  deriveEscalation,
+  emptyIntelligenceSnapshot,
+  ensureIntelligenceSchema,
+  evaluateBudget,
+  intelligenceCommandCapabilityState,
+  intelligenceCommandContractDrift,
+  intelligenceSchemaPresent,
+  isBudgetScope,
+  isBudgetWindow,
+  isCurrencyCode,
+  isDecisionResult,
+  isEscalationTrigger,
+  canonicalBudgetScopeId,
+  isIdentifierSlug,
+  normalizeProviderId,
+  LOCAL_ONLY_TIER,
+  isIntelligenceTier,
+  isModelAvailability,
+  isModelCapabilityFact,
+  isModelLocality,
+  isObservationSource,
+  latestBudgetFor,
+  loadBudgets,
+  loadCostEntries,
+  loadDecision,
+  loadDecisionByKey,
+  loadDecisionOutcomes,
+  loadDecisions,
+  loadModelObservations,
+  normalizeCostFact,
+  observationIdempotencyKey,
+  proposalSatisfiesReviewRequirement,
+  riskClassForRouting,
+  summarizeIntelligence,
+  summarizeIntelligenceAnalytics,
+  tierRank,
+  type BudgetDecision,
+  type BudgetEvaluation,
+  type BudgetRecord,
+  type BudgetRow,
+  type BudgetScope,
+  type GoverningBudgetScope,
+  type BudgetWindow,
+  type ContextSize,
+  type CostEntryRecord,
+  type CostEntryRow,
+  type CostFactRefusal,
+  type CostProvenance,
+  type CostUnitKind,
+  type DecisionRecord,
+  type DecisionResult,
+  type EscalationProposal,
+  type EscalationTrigger,
+  type IntelligenceAnalyticsView,
+  type IntelligencePostureView,
+  type IntelligenceSnapshotView,
+  type IntelligenceTier,
+  type LatencyRequirement,
+  type ModelAvailability,
+  type ModelCapabilityFact,
+  type ModelLocality,
+  type ModelObservationRow,
+  type ObservationSource,
+  type PrivacyRequirement,
+  type RoutingProposal,
+  type TaskCharacteristics,
+  type TaskComplexity,
+  type WorkKind,
+} from './intelligence-command.js';
+import {
+  INTEGRITY_DEPTH_STATEMENT,
+  SAFE_MODE_STATEMENT,
+  ensureIntegrityCheckpoints,
+  ensureLedgerRowidGuards,
+  ensureUniqueReentryGuards,
+  ensureWriteOnceIdentityGuards,
+  fullIntegrity,
+  observeImmutabilityAsFound,
+  recordHqSchemaEnsured,
+  recordIntegrityCheckpoint,
+  restoredImmutableTables,
+  structuralIntegrity,
+  verifyHqBackupFile,
+  type HqIntegrityReport,
+  type RecordedIntegrityVerdict,
+} from '../store/integrity.js';
+import {
   PROJECT_ALLOWED_TRANSITIONS,
   canTransitionProject,
   isProjectStatus,
@@ -632,6 +1040,7 @@ import {
 } from './truth-command.js';
 import {
   ACTION_READ_LIMIT,
+  ACTION_RECONCILED_EVIDENCE_KIND,
   EXTERNAL_ACTION_KILL_SCOPE,
   MAX_ACTION_CONTEXT_REFS,
   MAX_ACTION_NOTE_LENGTH,
@@ -658,6 +1067,7 @@ import {
   sideEffectGeneration,
   sideEffectHolder,
   sideEffectKey,
+  sideEffectIdentityPayload,
   sideEffectKeyBase,
   snapshotDrift,
   stateAdmitsAttempt,
@@ -772,8 +1182,10 @@ import {
   MAX_QUESTION_LENGTH,
   SEARCH_SOURCES,
   assembleAnswer,
+  assertRetrievalTextSafe,
   normalizeSearchQuery,
   resolveRetrievalAdapter,
+  RetrievalSafetyError,
   runCompanySearch,
   searchSourceDescriptor,
   sourceStatuses,
@@ -789,6 +1201,7 @@ import {
   type SearchIndexSnapshotView,
   type SearchSourceId,
 } from './search-command.js';
+import { assertAssignable } from '../handover/replacement.js';
 import { isClientIdentityKey } from '../live/auth.js';
 import { ensureMemoryTables, memorySchemaPresent, MemoryStore, searchMemory } from '../memory/store.js';
 import {
@@ -875,7 +1288,46 @@ export type OpsErrorCode =
   | 'unknown_product'
   | 'unrecognized_product_type'
   | 'product_lifecycle_conflict'
-  | 'invalid_product_lifecycle_move';
+  | 'invalid_product_lifecycle_move'
+  // Phase 13 — advanced reliability. Seven codes, and deliberately none that
+  // names a retry: there is no path here that reopens an uncertain outcome,
+  // so there is nothing for a refusal to be the opposite of.
+  // `safe_mode_engaged` is the one refusal HQ gives about ITSELF — it does not
+  // mean the request was wrong, it means HQ will not add to a record it cannot
+  // currently stand behind. `run_key_conflict` is the seventh (Wave 5 Medium
+  // 4): two different pieces of work that derive the same run key are refused
+  // rather than silently folded onto one run.
+  | 'safe_mode_engaged'
+  | 'unknown_run'
+  | 'run_state_conflict'
+  | 'run_key_conflict'
+  | 'run_attempt_refused'
+  | 'stale_run_claim'
+  | 'backup_verification_failed'
+  // Phase 14 — cost + intelligence optimization. Eight codes, and deliberately
+  // none that names an activation, a purchase or a spend: no path here can
+  // attempt one, so no path here can refuse one either. Every code below is a
+  // refusal to RECORD something HQ could not stand behind, or a refusal to
+  // route below what the policy requires.
+  | 'unknown_intelligence_decision'
+  | 'cost_provenance_conflict'
+  | 'budget_ceiling_blocks'
+  | 'tier_not_permitted'
+  | 'tier_below_policy_floor'
+  | 'review_tier_required'
+  // Wave 5 correction round fifteen, High 3: a caller-named tier on work
+  // recorded as `local_only`. Distinct from `tier_not_permitted`, which is
+  // about what the budget policy will pay for; this one is about where the
+  // work's MATERIAL may go, and no budget, permitted set or escalation
+  // widens it.
+  | 'privacy_requires_local'
+  | 'intelligence_routing_refused'
+  | 'escalation_refused'
+  // Added by the Wave 5 correction (Medium finding B-5): a second cost entry
+  // whose IDENTITY matches one already recorded but whose FIGURE does not.
+  // Deduping two entries that say different things is how a fabricated zero
+  // permanently suppressed a real amount, so the disagreement is stated.
+  | 'cost_entry_conflict';
 // Phase 10 adds NO refusal code: its two reads cannot fail (a derivation over
 // whatever the canonical stores hold), `getBrief` answers null for an id that
 // is not in the ledger, and `issueBrief` refuses only through the codes the
@@ -1186,6 +1638,81 @@ function assignmentBarrier(task: OperatorTask): OpsError | null {
     };
   }
   return null;
+}
+
+/**
+ * The scope every piece of work is measured against, always.
+ *
+ * `deployment`/`total` deliberately: the widest, longest-lived ceiling, so the
+ * question is answered against the policy that constrains EVERYTHING rather
+ * than against one that happens to be silent. With no ceiling recorded there
+ * at all, the answer is `requires_founder_decision` and the permitted set is
+ * the free local tier alone — never permission.
+ *
+ * It is the FLOOR of the derived scope set, not the whole of it: see
+ * `#governingBudgetScopes`, which adds the task's own mission(s), project(s)
+ * and bound provider, and every window on which a ceiling actually exists.
+ */
+const DEPLOYMENT_BUDGET_SCOPE = {
+  scopeKind: 'deployment' as const,
+  scopeId: 'deployment',
+  window: 'total' as const,
+};
+
+/**
+ * How far a recorded `occurredAt` may sit from the clock.
+ *
+ * `occurredAt` decides which `day` or `month` window a ceiling measures an
+ * entry in, so an unbounded one is a way to move real spend out of the window
+ * it belongs to. One hour ahead absorbs ordinary clock skew between a worker
+ * and HQ; thirty days behind absorbs a lane that records a batch of real
+ * observations late. Anything outside that is refused rather than quietly
+ * filed somewhere it did not happen — `recorded_at` is on the row too, so
+ * nothing is lost by insisting the two stay close.
+ */
+const MAX_COST_OCCURRED_AT_FUTURE_MS = 60 * 60_000;
+const MAX_COST_OCCURRED_AT_PAST_MS = 30 * 24 * 60 * 60_000;
+
+/**
+ * Turn a cost-fact refusal into a sentence a Founder can act on. One place, so
+ * the wording of "HQ will not invent a price" cannot drift between the
+ * observation registry and the cost ledger.
+ */
+function costRefusalMessage(refusal: CostFactRefusal): string {
+  switch (refusal) {
+    case 'unknown_provenance_carries_amount':
+      return 'An unknown cost may not carry an amount. Unknown stays unknown: record the provenance you ' +
+        'actually have, or record no amount at all.';
+    case 'known_provenance_without_amount':
+      return 'A cost with a stated provenance must carry an amount. If HQ does not know the amount, the ' +
+        'provenance is unknown — which is a real answer, not a failure.';
+    case 'amount_not_a_whole_number':
+      return 'amountMinorUnits must be a whole number of minor units; HQ stores no floating-point money.';
+    case 'amount_negative':
+      return 'amountMinorUnits may not be negative.';
+    case 'amount_out_of_bounds':
+      return `amountMinorUnits exceeds the recorded bound of ${MAX_COST_MINOR_UNITS} minor units.`;
+    case 'currency_missing':
+      return 'A recorded amount must name its currency; HQ never converts between currencies and cannot ' +
+        'infer one.';
+    case 'currency_malformed':
+      return 'currency must be a three-letter uppercase code.';
+    case 'unrecognized_provenance':
+      return 'provenance must be one of: estimated, provider_reported, billed, unknown.';
+    case 'unrecognized_unit_kind':
+      return 'unitKind must be a recognized unit; use unknown when the unit was not observed.';
+    case 'estimate_without_basis':
+      return 'An estimated amount must name its BASIS. An estimate whose origin nobody recorded is a ' +
+        'fabricated price with a label on it, and HQ will not store one.';
+    case 'basis_on_non_estimate':
+      return 'A basis belongs to an ESTIMATE and to nothing else. An observed, reported or billed amount ' +
+        'is a fact; a story about where it came from beside one is not a basis.';
+    case 'basis_too_long':
+      return `The basis exceeds ${MAX_COST_BASIS_LENGTH} characters. It is a short statement of where a ` +
+        'number came from, and it lands permanently in an append-only ledger.';
+    default:
+      return 'The cost figure was refused.';
+  }
 }
 
 /** Trim + bound one mission text field. Absent optional fields become null. */
@@ -1700,7 +2227,29 @@ export interface HeadquarterOperationsOptions {
    * `unknown_adapter`.
    */
   actionAdapters?: readonly ExternalActionAdapter[];
+  /**
+   * The identity of the PROCESS carrying this facade (Phase 13).
+   *
+   * Crash recovery classifies a run as interrupted when the process that
+   * opened it is not the process asking — that is the whole restart story, and
+   * it needs a name for "this process" that survives into the row.
+   *
+   * The default is minted ONCE per Node process at module load, so every
+   * facade in one process shares it and a genuine restart is genuinely a
+   * different one. It is supplied here only by a composition root (a host, a
+   * CLI, a test that is deliberately simulating a second process); nothing
+   * holding `ops` can change it, and it is never read from a request body.
+   */
+  processIdentity?: string;
 }
+
+/**
+ * This Node process's identity, minted once at module load.
+ *
+ * Deliberately not a hostname, a pid or anything an operator might read as
+ * stable across restarts: a restart MUST look different, and a pid is reused.
+ */
+const HQ_PROCESS_IDENTITY = `hq-process-${uuid()}`;
 
 /** Who an actor turned out to be, once resolved against both registries. */
 type ResolvedRequester =
@@ -1764,7 +2313,151 @@ let readGatewayActionHistory: (ops: HeadquarterOperations, taskId: string) => Ga
  * a public GitHub issue is published again, so it must not read the patchable
  * `queue.evidence.list` display surface.
  */
-let readTaskEvidenceRows: (ops: HeadquarterOperations, taskId: string) => CanonicalEvidenceRow[];
+let readTaskEvidenceRows: (ops: HeadquarterOperations, taskId?: string) => CanonicalEvidenceRow[];
+/**
+ * Same recipe for the canonical `op_tasks` ROW (Wave 5 correction round
+ * fifteen, Critical 1) — the sibling `readCapabilityRow` never had.
+ *
+ * Every decision that reads a capability row reads it BY a task, and the task
+ * lookup was the public, prototype-resident `queue.get`. Forging the task's
+ * `capabilityId` therefore forged the capability the hardened read went on to
+ * return honestly. Published to `taskRowFor` and to nothing else.
+ */
+let readTaskRow: (ops: HeadquarterOperations, taskId: string) => OperatorTask | null;
+/**
+ * Same recipe for the canonical `hq_mission_proposals` ROW (Wave 5 correction
+ * round sixteen, High B-3).
+ *
+ * `promoteProposal` is the ONE bridge from chat to executable work, and it
+ * decided on `this.getProposal(...)` — a public prototype method. With
+ * `HeadquarterOperations.prototype.getProposal` replaced to report
+ * `status: 'proposed'` and a substituted `payload`, an ALREADY-PROMOTED
+ * proposal promoted a second time:
+ *
+ * ```
+ * BASELINE second promotion: {"code":"proposal_not_open", ...}
+ * FORGED   second promotion: {"ok":true,"taskId":"cd4148fe-…"}
+ * op_tasks 1 → 2, the new row carrying {"branch":"attacker-controlled"} on
+ * github.open_pr, while hq_mission_proposals still read
+ * {"status":"promoted","payload":"{\"branch\":\"safe-branch\"}"}
+ * ```
+ *
+ * and the `mission_promoted_to_task` evidence attributed it to the honest
+ * proposal id. Published to `proposalRowFor` and to nothing else.
+ */
+let readProposalRow: (ops: HeadquarterOperations, proposalId: string) => MissionProposal | null;
+/**
+ * Same recipe for the `hq_approvals` row a task is currently bound to (Wave 5
+ * correction round sixteen, Medium B-6).
+ *
+ * `claudeDispatchEligibility` read it through `ops.queue.approvalFor(taskId)`
+ * — the task and capability reads immediately above it had been migrated for
+ * exactly this reason, and this one had not. On an approval row carrying
+ * `expires_at: 2000-01-01`:
+ *
+ * ```
+ * BASELINE {"eligible":false,"code":"approval_invalid","details":{"rejection":"approval_expired"}}
+ * FORGED   {"eligible":true}
+ * ```
+ *
+ * The publication itself still held further down the path, so what was forged
+ * was the READINESS VERDICT `src/cli/claude-dispatch.ts` prints to the
+ * Founder. Published to `approvalRecordFor` and to nothing else.
+ */
+let readApprovalRecord: (
+  ops: HeadquarterOperations,
+  taskId: string,
+) => ApprovalRecordForValidation | null;
+/**
+ * Same recipe for the two remaining reads the Founder-facing executor
+ * readiness verdict takes (Wave 5 correction round sixteen, Medium B-6 /
+ * B-7).
+ *
+ * `executorReadiness` printed PROVIDER IDENTITY — law 10 — and the handover
+ * freeze from `ops.queue.providerOf` and `ops.queue.assignabilityProblem`,
+ * both prototype slots and both invisible to the previous scan because it
+ * enumerated eight named surfaces. Neither was exploited by the review; both
+ * are migrated because the CLASS is what is being closed, not the list.
+ */
+let readDeclaredProvider: (ops: HeadquarterOperations, workerId: string) => string | null;
+let readAssignabilityProblem: (ops: HeadquarterOperations, workerId: string) => string | null;
+/**
+ * Same recipe for the FOURTH read the Founder-facing executor readiness
+ * verdict takes (Wave 5 correction round seventeen, Medium 2).
+ *
+ * Round sixteen migrated three of the four and left `ops.directory
+ * .getSpecialist` on the line immediately above the comment claiming the CLASS
+ * was closed. It is an own-property closure on the instance, which is not
+ * harder to patch than a prototype method but EASIER — a plain assignment on
+ * the object the caller already holds, with no prototype involved. Measured
+ * against the head `85b720d`:
+ *
+ * ```
+ * descriptor directory.getSpecialist: {"on":"own","value":"function","writable":true,"configurable":true,"frozen":false}
+ * BEFORE patch, unregistered ghost worker: {"ready":false,"registered":false,"active":false,"hasCapability":false}
+ * AFTER  patch, unregistered ghost worker: {"ready":false,"registered":true,"active":true,"hasCapability":true}
+ * ```
+ *
+ * `ready` did not move — the migrated bindings refuse independently — so what
+ * was forged is WORKER FACTS on a verdict the Founder reads, which law 8
+ * forbids on its own terms. `directory.getSpecialist` stays exactly as it is
+ * for display callers. Published to `specialistRecordFor` and to nothing else.
+ */
+let readSpecialistRecord: (
+  ops: HeadquarterOperations,
+  workerId: string,
+) => ReturnType<HeadquarterStore['getSpecialist']>;
+/**
+ * Same recipe for the STANDING PRE-APPROVAL SET (Wave 5 correction round
+ * eighteen, High A).
+ *
+ * Every sibling above was migrated because a patchable read decided something.
+ * `policyContext` was left behind on the argument that the object it returns is
+ * frozen — which is true of the VALUE and irrelevant to the ACCESSOR. `get
+ * policyContext()` is a configurable prototype accessor and the instance takes
+ * an own property of the same name, so both spellings replace it:
+ *
+ * ```
+ * BEFORE:                     {"eligible":false,"code":"approval_invalid", … "its Founder approval has expired. Nothing was dispatched."}
+ * AFTER (prototype patch):    {"eligible":true,"task":{… ,"status":"queued", …
+ * AFTER (own-property patch): {"eligible":true,"task":{… ,"status":"queued", …
+ * ```
+ *
+ * `claudeDispatchEligibility` hands this context to `classifyCapability`, and
+ * `classification.requiresApproval` decides whether the approval-expiry check
+ * round sixteen hardened runs AT ALL. So the hardened read one line below was
+ * reachable only through a patchable one. Published to `policyContextFor` and
+ * to nothing else; `ops.policyContext` stays exactly as it is for the console
+ * and the snapshot, which display it.
+ */
+let readPolicyContext: (ops: HeadquarterOperations) => PolicyContext;
+/**
+ * Same recipe for the `hq_op_task_meta` row (Wave 5 correction round eighteen,
+ * Low D).
+ *
+ * `readMeta` moves no authority, and the census reason that excused it was
+ * still wrong about WHERE it goes: its `title` and `project` are rendered by
+ * `renderDispatchIssue` into the body of a real GitHub issue, so its consumer
+ * is an external publication rather than the text of a verdict. Bound rather
+ * than merely re-described. Published to `taskMetaFor` and to nothing else;
+ * `readMeta` stays as the convenience read for display callers.
+ */
+let readTaskMeta: (ops: HeadquarterOperations, taskId: string) => TaskMeta | null;
+/**
+ * Same recipe for the reconciliation authority answer (Wave 5 correction round
+ * eighteen, High A's audit of the rest of the dispatch lane).
+ *
+ * Not one of the four findings — found by auditing every remaining `ops.*` use
+ * in `dispatch.ts` after High A, as the review asked. `resolveUnknownDispatch`
+ * treats `reconciliationAuthorityRefusal(actor) === null` as its ONE authority
+ * gate before writing a terminal outcome for an unresolved attempt, and the
+ * public method it asked is a prototype slot. Published to
+ * `reconciliationAuthorityRefusalFor` and to nothing else.
+ */
+let readReconciliationAuthorityRefusal: (
+  ops: HeadquarterOperations,
+  actor: string,
+) => string | null;
 
 export class HeadquarterOperations {
   readonly queue: OperatorQueue;
@@ -1804,14 +2497,23 @@ export class HeadquarterOperations {
     return this.#principalOf(id);
   }
   /**
-   * Effective worker directory. `#private`: it was a public collaborator, so
-   * `ops.workers.allowedCapabilities = () => [cap]` forged a least-privilege
-   * grant, and `ops.principals.get = () => ({ approvalAuthority: true, ... })`
-   * forged the Founder gate itself — making the authority METHOD `#private`
-   * bought nothing while the registry it resolves through stayed patchable
-   * (issue #200, Codex exact-head finding on `f91563f`).
+   * Effective worker directory, as OWN-PROPERTY CLOSURES captured at
+   * construction (Wave 5 correction round fifteen, Critical 2 / High 2).
+   *
+   * `#private` was already right and already insufficient. The field held an
+   * instance of the EXPORTED `SpecialistDirectoryAdapter` /
+   * `NarrowingWorkerDirectory`, so `this.#workers.assignability(workerId)` was
+   * private storage with public dispatch: every call resolved through a
+   * replaceable prototype. A hostile review disabled a member through ordinary
+   * configuration, watched `executeAction` refuse with `worker_not_assignable`
+   * and zero adapter calls, then patched
+   * `NarrowingWorkerDirectory.prototype.assignability` and got an
+   * irreversible, PUBLIC external action executed — two lines above the
+   * already-hardened `#grantOf`. Prototype dispatch is gone from every one of
+   * this directory's three reads; see `WorkerDirectoryReads` in `ports.ts` for
+   * the full reproduction and the honest limit.
    */
-  readonly #workers: WorkerDirectoryPort;
+  readonly #workers: WorkerDirectoryReads;
   /**
    * READS of the effective directory, as own-property closures. Callers and
    * tests legitimately ask what a worker is granted; enforcement resolves
@@ -1948,6 +2650,97 @@ export class HeadquarterOperations {
   readonly #productStorePresent: boolean;
 
   /**
+   * The Phase 13 run ledger / verified-backup register, same read-only-handle
+   * rule as every store flag above.
+   */
+  readonly #reliabilityStorePresent: boolean;
+
+  /**
+   * The Phase 14 model-observation registry, budget policy, routing-decision
+   * ledger and cost ledger, same read-only-handle rule as every store flag
+   * above. Note what it does NOT gate: nothing in the operator queue, the
+   * policy engine, the approval path, the provider binding or the action
+   * gateway reads any of these tables, so a handle without this schema
+   * executes exactly as much as a handle with it.
+   */
+  readonly #intelligenceStorePresent: boolean;
+
+  /** This process's identity. Written onto every run and every recovery. */
+  readonly #processIdentity: string;
+
+  /**
+   * The LATCHED safe-mode verdict, and the report behind it.
+   *
+   * ENFORCEMENT STATE, and therefore a `#private` field rather than anything a
+   * caller can reach: it is read by the guards that refuse Founder-gated
+   * writes, approvals, kill-switch releases, claims and external execution. A
+   * same-realm patch of any public reliability read changes what the patcher
+   * sees and nothing about what is refused.
+   *
+   * Assessed STRUCTURALLY at construction — the schema catalogue and the
+   * durability pragmas, which cost three catalogue reads and four pragmas and
+   * are therefore affordable on every construction. The full assessment
+   * (`integrity_check`, `foreign_key_check`, whole-log evidence verification)
+   * is proportional to the data and is an explicit act: `assessHqIntegrity`.
+   * Both latch here, and the depth is carried on the report so a cheap pass is
+   * never reported as a full one.
+   *
+   * Latched rather than recomputed per call on purpose: a guard that
+   * re-derives its own precondition on every write is a guard whose cost grows
+   * with the write rate, and one an attacker can time. Clearing it takes a
+   * fresh assessment that finds nothing blocking.
+   *
+   * The engagement is DURABLE (Wave 5 High 2). It used to live only here, in a
+   * private field rebuilt at every construction from the cheap structural
+   * pass — which never runs the evidence-chain verification — so an
+   * `evidence_chain_broken` engagement evaporated at the next process start
+   * with the chain still broken, and an `append_only_guard_missing` one
+   * survived exactly one boot before `ensure*Schema` re-created the trigger.
+   * Meanwhile `SAFE_MODE_STATEMENT`, which crosses to the Founder browser and
+   * to `hq-snapshot.json`, said safe mode is never cleared by a boot. It is now
+   * APPENDED to `hq_reliability_verdicts` (append-only, INSERT-only, trio-
+   * guarded and in the integrity census) and re-read at construction, so the
+   * statement is true: a boot can only ADD an engagement, and only a full
+   * assessment that finds nothing blocking clears one.
+   *
+   * Both Wave 5 correction lanes built this durability independently, one as a
+   * dedicated `hq_safe_mode_latch` table. The verdict ledger survived the
+   * reconciliation and that table was deleted rather than kept beside it: two
+   * ledgers holding one verdict is a second truth. What the other lane's
+   * version did better is carried here — a recorded verdict that says ENGAGED
+   * still engages even when its stored finding list could not be read back
+   * through the closed vocabulary (`carryRecordedVerdict`), and the residual it
+   * disclosed about a raw appender is stated on `standingIntegrityVerdict`
+   * instead of glossed.
+   *
+   * "and to `hq-snapshot.json`" above was FALSE when it was written and is true
+   * now (Wave 5 correction round fifteen, Medium 2). `SAFE_MODE_STATEMENT`
+   * reached `#integrityView()` and the refusal message only, both authenticated;
+   * executed with safe mode engaged at `c23dd0a` it was on no part of the
+   * unauthenticated artifact. `summarizeReliability` now composes it into the
+   * snapshot's reliability section — the same constant, once, so the two
+   * surfaces cannot say different things — and `live-snapshot.test.ts` pins it.
+   */
+  #integrityReport: HqIntegrityReport;
+
+  /**
+   * The declared engine-immutable ledgers that were ABSENT when this process
+   * opened the file and that HQ's own ensure pass has since re-created EMPTY.
+   *
+   * Held for `assessHqIntegrity`, and that is the whole point (Wave 5
+   * correction round five, Medium 1). The boot census reported the drop and
+   * engaged safe mode; the Founder's full assessment then asked about "the file
+   * as it now stands", found the re-created ledgers healthy, and recorded a
+   * verdict of `safeMode: false` with an EMPTY findings list — HQ affirmatively
+   * certifying a store it had just told the Founder was destroyed, and handing
+   * `releaseKillSwitch` back out. Re-creating a ledger is not repairing it, so
+   * this observation is carried into the assessment and is not clearable by it.
+   *
+   * `#private` and frozen: it is an input to an enforcement verdict.
+   */
+  readonly #immutableLedgersRestoredAtBoot: readonly string[];
+
+  /**
    * The external-action adapters, keyed by id — `#private`, handed in by the
    * composition root once, and read by the gateway's execute path ONLY. There
    * is deliberately no register/unregister method: an adapter is an execution
@@ -1985,6 +2778,49 @@ export class HeadquarterOperations {
   readonly #capabilityFromStore: (id: string) => Capability | null;
 
   /**
+   * The evidence-chain verification that the SAFE-MODE verdict is computed
+   * from (Wave 5 correction; both review lanes reached this finding
+   * independently on `c9ddecc`, one as Critical, one as High).
+   *
+   * `assessHqIntegrity` used to pass `() => this.queue.evidence.verifyChain()`
+   * into `fullIntegrity`. `queue` is a public `readonly` field and
+   * `queue.evidence` is a mutable own-property object literal that #200
+   * deliberately documents as a patchable READ surface — safe exactly while no
+   * enforcement decision is taken on it. `evidence_chain_broken` is one of the
+   * four `SAFE_MODE_BLOCKING_FINDINGS` and the only one that detects tampering
+   * with HQ's own audit record, and the full assessment is the ONLY path that
+   * can clear the latch. So that closure WAS an enforcement decision reached
+   * through a patchable convenience surface: with
+   * `ops.queue.evidence.verifyChain = () => null` the finding never engaged,
+   * and — worse — a legitimate Founder assessment then CLEARED an already
+   * latched safe mode, handing `releaseKillSwitch` and `claimNext` back out
+   * against a chain that was genuinely broken.
+   *
+   * So the verification is a `#private` closure over this facade's own handle
+   * and the module-level `verifyEvidenceChain`, exactly like
+   * `#capabilityFromStore` and `#runClaimFact`. There is no property on any
+   * exposed object that reaches it and no prototype method in the path:
+   * `EvidenceLog.verifyChain` is now a thin delegate over the same module
+   * function rather than the computation itself, and `EvidenceLog.list` is out
+   * of the path entirely, so patching either — on an instance or on
+   * `EvidenceLog.prototype` — moves what the patcher sees and nothing that
+   * safe mode decides.
+   *
+   * The other correction lane fixed the same defect by INLINING a second copy
+   * of the hash formula in this class. That copy was dropped in the merge and
+   * this one kept, on the argument that decided it: two computations of one
+   * verdict can drift, and a drifted verifier reports a false break — which
+   * under safe mode is an outage, not a warning. The one thing that copy did
+   * better, treating an unparseable payload as a BREAK rather than letting
+   * `JSON.parse` throw out of the assessment, was carried into
+   * `verifyEvidenceChain` itself, so nothing was lost with it.
+   *
+   * Returns the `seq` of the first entry that does not verify, or null when the
+   * whole chain does.
+   */
+  readonly #verifyEvidenceChainFromStore: () => number | null;
+
+  /**
    * The kill-switch ROW read, from the database (Sol M1, PR #266 review
    * 5124774932).
    *
@@ -2006,6 +2842,28 @@ export class HeadquarterOperations {
    * authority, not a peek.
    */
   readonly #killSwitchEngagedFromStore: (capabilityId?: string) => boolean;
+
+  /**
+   * The ADVISORY assignment intent for a task, read from `hq_op_task_meta`
+   * through a closure over `#db` (Wave 5 correction round sixteen, Critical
+   * B-1).
+   *
+   * `claimNext` read it through `this.readMeta(...)`, a public prototype
+   * method. `HeadquarterOperations.prototype.readMeta = () => null` turned
+   * `{"code":"assigned_to_other_worker"}` into
+   * `{"ok":true,"claimedBy":"jules"}` and left `op_tasks` at `claimed_by:
+   * jules, status: assigned, fence: 1` with `hq_op_task_meta` still naming
+   * `claude` — and the stolen claim then ran `startTask` → `proposeAction` →
+   * `authorizeAction` → `executeAction` to a real adapter call.
+   *
+   * The `#capabilityFromStore` recipe: an own field holding a function defined
+   * in this module over `#db`, with no prototype in its dispatch path. The
+   * canonical enforcement of the same rule now also lives one layer lower, in
+   * `OperatorQueue.claim`, so a caller that never comes through this facade is
+   * refused too; this closure keeps the typed refusal ordering the Founder
+   * surface already renders.
+   */
+  readonly #assignmentIntentFromStore: (taskId: string) => string | null;
 
   /**
    * The same canonical `op_kill_switch` read over an ARBITRARY scope list
@@ -2041,6 +2899,17 @@ export class HeadquarterOperations {
     };
     this.#killSwitchEngagedFromStore = (capabilityId?: string): boolean =>
       this.#engagedKillSwitchScopeFromStore([GLOBAL_SCOPE, ...(capabilityId ? [capabilityId] : [])]) !== null;
+    this.#assignmentIntentFromStore = (taskId: string): string | null => {
+      try {
+        const row = db
+          .prepare(`SELECT assigned_worker_id FROM hq_op_task_meta WHERE task_id = ?`)
+          .get(taskId) as { assigned_worker_id: string | null } | undefined;
+        const assigned = row?.assigned_worker_id ?? null;
+        return typeof assigned === 'string' && assigned.length > 0 ? assigned : null;
+      } catch {
+        return null;
+      }
+    };
     // Adapters are validated at construction: a broken contract is a
     // composition error and must surface where the composition happened.
     const adapters = new Map<string, ExternalActionAdapter>();
@@ -2066,12 +2935,43 @@ export class HeadquarterOperations {
       return {
         id: row.id as string,
         description: row.description as string,
-        riskClass: row.risk_class as Capability['riskClass'],
+        // Read through the vocabulary, never ASSERTED into it (Wave 5
+        // Medium 5). `op_capabilities` carries no immutability triggers, so a
+        // raw `UPDATE ... SET risk_class = 'totally_harmless'` is a writable
+        // row — and the cast made that string a typed `RiskClass`, which then
+        // dropped the routing floor from `high` to `deterministic_local` and
+        // the review requirement from `high` to `undefined` (read as "no
+        // reviewer required"). An unreadable risk class is the STRICTEST one,
+        // never the convenient one: the same fail-closed rule
+        // `#characteristicsFor` already applies to a MISSING capability row.
+        riskClass: readStoredRiskClass(row.risk_class),
         sideEffect: !!row.side_effect,
         idempotent: !!row.idempotent,
         enabled: !!row.enabled,
       };
     };
+    // The safe-mode evidence-chain verification: a closure over this handle
+    // and the module-level computation, exactly like `#capabilityFromStore`
+    // above. See the field's own note — the verdict this feeds is enforcement
+    // state, so it may not be reached through `queue.evidence` (a patchable
+    // read surface by #200's design) nor through any prototype method.
+    this.#verifyEvidenceChainFromStore = () => verifyEvidenceChain(db);
+    // Phase 13: observe the append-only guards AS THE FILE WAS FOUND, before
+    // any `ensure*Schema` call below re-creates a missing one. Those calls are
+    // `CREATE TRIGGER IF NOT EXISTS` and therefore repair a dropped guard on
+    // every construction; a check run after them would find a healthy file and
+    // report one, which would mean HQ silently repaired a tamper and then said
+    // nothing about it. HQ can re-create the guards it declares; it cannot know
+    // what was written to the file while they were absent, and safe mode is
+    // exactly the posture for that.
+    // Both halves of the same observation, at the same instant (Wave 5
+    // correction round three, High A1). Guards absent from a ledger that is
+    // there, AND ledgers that are not there at all: a `DROP TABLE` is DDL, no
+    // BEFORE trigger refuses it, and the guard census deliberately skips an
+    // absent table — so seven declared immutable ledgers could be dropped and
+    // the full assessment still reported a completely clean store while the
+    // ensures below recreated each one EMPTY.
+    const immutabilityAsFound = observeImmutabilityAsFound(db);
     ensureApplicationSchema(db);
     ensureMissionCommandSchema(db);
     ensureProjectCommandSchema(db);
@@ -2082,6 +2982,57 @@ export class HeadquarterOperations {
     ensureCollaborationSchema(db);
     ensureBriefSchema(db);
     ensureProductFactorySchema(db);
+    ensureReliabilitySchema(db);
+    ensureIntelligenceSchema(db);
+    // The hash-chained audit log's ENGINE guards. Installed here, beside every
+    // other ensure and after the observation above, so a dropped guard is
+    // reported before it is repaired — see `ensureEvidenceGuards`.
+    ensureEvidenceGuards(db);
+    // The DURABLE COMMITMENT ledger, ensured here for exactly the same reason
+    // and in exactly the same position: after the as-found observation, so a
+    // tamperer who dropped it is reported before HQ re-creates it empty.
+    ensureIntegrityCheckpoints(db);
+    // The universal ROWID guard on every declared ledger, in the same position
+    // and for the same two reasons (Wave 5 correction round thirteen, High 1):
+    // after the as-found census so a dropped guard is reported before it is
+    // repaired, and after every `ensure*Schema` above so the ledgers this build
+    // declares are all present to be guarded. See `ensureLedgerRowidGuards`.
+    ensureLedgerRowidGuards(db);
+    // The write-once IDENTITY guards on the tables that are joined to by value
+    // and are not append-only ledgers (Wave 5 correction round thirteen,
+    // High 3). Same position, same rule: after the as-found census.
+    ensureWriteOnceIdentityGuards(db);
+    // The DERIVED unique-index guard, on the WRITE-ONCE IDENTITY TABLES only
+    // (Wave 5 correction round fourteen, High 2). Same position and same rule
+    // as the two above: after the as-found census, and after every
+    // `ensure*Schema`, because the clause is derived from the INDEXES those
+    // schemas create — a guard built before them would be built against a file
+    // that does not yet declare what it must cover.
+    //
+    // This comment used to say "on every declared ledger and every write-once
+    // identity table", which was the opposite of the decision recorded two
+    // directories away (Wave 5 correction round fifteen, Medium 1). Measured at
+    // `c23dd0a`, exactly one such trigger exists on a fresh file —
+    // `trg_op_tasks_no_unique_reentry` — because `uniqueReentryTargets`
+    // (`store/integrity.ts`) maps `WRITE_ONCE_IDENTITY_TABLES` and nothing else.
+    // The 33 declared ledgers keep their hand-written `no_replace_unique`-family
+    // guards and are held by an EXECUTED test (`unique-index-reentry.test.ts`)
+    // rather than by an installed clause. `uniqueReentryTargets` carries the
+    // measurement that rejected the wider form; this is the comment a
+    // maintainer reads at the install site, so it points there instead of
+    // asserting a coverage the call does not have.
+    ensureUniqueReentryGuards(db);
+    // The durable "HQ has ensured this file" mark, stamped into
+    // `PRAGMA user_version` AFTER the ensures and read BEFORE them, next time
+    // (Wave 5 correction round four, High 1). It is the half of the
+    // first-boot discriminator that no `DROP TABLE` can reach: dropping every
+    // declared ledger used to empty the ledger half of the discriminator,
+    // which read as a first boot and returned a completely silent census over
+    // a database whose workers, capabilities, principals, tasks and kill
+    // switch were all still there. Written by the writable facade
+    // construction and by nothing else, so a fresh file HQ's own components
+    // have already written rows to is still correctly read as a first boot.
+    recordHqSchemaEnsured(db);
     // A writable construction just ensured the mission/project/memory tables.
     // A READ-ONLY one (the hq:snapshot path) may be observing an older file
     // that has some or none of them — the ensures above deliberately write
@@ -2096,6 +3047,70 @@ export class HeadquarterOperations {
     this.#collaborationStorePresent = db.readonly ? collaborationSchemaPresent(db) : true;
     this.#briefStorePresent = db.readonly ? briefSchemaPresent(db) : true;
     this.#productStorePresent = db.readonly ? productFactorySchemaPresent(db) : true;
+    this.#reliabilityStorePresent = db.readonly ? reliabilitySchemaPresent(db) : true;
+    this.#intelligenceStorePresent = db.readonly ? intelligenceSchemaPresent(db) : true;
+    this.#processIdentity = options.processIdentity?.trim() || HQ_PROCESS_IDENTITY;
+    // The cheap half, at every construction. See the field's own note for why
+    // the expensive half is an explicit act instead.
+    const recordedVerdict = standingIntegrityVerdict(db);
+    // Only the ones HQ's own schema has just re-created count as a finding:
+    // that is HQ saying "my schema declares this ledger and this file did not
+    // have it". A read-only handle re-creates nothing, so an honestly older
+    // file reports nothing — see `restoredImmutableTables`.
+    //
+    // HELD on the instance, because `assessHqIntegrity` needs it too (Wave 5
+    // correction round five, Medium 1). A full assessment asks about the file
+    // as it now stands, and by then HQ has already re-created the dropped
+    // ledgers EMPTY — so the assessment used to read 31 healthy ledgers and
+    // record a CLEAN verdict over a store the same process had just told the
+    // Founder was gutted, which handed `releaseKillSwitch` straight back. The
+    // destruction is not repaired by the re-creation, so it may not be cleared
+    // by an assessment that only sees the repair.
+    this.#immutableLedgersRestoredAtBoot = Object.freeze(
+      restoredImmutableTables(db, immutabilityAsFound.tablesAbsent),
+    );
+    // The DURABLE commitment HQ recorded about its own audit log is read INSIDE
+    // `structuralIntegrity`, not injected here (`contradictedChainCommitment`).
+    // The concurrent lane's answer to the same question passed the breach in as
+    // a value computed from the verdict ledger; that mechanism is gone and this
+    // one survives — see the boundary note on `recordIntegrityCheckpoint`. The
+    // property that mattered is unchanged: the cheap pass pays one indexed
+    // lookup, so a `DROP TABLE op_evidence` plus a rebuild is caught at BOOT and
+    // not only inside a Founder assessment.
+    this.#integrityReport = structuralIntegrity(db, {
+      guardsMissingAsFound: immutabilityAsFound.guardsMissing,
+      immutableTablesAbsentAsFound: this.#immutableLedgersRestoredAtBoot,
+      reliabilitySchemaPresent: this.#reliabilityStorePresent,
+      // The RECORDED verdict, re-read from HQ's own append-only verdict ledger
+      // (Wave 5 review, High finding 1). A structural pass cannot see a broken
+      // evidence chain, and the ensures above have already re-created any guard
+      // a tamperer dropped, so without this a plain restart cleared a blocking
+      // verdict — and in a local-first CLI model every command is a new
+      // process. Every blocking finding it holds is re-raised, so the latch
+      // belongs to the record and not to one process's memory. Only
+      // `assessHqIntegrity` records a clean verdict, and only that clears it.
+      recordedVerdict,
+    });
+    // The boot-time COMMITMENT (Wave 5 correction round five, High 1). A
+    // commitment is only worth what its age allows: an assessment is an
+    // explicit Founder act and may be months apart, so HQ also commits at every
+    // construction that finds nothing blocking — which bounds the window a
+    // forger has to one process lifetime rather than to the gap between two
+    // Founder acts.
+    //
+    // Only when safe mode is CLEAR, because a commitment is HQ standing behind
+    // the record and safe mode is HQ saying it cannot. Nothing is written on a
+    // read-only handle, on a file with no checkpoint ledger, or when neither
+    // the chain nor any ledger mark has advanced — see
+    // `recordIntegrityCheckpoint`.
+    if (!this.#integrityReport.safeMode) {
+      recordIntegrityCheckpoint(db, {
+        id: `checkpoint-${uuid()}`,
+        recordedAt: nowIso(),
+        processId: this.#processIdentity,
+        recordedBy: 'hq_boot',
+      });
+    }
     this.#aiMemberRegistry = options.aiMemberRegistry ?? null;
     this.#store = options.store ?? new HeadquarterStore(db);
     // Company memory (Phase 5, issue #265): the issue-#120 store, finally
@@ -2124,14 +3139,31 @@ export class HeadquarterOperations {
         // happen after this constructor returns.
         (workerId) => this.#grantOf(workerId),
       );
+    // The safe-mode verdict, handed to the layer that actually owns the act of
+    // claiming (Wave 5 correction round ten, High 3). `#integrityReport` is a
+    // `#private` field of this class and the gate is a closure over `this`, so
+    // there is no property anywhere — on the queue, on its prototype, on this
+    // facade — that a caller can patch to change the answer. Installed for a
+    // SUPPLIED queue as well as a constructed one: a composition that hands in
+    // its own queue is exactly the composition the delegate route was reached
+    // through, and gates are OR-ed, so adding one can only ever refuse more.
+    installQueueSafeModeGate(this.queue, () => this.#integrityReport.safeMode);
     this.#queuePrivileged = granted;
     // The WRITE side of the worker → provider map lives here and nowhere else
     // (issue #200, Codex round-3 P1 #1). It is private: the only ways in are
     // `declareWorkerProvider`/`revokeWorkerProvider`, which resolve the actor
     // and require approval authority first.
     this.#workerProviderRegistrar = new WorkerProviderRegistrar(db);
-    this.#workers =
-      options.workers ?? narrowByRegistry(new SpecialistDirectoryAdapter(this.#store), options.memberRegistry);
+    // The CANONICAL execution directory, prototype-free (Wave 5 correction
+    // round fifteen, Critical 2 / High 2). `baseReads` is the operator-side
+    // registration authority; `this.#workers` is that narrowed by the Registry
+    // when one is supplied. A caller-supplied `options.workers` port wins
+    // entirely, exactly as `options.workers ?? narrowByRegistry(...)` did, and
+    // is bound once so at least the outer dispatch leaves the call path.
+    const baseReads: WorkerDirectoryReads = options.workers
+      ? bindDirectoryReads(options.workers)
+      : specialistDirectoryReads(db);
+    this.#workers = options.workers ? baseReads : composeDirectoryReads(baseReads, options.memberRegistry);
     this.#principals = options.humanPrincipals ?? new HumanPrincipalRegistry(db);
     this.#nominationSources = options.nominationSources ?? [];
     // Defensive, frozen copy. The caller's object (and the `Set` inside it)
@@ -2158,8 +3190,6 @@ export class HeadquarterOperations {
     // same-realm threat model there is no in-process fix for that; the boundary
     // that actually holds is a separate process or realm. See the PR discussion.
     const principalGet = bindGet(db, `SELECT * FROM hq_human_principals WHERE id = ?`);
-    const grantGet = bindGet(db, `SELECT allowed_capabilities FROM hq_specialists WHERE id = ?`);
-    const specialistGet = bindGet(db, `SELECT 1 FROM hq_specialists WHERE id = ?`);
     this.#principalOf = options.humanPrincipals
       ? (id: string) => this.#principals.get(id)
       : (id: string) => {
@@ -2173,22 +3203,21 @@ export class HeadquarterOperations {
             active: !!row.active,
           };
         };
-    this.#grantOf =
-      options.workers || options.memberRegistry
-        ? (workerId: string) => this.#workers.allowedCapabilities(workerId)
-        : (workerId: string) => {
-            const row = grantGet(workerId) as { allowed_capabilities: string } | undefined;
-            if (!row) return [];
-            try {
-              const parsed: unknown = JSON.parse(row.allowed_capabilities);
-              return Array.isArray(parsed) ? parsed.filter((c): c is string => typeof c === 'string') : [];
-            } catch {
-              return [];
-            }
-          };
-    this.#isRegisteredWorker = options.workers
-      ? (workerId: string) => this.#workers.isRegistered(workerId)
-      : (workerId: string) => specialistGet(workerId) !== undefined;
+    // ONE grant read for every composition (Wave 5 correction round fifteen,
+    // High 2). This used to be a database closure ONLY when neither
+    // `options.workers` nor `options.memberRegistry` was supplied — so
+    // supplying either silently opted back into prototype dispatch, and
+    // `NarrowingWorkerDirectory.prototype.allowedCapabilities = () => [cap]`
+    // turned a `not_permitted` claim into `{"ok":true,"status":"assigned"}`
+    // against an effective grant of `[]`. There is no branch to opt out of any
+    // more: `#workers` is prototype-free in all three compositions.
+    this.#grantOf = (workerId: string) => this.#workers.allowedCapabilities(workerId);
+    // Deliberately the BASE directory, not the narrowed one — unchanged
+    // behaviour, restated. This answers "is this id a worker rather than a
+    // human", and the narrowed directory recognises Registry-only ids as
+    // worker identities (see `NarrowingWorkerDirectory`); widening this read
+    // would be an authority migration, not a hardening.
+    this.#isRegisteredWorker = (workerId: string) => baseReads.isRegistered(workerId);
     this.directory = {
       listSpecialists: () => this.#store.listSpecialists(),
       latestStatusPerSubject: () => this.#store.latestStatusPerSubject(),
@@ -2210,6 +3239,132 @@ export class HeadquarterOperations {
     options.grantDispatchEvidence?.(
       issueDispatchEvidenceGrant(this, (entry) => this.#appendDispatchOutcome(entry)),
     );
+
+    // The boot-time observation is RECORDED when it is blocking, and only then
+    // (Wave 5 review, High finding 1).
+    //
+    // Without this the structural finding survived exactly one boot: every
+    // `ensure*Schema` above is `CREATE TRIGGER IF NOT EXISTS`, so THIS
+    // construction has already re-created whatever guard was dropped, and the
+    // next one finds a healthy file and says so. The tamper would then be
+    // forgotten by a restart — with no Founder ever seeing it, because seeing it
+    // is what would have prompted the assessment.
+    //
+    // Deliberately narrow: only a BLOCKING verdict, only when the standing
+    // record does not already hold one, only on a writable handle that carries
+    // the verdict ledger, and only when this facade actually constructed its
+    // own queue and therefore holds the privileged API. It goes through
+    // `privileged.reserve` like every other reliability write, so the "one
+    // reservation, one immediate transaction" property is unchanged, and it
+    // lands an evidence entry beside the row rather than a silent one.
+    this.#recordBootIntegrityVerdictIfBlocking(recordedVerdict);
+    // The ledger LOSS itself, recorded durably in the audit log even when a
+    // blocking verdict already stands (Wave 5 correction round four, Medium
+    // M3). `assessHqIntegrity` deliberately assesses the file as it NOW stands
+    // and is the only latch-clearing path, so without this a dropped ledger
+    // observed at boot was cleared by the next assessment with nothing
+    // anywhere recording that rows had gone missing. The verdict says a
+    // guard was absent; only this says WHICH ledger disappeared.
+    this.#recordImmutableLedgerLoss(immutabilityAsFound.tablesAbsent, db);
+  }
+
+  /**
+   * Append an evidence entry naming the engine-immutable ledgers this file did
+   * NOT carry, whenever any were absent as it was found.
+   *
+   * Unconditional on the standing verdict, and that is the correction: the
+   * verdict path below records at most one row and only when nothing blocking
+   * already stands, so on a database already in safe mode a SECOND ledger
+   * could be dropped and re-created empty with nothing recording it at all. A
+   * Founder full assessment then cleared the latch — correctly, because the
+   * file as it then stands is sound — and the fact that an audit ledger had
+   * been destroyed survived nowhere.
+   *
+   * It is an EVIDENCE entry rather than a verdict, deliberately: a verdict is a
+   * judgement HQ is currently making, and this is a fact about what was found.
+   * Facts belong in the append-only log, and the log outlives the latch.
+   */
+  #recordImmutableLedgerLoss(tablesAbsent: readonly string[], db: HqDatabase): void {
+    if (tablesAbsent.length === 0) return;
+    if (db.readonly) return;
+    if (!this.#queuePrivileged) return;
+    const privileged = this.#queuePrivileged;
+    // Only the ones HQ's own schema has since re-created, exactly as the
+    // structural pass counts them: an honestly older file reports nothing.
+    const restored = restoredImmutableTables(db, tablesAbsent);
+    if (restored.length === 0) return;
+    try {
+      privileged.reserve(() => {
+        privileged.appendEvidence({
+          actor: this.#processIdentity,
+          kind: IMMUTABLE_LEDGER_ABSENT_EVIDENCE_KIND,
+          payload: {
+            // Declared TABLE NAMES only — this package's own closed list — so
+            // the entry can never become a channel for stored content.
+            tables: restored,
+            observedAtConstruction: true,
+            executable: false,
+          },
+        });
+      });
+    } catch {
+      // A construction that cannot write its observation must still construct.
+      // The finding still stands in `#integrityReport` and still refuses.
+    }
+  }
+
+  /**
+   * Append the construction-time verdict when it is blocking and nothing
+   * standing already says so. Never throws out of the constructor: a facade
+   * that cannot record its observation still HOLDS it in `#integrityReport`
+   * and still refuses, which is the fail-closed half.
+   */
+  #recordBootIntegrityVerdictIfBlocking(recordedVerdict: RecordedIntegrityVerdict | null): void {
+    if (!this.#integrityReport.safeMode) return;
+    if (recordedVerdict?.safeMode) return;
+    if (this.#db.readonly || !this.#reliabilityStorePresent) return;
+    if (!this.#queuePrivileged) return;
+    const privileged = this.#queuePrivileged;
+    const findings = this.#integrityReport.observations.map((observation) => observation.finding);
+    const verdictId = `verdict-${uuid()}`;
+    try {
+      privileged.reserve(() => {
+        // The evidence entry and the verdict land inside ONE reservation, so
+        // the pair can never half-exist. No checkpoint is written here by
+        // design: this path only runs when the boot verdict is BLOCKING, and a
+        // checkpoint is HQ standing behind the record — see
+        // `recordIntegrityCheckpoint`.
+        privileged.appendEvidence({
+          actor: this.#processIdentity,
+          kind: INTEGRITY_ASSESSED_EVIDENCE_KIND,
+          payload: {
+            // The row this entry corroborates. `standingIntegrityVerdict` will
+            // not let a CLEAR verdict clear without it, and it must be a
+            // genuine LINK in the chain — not merely a row carrying the id.
+            verdictId,
+            depth: this.#integrityReport.depth,
+            safeMode: true,
+            safeModeChanged: true,
+            findings,
+            observedAtConstruction: true,
+            executable: false,
+          },
+        });
+        appendIntegrityVerdict(this.#db, {
+          id: verdictId,
+          assessedAt: nowIso(),
+          depth: this.#integrityReport.depth,
+          safeMode: true,
+          findings,
+          processId: this.#processIdentity,
+          assessedBy: this.#processIdentity,
+        });
+      });
+    } catch {
+      // A construction that cannot write its observation must still construct.
+      // The verdict stands in memory for this process either way; what is lost
+      // is only its durability, and a Founder assessment records it properly.
+    }
   }
 
   /** Standing pre-approval set the policy engine is evaluated against. */
@@ -2243,7 +3398,7 @@ export class HeadquarterOperations {
 
   /** Explain a capability's gates. Registry-derived; payload-blind. */
   classify(capabilityId: string): OpsResult<TaskClassification> {
-    const cap = this.queue.capabilities.get(capabilityId);
+    const cap = this.#capabilityFromStore(capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
     return ok(classifyCapability(cap, this.#policyCtx));
   }
@@ -2258,12 +3413,56 @@ export class HeadquarterOperations {
    * and never accepted from the caller. Deny by default: an id in neither
    * registry can open nothing, and a human's origination grant confers no
    * execution right whatsoever (see `claimNext`/`startTask`).
+   *
+   * `title` and `project` are SCANNED here, before the enqueue (Wave 5
+   * correction round seven, Medium 2). Both are caller text, both land in
+   * `hq_op_task_meta`, and the title is published on the Founder `/state` and
+   * `/commandCenter` projections, which `control-api.ts`'s `safe()` walks with
+   * the strict `assertBrowserSafe`. Executed across three separate processes:
+   * a task created with `title: 'prod deploy sk-…'` was STORED, and every
+   * subsequent `GET /api/hq/control/state` answered `500 internal`, on that
+   * process and on every process after it. `hq_op_task_meta` has no
+   * title-rewrite path through any HQ command, so the outage was permanent —
+   * the same shape as the H3 outage this scan exists to close, on the one
+   * write H3 did not reach.
    */
   createTask(input: CreateTaskInput): OpsResult<CreatedTask> {
+    // `payload` is the ONE piece of caller text a facade write deliberately
+    // does not scan here, and it is now NAMED rather than surviving because
+    // the scan happened to read only string fields (Wave 5 correction round
+    // eleven, Medium 1). No control route serves a task payload — probed
+    // across every shipped route — the queue applies the evidence log's own
+    // heuristic to it at `enqueue`, and the strict guard for it lives at the
+    // boundary that would PUBLISH it: the dispatch lane, which refuses to open
+    // an issue carrying one. `claude-dispatch.test.ts` and
+    // `dispatch-durable-label.test.ts` write a credential-shaped payload
+    // through here ON PURPOSE to prove that guard holds independently, so
+    // scanning it here would delete a defence-in-depth proof rather than add
+    // one. `facade-write-scan.test.ts` derives this list from the source.
+    const unsafeCallerText = callerTextRefusal(input, ['project', 'title'], ['payload']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.capabilityId || !input.requestedBy) {
       return fail('invalid_input', 'capabilityId and requestedBy are required');
     }
-    const cap = this.queue.capabilities.get(input.capabilityId);
+    // `title` and `project` only. The task PAYLOAD is deliberately NOT scanned
+    // here, and that boundary was drawn by execution rather than by taste: no
+    // control route serves a task payload (`control-api.ts` says so and the
+    // probe confirmed it — a payload carrying `sk-…` bricked no route, while
+    // the title bricked two), the queue applies the evidence log's own
+    // heuristic to it at `enqueue`, and the strict guard for it lives where it
+    // would actually be PUBLISHED: the dispatch boundary, which refuses to
+    // open an issue carrying one. `claude-dispatch.test.ts` and
+    // `dispatch-durable-label.test.ts` reach that boundary by writing a
+    // credential-shaped payload through this method on purpose, to prove the
+    // dispatch guard holds INDEPENDENTLY of the submission guard. Scanning the
+    // payload here would delete that defence-in-depth proof, so the payload
+    // stays with the guard that owns it.
+    try {
+      assertNoCredentialShape({ title: input.title ?? '', project: input.project ?? '' });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    const cap = this.#capabilityFromStore(input.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${input.capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${cap.id} is disabled`);
 
@@ -2301,10 +3500,19 @@ export class HeadquarterOperations {
    * capability registry and the directory allow-list, so a source that
    * nominates an unauthorized, unknown, or disabled worker changes nothing.
    */
+  /**
+   * Deliberately AVAILABLE in safe mode. It computes an advisory answer from
+   * the registry and the directory and changes no canonical state; the only
+   * thing it can write is an evidence note recording that a nomination source
+   * misbehaved. Nothing it returns authorizes anything — claiming is refused
+   * while safe mode stands, so a routing answer cannot become an act.
+   */
   routeTask(taskId: string): OpsResult<TaskRouting> {
-    const task = this.queue.get(taskId);
+    const unsafeCallerText = callerTextRefusal({ taskId });
+    if (unsafeCallerText) return unsafeCallerText;
+    const task = this.#taskRowFromStore(taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
-    const cap = this.queue.capabilities.get(task.capabilityId);
+    const cap = this.#capabilityFromStore(task.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
 
     const merged = new Map<string, { sources: string[]; rationales: string[] }>();
@@ -2392,6 +3600,15 @@ export class HeadquarterOperations {
    * effect is impossible — a live fenced claim already exists, or the task
    * can never return to the queue. See `assignmentBarrier` for the exact
    * canonical predicate (Sol M1 on PR #263).
+   *
+   * `rationale` is scanned HERE and not only in `assignTaskAsFounder`
+   * (Wave 5 correction round seven, Medium 2). The browser wrapper scanned it;
+   * this method is exported public API in its own right, and it writes the
+   * meta row before its evidence append, so an unscanned rationale reached
+   * `hq_op_task_meta.assignment_rationale` with only the weak `key: value`
+   * heuristic behind it. Scanning both is not duplication — the wrapper scans
+   * before ITS gates so a refusal precedes any Founder-attributed evidence,
+   * and this scans before the first write on the direct path.
    */
   assignTask(
     taskId: string,
@@ -2399,9 +3616,16 @@ export class HeadquarterOperations {
     assignedBy: string,
     rationale?: string,
   ): OpsResult<AssignmentIntent> {
-    const task = this.queue.get(taskId);
+    const unsafeCallerText = callerTextRefusal({ taskId, workerId, assignedBy, rationale }, ['rationale']);
+    if (unsafeCallerText) return unsafeCallerText;
+    const task = this.#taskRowFromStore(taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
-    const cap = this.queue.capabilities.get(task.capabilityId);
+    try {
+      assertNoCredentialShape({ rationale: rationale ?? '' });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    const cap = this.#capabilityFromStore(task.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
 
     // The actor RECORDING the intent must be someone: this writes an
@@ -2467,10 +3691,18 @@ export class HeadquarterOperations {
    * mutation after this call.
    */
   approveTask(input: ApproveTaskInput): OpsResult<OperatorTask> {
-    const task = this.queue.get(input.taskId);
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
+    const task = this.#taskRowFromStore(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
     const principal = this.#assertApprovalAuthority(input.founderId, 'approve');
     if (principal) return principal;
+    // Phase 13: an approval is a Founder decision recorded against a digest of
+    // the current record. A record HQ cannot stand behind is not one an
+    // approval may be bound to, and an approval written now would sit primed
+    // to run the moment safe mode clears.
+    const safeMode = this.#safeModeRefusal('approve a task');
+    if (safeMode) return safeMode;
     if (task.status !== 'needs_approval') {
       return fail(
         'task_not_awaiting_approval',
@@ -2478,7 +3710,7 @@ export class HeadquarterOperations {
         { status: task.status },
       );
     }
-    const cap = this.queue.capabilities.get(task.capabilityId);
+    const cap = this.#capabilityFromStore(task.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${task.capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${cap.id} is disabled`);
     // Enforcement-safe read (Phase 8, the carried-forward Low 7): this answer
@@ -2504,7 +3736,7 @@ export class HeadquarterOperations {
     // anywhere.
     if (input.note !== undefined) {
       try {
-        assertNoSecretLikeContent({ note: input.note });
+        assertNoCredentialShape({ note: input.note });
       } catch {
         return fail(
           'invalid_input',
@@ -2539,7 +3771,9 @@ export class HeadquarterOperations {
 
   /** Founder denial. Blocks the task with an immutable, reasoned record. */
   denyTask(input: DenyTaskInput): OpsResult<OperatorTask> {
-    const task = this.queue.get(input.taskId);
+    const unsafeCallerText = callerTextRefusal(input, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
+    const task = this.#taskRowFromStore(input.taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${input.taskId}`);
     const principal = this.#assertApprovalAuthority(input.founderId, 'deny');
     if (principal) return principal;
@@ -2559,7 +3793,7 @@ export class HeadquarterOperations {
     // one: a different guard would reopen the gap from the other side, where
     // this check passes and the append still throws.
     try {
-      assertNoSecretLikeContent({ reason: input.reason });
+      assertNoCredentialShape({ reason: input.reason });
     } catch {
       return fail(
         'invalid_input',
@@ -2609,9 +3843,18 @@ export class HeadquarterOperations {
     leaseMs?: number,
     onlyTaskId?: string,
   ): OpsResult<OperatorTask> {
-    const cap = this.queue.capabilities.get(capabilityId);
+    const unsafeCallerText = callerTextRefusal({ workerId, capabilityId, onlyTaskId });
+    if (unsafeCallerText) return unsafeCallerText;
+    const cap = this.#capabilityFromStore(capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${capabilityId}`);
     if (!cap.enabled) return fail('capability_disabled', `Capability ${capabilityId} is disabled`);
+    // Phase 13: a claim is the act that hands work to a worker. HQ does not
+    // hand out work whose approval, payload and capability rows it cannot
+    // currently stand behind. Refused loudly, and distinctly from
+    // `nothing_claimable` — "HQ is in safe mode" and "the queue is empty" are
+    // different facts, exactly as "not yours" and "empty" already are.
+    const safeMode = this.#safeModeRefusal('claim work');
+    if (safeMode) return safeMode;
 
     const human = this.#rejectHumanExecution(workerId, 'claim work');
     if (human) return human;
@@ -2651,12 +3894,20 @@ export class HeadquarterOperations {
     // a typed error in the catch. Answering it here would record it twice or
     // not at all, depending on the caller.
     const head = peek.task;
-    const intent = head ? this.readMeta(head.id)?.assignment : null;
-    if (head && intent && intent.workerId !== workerId) {
+    // Enforcement-safe read (Wave 5 correction round sixteen, Critical B-1):
+    // `this.readMeta(head.id)?.assignment` was a public prototype slot, and
+    // patching it to return null handed a Founder-assigned task to another
+    // worker, all the way through to a real external adapter call. The
+    // canonical copy of this rule now lives in `OperatorQueue.claim`, which
+    // holds for callers that never come through here; this one keeps the typed
+    // refusal ordering the Founder surface already renders, and reads
+    // `hq_op_task_meta` through a `#private` closure over the database.
+    const intendedFor = head ? this.#assignmentIntentFromStore(head.id) : null;
+    if (head && intendedFor && intendedFor !== workerId) {
       return fail(
         'assigned_to_other_worker',
-        `Task ${head.id} is assigned to ${intent.workerId}`,
-        { taskId: head.id, assignedTo: intent.workerId },
+        `Task ${head.id} is assigned to ${intendedFor}`,
+        { taskId: head.id, assignedTo: intendedFor },
       );
     }
     // Provider binding (issue #200, Codex P1 #1) is deliberately NOT
@@ -2669,11 +3920,31 @@ export class HeadquarterOperations {
     try {
       claimed = this.queue.claim(workerId, capabilityId, leaseMs, onlyTaskId);
     } catch (error) {
+      // The canonical boundary's own safe-mode refusal, translated back to the
+      // typed code this method already answers with. Unreachable through this
+      // path — the `#safeModeRefusal` above answers first — and kept anyway,
+      // so a caller that reaches the queue by any route gets one refusal with
+      // one name (Wave 5 correction round ten, High 3).
+      if (error instanceof SafeModeEngaged) {
+        return fail('safe_mode_engaged', errorMessage(error));
+      }
       if (error instanceof ProviderBindingViolation) {
         return fail('provider_binding_mismatch', error.message, {
           taskId: error.taskId,
           requiredProvider: error.requiredProvider,
           workerProvider: error.workerProvider,
+        });
+      }
+      // The canonical boundary's own assignment-intent refusal, translated
+      // back to the typed code this method already answers with (Wave 5
+      // correction round sixteen, Critical B-1). Ordinarily unreachable — the
+      // `#assignmentIntentFromStore` check above answers first — and kept so a
+      // caller that reaches the queue by any route gets one refusal with one
+      // name, exactly as `SafeModeEngaged` above.
+      if (error instanceof AssignmentIntentViolation) {
+        return fail('assigned_to_other_worker', error.message, {
+          taskId: error.taskId,
+          assignedTo: error.assignedTo,
         });
       }
       return fail('operator_rejected', errorMessage(error), { capabilityId });
@@ -2689,6 +3960,8 @@ export class HeadquarterOperations {
    * `OperatorQueue.start()`.
    */
   startTask(taskId: string, workerId: string, fence: number): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal({ taskId, workerId });
+    if (unsafeCallerText) return unsafeCallerText;
     const human = this.#rejectHumanExecution(workerId, 'start work');
     if (human) return human;
     const assignability = this.#workers.assignability(workerId);
@@ -2710,6 +3983,8 @@ export class HeadquarterOperations {
   }
 
   heartbeat(taskId: string, workerId: string, fence: number, leaseMs?: number): OpsResult<null> {
+    const unsafeCallerText = callerTextRefusal({ taskId, workerId });
+    if (unsafeCallerText) return unsafeCallerText;
     try {
       this.queue.heartbeat(taskId, workerId, fence, leaseMs);
       return ok(null);
@@ -2740,7 +4015,18 @@ export class HeadquarterOperations {
     result: Record<string, unknown>,
     evidenceRefs: string[] = [],
   ): OpsResult<OperatorTask> {
-    const existing = this.queue.get(taskId);
+    // `evidenceRefs` is here because the derivation that was supposed to
+    // guarantee it was blind to `string[]` (Wave 5 correction round eleven,
+    // Medium 1). It was enumerated by neither half of
+    // `facade-write-scan.test.ts` and reached by neither guard beside it:
+    // `callerTextRefusal({ taskId, workerId })` read own STRING fields, and
+    // `assertNoCredentialShape(result)` scans the RESULT. Executed against the
+    // previous head, `submitResult(..., ['sk-…'])` was ACCEPTED and the value
+    // landed in `op_evidence.payload` — `ENGINE_IMMUTABLE_TABLES[0]`, with
+    // `no_erase` and `no_rewrite`, so the row is permanent.
+    const unsafeCallerText = callerTextRefusal({ taskId, workerId, evidenceRefs });
+    if (unsafeCallerText) return unsafeCallerText;
+    const existing = this.#taskRowFromStore(taskId);
     if (!existing) return fail('unknown_task', `Unknown task: ${taskId}`);
     if (existing.reviewState === 'pending') {
       return fail(
@@ -2750,13 +4036,35 @@ export class HeadquarterOperations {
       );
     }
     try {
+      assertNoCredentialShape(result);
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    try {
       return ok(this.queue.complete(taskId, workerId, fence, result, evidenceRefs));
     } catch (error) {
       return fail('operator_rejected', errorMessage(error), { taskId });
     }
   }
 
+  /**
+   * Report a failed execution.
+   *
+   * `reason` is caller text and it is scanned before the queue write (Wave 5
+   * correction round seven, Medium 2). It was the second permanent outage of the
+   * class, executed on the previous head: a failure reason carrying `sk-…` was
+   * accepted, landed on `op_tasks`, and then answered `500 internal` on
+   * `GET /api/hq/control/state` AND `/commandCenter` in every later process,
+   * with no HQ command able to rewrite the column.
+   */
   failTask(taskId: string, workerId: string, fence: number, reason: string): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal({ taskId, workerId }, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
+    try {
+      assertNoCredentialShape({ reason });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     try {
       return ok(this.queue.fail(taskId, workerId, fence, reason));
     } catch (error) {
@@ -2771,6 +4079,13 @@ export class HeadquarterOperations {
    * human principal. (Approval authority is not required — reviewing a result
    * is not deciding a Founder approval.) Independence itself — never the
    * executing, submitting or requesting worker — is enforced by the queue.
+   *
+   * Deliberately AVAILABLE in safe mode, and it is the closest of the
+   * available mutators to an approval — the argument is on the phase document's
+   * "left available" table and is repeated here because it is a judgement
+   * rather than an obvious call: a `pass` verdict completes a task that was
+   * claimed and executed BEFORE safe mode engaged. Refusing the verdict does
+   * not un-execute it; it only leaves HQ unable to record what happened.
    */
   reviewTask(
     taskId: string,
@@ -2778,8 +4093,15 @@ export class HeadquarterOperations {
     verdict: 'pass' | 'fail',
     note = '',
   ): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal({ taskId, reviewerId }, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (verdict === 'fail' && !note) {
       return fail('invalid_input', 'A failed review requires a reason');
+    }
+    try {
+      assertNoCredentialShape({ note });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
     }
     const reviewer = this.#resolveActor(reviewerId, 'review');
     if (!reviewer.ok) return reviewer;
@@ -2799,6 +4121,12 @@ export class HeadquarterOperations {
    * The reconciler must be a known actor (same rule as review); independence
    * and the "never blindly re-queue a non-idempotent capability" rule are the
    * queue's.
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). It is one of the acts
+   * that RESOLVE an uncertain state, exactly like `reconcileRun`,
+   * `reconcileAction` and `recoverInterruptedRuns`; refusing it would make safe
+   * mode self-sustaining. `note` is scanned before the queue write.
    */
   reconcileTask(
     taskId: string,
@@ -2806,7 +4134,14 @@ export class HeadquarterOperations {
     by: string,
     note: string,
   ): OpsResult<OperatorTask> {
+    const unsafeCallerText = callerTextRefusal({ taskId, by, note }, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!note) return fail('invalid_input', 'Reconciliation requires a note');
+    try {
+      assertNoCredentialShape({ note });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     const reconciler = this.#resolveActor(by, 'reconcile');
     if (!reconciler.ok) return reconciler;
     try {
@@ -2846,6 +4181,15 @@ export class HeadquarterOperations {
    * Unauthenticated on purpose — it takes no actor, because it attributes
    * nothing to a human. It applies a consequence the canonical rules already
    * require, and the only thing it can produce is LESS authority than before.
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). It is STRICTLY
+   * NARROWING and it is a no-op unless an approval is already dead: it clears
+   * a task's binding to an approval that no longer admits execution, and the
+   * only state it can reach is `needs_approval` or `blocked`. The fresh
+   * decision that would follow is an ordinary `approveTask`, which safe mode
+   * refuses. Same argument as `revokeWorkerProvider` and
+   * `deactivateExecutionWorker`: it can only take authority away.
    */
   returnForFreshApproval(taskId: string): OpsResult<{
     /** True when an approval was found dead and the consequence was applied. */
@@ -2855,11 +4199,13 @@ export class HeadquarterOperations {
     /** The task's status afterwards — `needs_approval`, or `blocked` if hostile. */
     status: ActivityStatus;
   }> {
-    const task = this.queue.get(taskId);
+    const unsafeCallerText = callerTextRefusal({ taskId });
+    if (unsafeCallerText) return unsafeCallerText;
+    const task = this.#taskRowFromStore(taskId);
     if (!task) return fail('unknown_task', `Unknown task: ${taskId}`);
     try {
       const rejection = this.#requirePrivilegedQueue().returnForFreshApproval(taskId);
-      const after = this.queue.get(taskId);
+      const after = this.#taskRowFromStore(taskId);
       return ok({
         returned: rejection !== null,
         rejection,
@@ -2872,17 +4218,93 @@ export class HeadquarterOperations {
 
   // ---- kill switch (Founder only) ----
 
+  /**
+   * Engage a kill switch. The fail-safe direction, and available in safe mode
+   * for exactly that reason.
+   *
+   * `reason` is scanned before the write, and this was the worst of the four
+   * permanent outages of the class (Wave 5 correction round seven, Medium 2).
+   * Executed: `op_kill_switch.reason` is published by `killSwitchScopes()`
+   * onto the Founder `/state` and `/commandCenter` projections, no HQ command
+   * rewrites the column, and a reason carrying `sk-…` answered `500 internal`
+   * on both routes in every later process. The act it broke is the one a
+   * Founder reaches for in a hurry to stop everything — so a hurried
+   * paste would have taken the console down permanently at the moment it was
+   * most needed. Refused up front instead, with the switch not engaged and the
+   * caller told plainly why.
+   */
   engageKillSwitch(scope: string, founderId: string, reason: string): OpsResult<null> {
+    const unsafeCallerText = callerTextRefusal({ scope, founderId }, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
     const principal = this.#assertApprovalAuthority(founderId, 'engage the kill switch');
     if (principal) return principal;
-    this.#requirePrivilegedQueue().engageKillSwitch(scope, founderId, reason);
+    try {
+      assertNoCredentialShape({ reason });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    // The store's own refusal is REPORTED, never thrown (Wave 5 correction
+    // round fourteen, High 2). The engine guards that keep HQ's ledgers
+    // append-only raise `SqliteError` out of the driver, and a raw writer can
+    // put a declared ledger into a state where they raise on HQ's own append —
+    // round fourteen executed exactly that, and `engageKillSwitch` then threw
+    // `SqliteError: op_evidence is append-only` UNCAUGHT, so the Founder's stop
+    // button did not merely fail, it took the caller down with it. The write
+    // channel is closed at the guard now, and this is the second half of the
+    // same answer: whatever makes HQ's own store refuse an append, the Founder
+    // gets a refusal that says so and a process that is still running.
+    try {
+      this.#requirePrivilegedQueue().engageKillSwitch(scope, founderId, reason);
+    } catch (error) {
+      return fail(
+        'operator_rejected',
+        `HQ's own store refused the write that records the kill switch, so the switch is NOT engaged: ` +
+          `${errorMessage(error)}. Nothing but HQ appends to those ledgers and their guards refuse a ` +
+          `DELETE, so this is a file another writer has changed. Stop the workers by other means and ` +
+          `assess the store.`,
+        { scope },
+      );
+    }
     return ok(null);
   }
 
   releaseKillSwitch(scope: string, founderId: string): OpsResult<null> {
+    const unsafeCallerText = callerTextRefusal({ scope, founderId });
+    if (unsafeCallerText) return unsafeCallerText;
     const principal = this.#assertApprovalAuthority(founderId, 'release the kill switch');
     if (principal) return principal;
-    this.#requirePrivilegedQueue().releaseKillSwitch(scope, founderId);
+    // Phase 13, and the asymmetry is the point: ENGAGING a stop stays
+    // available in safe mode because it is the fail-safe direction, and
+    // RELEASING one is refused because it is the direction that lets work run
+    // again against a record HQ cannot stand behind. Denying a task is
+    // likewise never refused here, for the same reason engaging is not.
+    const safeMode = this.#safeModeRefusal('release the kill switch');
+    if (safeMode) return safeMode;
+    // Reported rather than thrown, for the reason `engageKillSwitch` gives —
+    // and here the direction is the reassuring one, so a throw would have been
+    // worse than useless: the caller could not tell "released" from "the store
+    // refused" without catching a driver error.
+    //
+    // The message below is TRUE because the mutation is atomic (Wave 5
+    // correction round fifteen, High 6). It used to be a lie: the queue's
+    // `#releaseKillSwitch` updated `op_kill_switch` and then appended the
+    // evidence, untransacted, so with the append refused the row had already
+    // committed at `engaged = 0` and this branch reported "the kill switch is
+    // STILL engaged" over a released switch — measured, with a task queued and
+    // `claimNext` CLAIMED, and no `kill_switch_released` row anywhere. Both
+    // kill-switch mutations, and every other mutation on the privileged
+    // surface, now commit their row and their evidence together; see the
+    // `atomic` wrapper in `operator/queue.ts`.
+    try {
+      this.#requirePrivilegedQueue().releaseKillSwitch(scope, founderId);
+    } catch (error) {
+      return fail(
+        'operator_rejected',
+        `HQ's own store refused the write that records the release, so the kill switch is STILL ` +
+          `engaged: ${errorMessage(error)}. Assess the store before releasing anything.`,
+        { scope },
+      );
+    }
     return ok(null);
   }
 
@@ -2939,6 +4361,49 @@ export class HeadquarterOperations {
    * audited, exactly as an approval refusal is.
    */
   reconciliationAuthorityRefusal(actor: string): string | null {
+    // The scan is written HERE as well as in the private method below, and
+    // that is deliberate rather than sloppy (Wave 5 correction round
+    // eighteen). `facade-write-scan.test.ts` derives coverage from a method's
+    // OWN body: a public write whose only scan lives in a helper it delegates
+    // to reads as an unscanned parameter, and the honest way to satisfy that
+    // derivation is to scan here, not to add an exemption. `actor` reaches
+    // storage through `#assertApprovalAuthority`'s audit append on either
+    // path, so both paths scan it. `assertNoCredentialShape` is a pure
+    // predicate over one string; running it twice costs nothing and skipping
+    // it on either path would cost the property.
+    try {
+      assertNoCredentialShape({ actor });
+    } catch (error) {
+      return errorMessage(error);
+    }
+    return this.#reconciliationAuthorityRefusal(actor);
+  }
+
+  /**
+   * The same answer, as an ECMAScript `#private` METHOD (Wave 5 correction
+   * round eighteen, High A's audit of the rest of the lane).
+   *
+   * The public method above is a prototype slot, and `resolveUnknownDispatch` used
+   * it as its ONE authority gate: `authorityRefusal === null` is what lets a
+   * terminal `claude_github_dispatch_failed` be written for an unresolved
+   * attempt. That is a decision about an irreversible external act taken by
+   * whoever the string names, so the lane reads it through
+   * `reconciliationAuthorityRefusalFor` and the public method stays for
+   * display callers.
+   */
+  #reconciliationAuthorityRefusal(actor: string): string | null {
+    // `actor` REACHES STORAGE (Wave 5 correction round thirteen, Medium 1).
+    // `#assertApprovalAuthority` audits a refusal by appending
+    // `{ actorId: actor, action, reason }` to `op_evidence` — measured, not
+    // supposed: `safe-mode-disposition.test.ts` counts exactly one row on each
+    // refusing branch. The write is behind a private helper, so the per-body
+    // write-marker scan never classified this method as a write and the
+    // parameter was enumerated by nothing.
+    try {
+      assertNoCredentialShape({ actor });
+    } catch (error) {
+      return errorMessage(error);
+    }
     const refusal = this.#assertApprovalAuthority(actor, 'reconcile an unknown dispatch outcome');
     if (!refusal || refusal.ok) return null;
     return refusal.error.message;
@@ -2968,8 +4433,34 @@ export class HeadquarterOperations {
       ops.#killSwitchEngagedFromStore(capabilityId);
     readGatewayActionHistory = (ops: HeadquarterOperations, taskId: string): GatewayActionHistory =>
       ops.#gatewayActionHistoryFromStore(taskId);
-    readTaskEvidenceRows = (ops: HeadquarterOperations, taskId: string): CanonicalEvidenceRow[] =>
+    readTaskEvidenceRows = (ops: HeadquarterOperations, taskId?: string): CanonicalEvidenceRow[] =>
       ops.#taskEvidenceRowsFromStore(taskId);
+    readTaskRow = (ops: HeadquarterOperations, taskId: string): OperatorTask | null =>
+      ops.#taskRowFromStore(taskId);
+    readProposalRow = (ops: HeadquarterOperations, proposalId: string): MissionProposal | null =>
+      ops.#proposalFromStore(proposalId);
+    readApprovalRecord = (
+      ops: HeadquarterOperations,
+      taskId: string,
+    ): ApprovalRecordForValidation | null => ops.#approvalRecordFromStore(taskId);
+    readDeclaredProvider = (ops: HeadquarterOperations, workerId: string): string | null =>
+      ops.#declaredProviderFromStore(workerId);
+    readAssignabilityProblem = (ops: HeadquarterOperations, workerId: string): string | null =>
+      ops.#assignabilityProblemFromStore(workerId);
+    readSpecialistRecord = (
+      ops: HeadquarterOperations,
+      workerId: string,
+    ): ReturnType<HeadquarterStore['getSpecialist']> => ops.#specialistFromStore(workerId);
+    // The same defensive copy the getter makes, taken from the `#private`
+    // field rather than from the accessor a caller can redefine.
+    readPolicyContext = (ops: HeadquarterOperations): PolicyContext =>
+      freezePolicyContext(ops.#policyCtx);
+    readTaskMeta = (ops: HeadquarterOperations, taskId: string): TaskMeta | null =>
+      ops.#metaFromStore(taskId);
+    readReconciliationAuthorityRefusal = (
+      ops: HeadquarterOperations,
+      actor: string,
+    ): string | null => ops.#reconciliationAuthorityRefusal(actor);
   }
 
   /**
@@ -2990,6 +4481,18 @@ export class HeadquarterOperations {
    * entries #200 took away, even if a reserved name were later reused as a
    * principal id. It grants no approval, no capability and no execution right.
    *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round three, Medium
+   * A8), which is the one entry in that column that needed arguing. It does
+   * append into the hash-chained log a latched `evidence_chain_broken` finding
+   * is a statement ABOUT — but every kind it can still write is a record of a
+   * system lane REFUSING to act — `claude_github_dispatch_refused` and `direct_order_dispatch_blocked` — the kinds that
+   * DECIDE a dispatch outcome are structurally excluded below, and the actor is
+   * a reserved system name that can never resolve to a principal or a worker.
+   * So it grants nothing, concludes nothing, and refusing it would leave a lane
+   * unable to record that it declined — losing truth in the posture built for
+   * not losing truth. The same argument as `startTask`/`submitResult`, which
+   * safe mode also leaves open.
+   *
    * NARROWED AGAIN for Option B (issue #219). Restricting the actor and closing
    * the kind set was still not enough for the kinds that DECIDE something: a
    * caller holding `ops` could write a terminal `claude_github_dispatch_failed`
@@ -3005,6 +4508,12 @@ export class HeadquarterOperations {
     kind: SystemEvidenceKind;
     payload: Record<string, unknown>;
   }): EvidenceEntry {
+    // The same whole-input scan every other facade write applies, raised as
+    // the exception this surface answers with rather than as an `OpsResult`
+    // refusal: `appendSystemEvidence` throws. `payload` is an object, so it
+    // is not reached — see `callerTextRefusal`.
+    const unsafeCallerText = callerTextRefusal(entry);
+    if (unsafeCallerText && !unsafeCallerText.ok) throw new Error(unsafeCallerText.error.message);
     this.#assertSystemEvidenceActor(entry.actor);
     // Named separately from the generic "not a system evidence kind" refusal.
     // An outcome kind is not an unknown string — it is a real kind this surface
@@ -3079,7 +4588,7 @@ export class HeadquarterOperations {
     }
     // A claim of publication needs the claim it happened under.
     if ((CLAIM_BOUND_EVIDENCE_KINDS as readonly string[]).includes(entry.kind)) {
-      const task = entry.taskId ? this.queue.get(entry.taskId) : null;
+      const task = entry.taskId ? this.#taskRowFromStore(entry.taskId) : null;
       if (!task) {
         throw new Error(
           `${entry.kind} names no task that exists. A record of a publication is written against ` +
@@ -3112,6 +4621,17 @@ export class HeadquarterOperations {
     providerId: string;
     founderId: string;
   }): OpsResult<WorkerProviderRecord> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
+    // Safe mode, FIRST and categorically (Wave 5 correction round three,
+    // Medium A8). A provider declaration is what lets a worker claim
+    // provider-bound work at all, so it ADDS authority — and `registerExecution
+    // Worker` beside it adds an identity WITH an allow-list. Both wrote through
+    // while HQ had declared its own record untrustworthy, which is exactly what
+    // `SAFE_MODE_STATEMENT` says it refuses. Withdrawing a declaration stays
+    // available, because that direction only ever removes an option.
+    const blocked = this.#safeModeRefusal('declare a worker execution provider');
+    if (blocked) return blocked;
     const principal = this.#assertApprovalAuthority(
       input.founderId,
       'declare a worker execution provider',
@@ -3198,6 +4718,14 @@ export class HeadquarterOperations {
    * It grants no provider identity. Registration and declaration stay two
    * separate acts, so neither one alone makes a worker able to take
    * CLAUDE-bound work.
+   *
+   * `displayName` and `vendor` are scanned before the first write (Wave 5
+   * correction round seven, Medium 2). It was the widest permanent outage of the
+   * three found this round, executed: a worker registered with
+   * `displayName: 'Worker sk-…'` answered `500 internal` on `/state`,
+   * `/workforce` AND `/commandCenter` in every process afterwards — and this
+   * command is CREATE-ONLY, so there is not even a re-registration that could
+   * take the name back out.
    */
   registerExecutionWorker(input: {
     workerId: string;
@@ -3207,9 +4735,40 @@ export class HeadquarterOperations {
     allowedCapabilities: readonly string[];
     founderId: string;
   }): OpsResult<WorkerDescriptor> {
+    const unsafeCallerText = callerTextRefusal(input, ['displayName', 'vendor']);
+    if (unsafeCallerText) return unsafeCallerText;
+    // Safe mode, FIRST and categorically. This creates a worker identity WITH
+    // its `allowedCapabilities`, straight into the table `#grantOf` reads at
+    // every enforcement point — it ADDS AUTHORITY, and registration is
+    // create-only with no revoke path, so it is not something to undo later.
+    const blocked = this.#safeModeRefusal('register an execution worker');
+    if (blocked) return blocked;
     const principal = this.#assertApprovalAuthority(input.founderId, 'register an execution worker');
     if (principal) return principal;
+    try {
+      assertNoCredentialShape({ displayName: input.displayName, vendor: input.vendor });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
 
+    // SHAPE first, and total over an input that omits a field (Wave 5
+    // correction round fourteen, Low 6). `input.allowedCapabilities.length`
+    // and `input.workerId.trim()` both dereferenced a field this method never
+    // checked was there, so an in-process call that omitted one threw a
+    // `TypeError` out of the facade instead of returning `invalid_input`. Not
+    // reachable through the control API, which validates the body first — which
+    // is why it is a Low and not a High — but a facade method's contract is
+    // that it answers, and a refusal is an answer where a throw is not.
+    if (typeof input.workerId !== 'string') {
+      return fail('invalid_input', 'A worker id is required.');
+    }
+    if (!Array.isArray(input.allowedCapabilities)) {
+      return fail(
+        'invalid_input',
+        'allowedCapabilities is required: a worker with no stated allow-list would be a worker ' +
+          'whose authority nothing bounds.',
+      );
+    }
     const workerId = input.workerId.trim();
     if (!workerId) return fail('invalid_input', 'A worker id is required.');
     // Worker identity and HUMAN identity are separate registries, and an id in
@@ -3253,7 +4812,7 @@ export class HeadquarterOperations {
         { workerId },
       );
     }
-    const unknown = input.allowedCapabilities.filter((id) => this.queue.capabilities.get(id) == null);
+    const unknown = input.allowedCapabilities.filter((id) => this.#capabilityFromStore(id) == null);
     if (unknown.length > 0) {
       return fail(
         'unknown_capability',
@@ -3299,7 +4858,15 @@ export class HeadquarterOperations {
    * declaring one, and strictly narrowing in effect: the worker can then claim
    * no provider-bound task at all.
    */
+  /**
+   * Deliberately AVAILABLE in safe mode, and the reason is the direction it
+   * moves (Wave 5 correction round three, Medium A8): it can only ever take
+   * authority away. `declareWorkerProvider` is refused for the mirror-image
+   * reason. Removing a way to STOP something is never the safe answer.
+   */
   revokeWorkerProvider(input: { workerId: string; founderId: string }): OpsResult<boolean> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     const principal = this.#assertApprovalAuthority(
       input.founderId,
       'revoke a worker execution provider',
@@ -3331,6 +4898,21 @@ export class HeadquarterOperations {
    * task needs reconciliation, before it can be safely replaced.
    */
   replacementPlan(workerId: string): OpsResult<ReplacementPlan> {
+    return ok(this.#replacementPlanFromStore(workerId));
+  }
+
+  /**
+   * The canonical in-flight-claim census behind `replacementPlan`, as a
+   * `#private` method (Wave 5 correction round sixteen, Medium B-7).
+   *
+   * `assertReplacementSafe` dispatched through the public `replacementPlan`,
+   * and `deactivateExecutionWorker` through the public `assertReplacementSafe`
+   * — a chain of two prototype slots in front of the guard that stops a worker
+   * holding live claims and `outcome_unknown` work from being deactivated out
+   * from under it. Not exploited by the review, and migrated because the class
+   * is what is being closed.
+   */
+  #replacementPlanFromStore(workerId: string): ReplacementPlan {
     const rows = this.#db
       .prepare(
         `SELECT id, status, capability_id FROM op_tasks
@@ -3344,12 +4926,17 @@ export class HeadquarterOperations {
       capabilityId: row.capability_id,
       requires: row.status === 'outcome_unknown' ? 'reconciliation' : 'handover',
     }));
-    return ok({ workerId, safe: blockers.length === 0, blockers });
+    return { workerId, safe: blockers.length === 0, blockers };
   }
 
   /** Convenience guard for a caller about to disable/replace a worker. */
   assertReplacementSafe(workerId: string): OpsResult<ReplacementPlan> {
-    const plan = this.replacementPlan(workerId);
+    return this.#replacementSafetyRefusal(workerId);
+  }
+
+  /** The guard itself, reached by `deactivateExecutionWorker` without a prototype in the path. */
+  #replacementSafetyRefusal(workerId: string): OpsResult<ReplacementPlan> {
+    const plan = ok(this.#replacementPlanFromStore(workerId));
     if (!plan.ok) return plan;
     if (!plan.data.safe) {
       return fail(
@@ -3375,17 +4962,25 @@ export class HeadquarterOperations {
    * worker holds assigned/running/outcome_unknown tasks, so deactivation can
    * never orphan a claim.
    */
+  /**
+   * Deliberately AVAILABLE in safe mode, for the same reason as
+   * `revokeWorkerProvider`: it is strictly narrowing, there is no reactivate
+   * method, and refusing it would remove a way to stop a worker while HQ is in
+   * the posture where stopping things matters most.
+   */
   deactivateExecutionWorker(input: {
     workerId: string;
     reason: string;
     founderId: string;
   }): OpsResult<WorkerDescriptor> {
+    const unsafeCallerText = callerTextRefusal(input, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
     const refused = this.#assertApprovalAuthority(input.founderId, 'deactivate an execution worker');
     if (refused) return refused;
     const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
     if (!reason.ok) return fail('invalid_input', reason.message);
     try {
-      assertNoSecretLikeContent({ reason: reason.value });
+      assertNoCredentialShape({ reason: reason.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -3400,7 +4995,7 @@ export class HeadquarterOperations {
         workerId: input.workerId,
       });
     }
-    const safe = this.assertReplacementSafe(input.workerId);
+    const safe = this.#replacementSafetyRefusal(input.workerId);
     if (!safe.ok) return safe;
     const deactivated: WorkerDescriptor = { ...specialist, active: false };
     const privileged = this.#requirePrivilegedQueue();
@@ -3433,6 +5028,15 @@ export class HeadquarterOperations {
     founderId: string;
     rationale?: string;
   }): OpsResult<AssignmentIntent> {
+    // Every id, BEFORE the founder gate (Wave 5 correction round thirteen,
+    // Medium 1). `#resolveFounderGateActor` → `#resolveRequester` appends
+    // `{ actorId: founderId, action: 'assign task <taskId>', reason }` to
+    // `op_evidence` when the actor does not resolve, so `founderId` and
+    // `taskId` both reach append-only storage before `assignTask`'s own scan
+    // is ever reached. `rationale` is already scanned below, with its own
+    // bound and its own message.
+    const unsafeCallerText = callerTextRefusal(input, ['rationale']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.taskId || !input.workerId) {
       return fail('invalid_input', 'taskId and workerId are required');
     }
@@ -3445,7 +5049,7 @@ export class HeadquarterOperations {
     if (!rationale.ok) return fail('invalid_input', rationale.message);
     if (rationale.value) {
       try {
-        assertNoSecretLikeContent({ rationale: rationale.value });
+        assertNoCredentialShape({ rationale: rationale.value });
       } catch (error) {
         return fail('invalid_input', errorMessage(error));
       }
@@ -3478,10 +5082,17 @@ export class HeadquarterOperations {
    * `providerConnectivity` where that truth actually lives.
    */
   evaluateTaskEligibility(taskId: string): OpsResult<TaskEligibilityReport> {
+    // `routeTask` appends a `routing_evaluated` evidence row — measured at one
+    // row in `safe-mode-disposition.test.ts` — so this is a read that writes,
+    // and the id it writes is this parameter. It did reach `routeTask`'s own
+    // scan, but only because this delegation is the first statement; scanning
+    // here is what makes that independent of statement order.
+    const unsafeCallerText = callerTextRefusal({ taskId });
+    if (unsafeCallerText) return unsafeCallerText;
     const routed = this.routeTask(taskId);
     if (!routed.ok) return routed;
-    const task = this.queue.get(taskId)!;
-    const cap = this.queue.capabilities.get(task.capabilityId)!;
+    const task = this.#taskRowFromStore(taskId)!;
+    const cap = this.#capabilityFromStore(task.capabilityId)!;
     const declaredProviders = new Map(
       this.queue.listWorkerProviders().map((d) => [d.workerId, d.providerId] as const),
     );
@@ -3535,20 +5146,63 @@ export class HeadquarterOperations {
    * the workforce display and advisory nomination. Founder-gated (approval
    * authority, the same bar as registering an execution worker).
    *
-   * NOT an execution enrolment: a member row grants nothing and is never
-   * consulted by enforcement. When the id matches a registered execution
+   * Not an execution enrolment in the shipped host, where the narrowing seam
+   * is deliberately unwired and a member row is display and advisory
+   * nomination only. It is NOT true that the row "grants nothing and is never
+   * consulted by enforcement" as a property of this method (Wave 5 correction
+   * round seven, Medium 1): it writes `grantedCapabilities`, and
+   * `RegistryWorkerDirectory` (`application/registry-directory.ts`) derives
+   * `effectiveCapabilities` from exactly that column and answers
+   * `allowedCapabilities` with it — which is what `#grantOf` and
+   * `evaluatePolicy` read at every enforcement point wherever
+   * `memberRegistry` IS passed. The sentence is corrected rather than
+   * softened, because the gate below rests on it.
+   *
+   * When the id matches a registered execution
    * worker the result says `enrichesExecutionWorker: true` — the same
    * identity described in both layers. An id registered as a HUMAN principal
    * is refused outright: the narrowing directory's `isRegistered` ORs the
    * member registry in, and a member row under a human's id would flip that
    * human into "worker identity" and silently strip their approval
    * authority.
+   *
+   * **REFUSED in safe mode.** It was in neither column of the shipped tables.
+   * `SAFE_MODE_STATEMENT` says HQ refuses the acts that would grant AUTHORITY
+   * over a record it cannot stand behind, and `registerExecutionWorker` and
+   * `declareWorkerProvider` are already refused for precisely this reason —
+   * the first writes an identity WITH its allow-list, this writes an allow-list
+   * a directory reads. That the shipped host does not currently wire the
+   * narrowing seam is a deployment fact, not a property of this method: the
+   * option exists, the class is exported public API, and a gate that holds
+   * only in one composition is not a gate. `disableAiMember` and
+   * `setAiMemberHealth` stay available, for the mirror-image reason
+   * `revokeWorkerProvider` and `deactivateExecutionWorker` do.
+   *
+   * The caller text it stores is scanned first (Wave 5 correction round seven,
+   * Medium 2): `displayName` reaches `/workforce` and `/commandCenter`, and
+   * there is no member-rename command that could take a refused value back
+   * out of a published projection.
    */
   registerAiMember(
     input: RegisterMemberInput & { founderId: string },
   ): OpsResult<{ member: AiMember; warnings: string[]; enrichesExecutionWorker: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['displayName', 'modelId', 'modelVersion', 'providerId', 'toolMetadata']);
+    if (unsafeCallerText) return unsafeCallerText;
+    const blocked = this.#safeModeRefusal('register an AI member');
+    if (blocked) return blocked;
     const refused = this.#assertApprovalAuthority(input.founderId, 'register an AI member');
     if (refused) return refused;
+    try {
+      assertNoCredentialShape({
+        displayName: input.displayName,
+        providerId: input.providerId,
+        modelId: input.modelId,
+        modelVersion: input.modelVersion,
+        toolMetadata: input.toolMetadata ?? null,
+      });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     const registry = this.#aiMemberRegistry;
     if (!registry) {
       return fail(
@@ -3592,12 +5246,24 @@ export class HeadquarterOperations {
     }
   }
 
-  /** Disable an AI member (Founder-gated; display/advisory layer only). */
+  /**
+   * Disable an AI member (Founder-gated).
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). STRICTLY NARROWING:
+   * `status: 'disabled'` makes `RegistryWorkerDirectory.assignability` answer
+   * `worker_inactive`, so it can only ever take an option away, and it is the
+   * exact mirror of `registerAiMember` — which is refused for adding one.
+   * Same argument as `revokeWorkerProvider` and `deactivateExecutionWorker`.
+   * `reason` is scanned before the first write.
+   */
   disableAiMember(input: {
     memberId: string;
     reason: string;
     founderId: string;
   }): OpsResult<{ member: AiMember; handoverRequired: MemberAssignment[] }> {
+    const unsafeCallerText = callerTextRefusal(input, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
     const refused = this.#assertApprovalAuthority(input.founderId, 'disable an AI member');
     if (refused) return refused;
     const registry = this.#aiMemberRegistry;
@@ -3609,6 +5275,29 @@ export class HeadquarterOperations {
     }
     const reason = missionText('reason', input.reason, MAX_ASSIGNMENT_RATIONALE_LENGTH, true);
     if (!reason.ok) return fail('invalid_input', reason.message);
+    // Same class as the two above, and the sibling this comment used to name —
+    // `assignAiMember` — does not exist in this package and never did (Wave 5
+    // correction round fifteen, Medium 2, found by the derived name guard
+    // rather than by a reviewer). The real sibling is
+    // `AiMemberRegistry.disable`'s own caller, which is this method: the scan
+    // below is where a disable reason is checked, and there is no second one
+    // (Wave 5 correction round six, Medium 4; found
+    // independently as one of the unscanned facade writes in round seven —
+    // two lanes wrote this guard, ONE of them survives, and the surviving
+    // refusal message is the field-named one because that is what the other
+    // fourteen credential refusals in this file say and it tells the caller
+    // WHICH input to rephrase). Reachability is not left open: the reason is
+    // stored on the member record AND appended to the evidence chain, and
+    // `src/cli/workforce.ts` builds the facade with the member registry on
+    // every actor-attributed action.
+    try {
+      assertNoCredentialShape({ reason: reason.value });
+    } catch {
+      return fail(
+        'invalid_input',
+        'The disable reason looks like it contains a credential; nothing was recorded.',
+      );
+    }
     try {
       const privileged = this.#requirePrivilegedQueue();
       return ok(
@@ -3635,12 +5324,26 @@ export class HeadquarterOperations {
    * Declare an AI member's health. An explicit Founder statement, never a
    * probe: HQ asked nothing, so HQ records what the Founder observed, with
    * the timestamp of the declaration.
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). `health` is a closed
+   * vocabulary and it grants nothing: the only place any enforcement-adjacent
+   * code reads it is `registry/routing.ts`, which EXCLUDES a member whose
+   * health is `unavailable` from an ADVISORY ranking. So the most it can do is
+   * re-admit a member to a nomination list, and `routeTask` — whose whole
+   * output that is — is itself available in safe mode for the same reason: the
+   * claim a nomination might inform is refused while safe mode stands, so a
+   * routing answer cannot become an act. Refusing it would only stop the
+   * Founder recording that a member is down, which is a fact a store you
+   * cannot vouch for still needs.
    */
   setAiMemberHealth(input: {
     memberId: string;
     health: string;
     founderId: string;
   }): OpsResult<AiMember> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     const refused = this.#assertApprovalAuthority(input.founderId, "declare an AI member's health");
     if (refused) return refused;
     const registry = this.#aiMemberRegistry;
@@ -3694,6 +5397,19 @@ export class HeadquarterOperations {
    * forged author escalates nothing — but attribution in the group room is
    * exactly what a human reads before deciding to promote a mission, so an
    * unknown id must not be able to publish under a trusted-looking name.
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). A message reaches
+   * nothing: it creates no task, touches no approval and grants nothing,
+   * whatever the text says, and the one bridge from a room to work —
+   * `promoteProposal` — creates a task that cannot be claimed while safe mode
+   * stands. Same argument the phase document already records for
+   * `proposeMission` and `proposeAction`. Refusing it would stop a Founder and
+   * a worker discussing the very outage they are trying to fix.
+   *
+   * `body` is scanned before the write (Wave 5 correction round seven, Medium
+   * 2): it is caller free text, `hq_mission_messages` is append-only, and no
+   * HQ command can rewrite the column.
    */
   postMissionMessage(input: {
     threadId: string;
@@ -3701,8 +5417,15 @@ export class HeadquarterOperations {
     body: string;
     refs?: string[];
   }): OpsResult<{ messageId: string; containsActionLanguage: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['body']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.threadId || !input.author) {
       return fail('invalid_input', 'threadId and author are required');
+    }
+    try {
+      assertNoCredentialShape({ body: input.body });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
     }
     const actor = this.#resolveActor(input.author, 'post to a group room');
     if (!actor.ok) return actor;
@@ -3727,6 +5450,8 @@ export class HeadquarterOperations {
     proposedBy: string;
     sourceMessageId?: string;
   }): OpsResult<MissionProposal> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.threadId || !input.capabilityId || !input.proposedBy) {
       return fail('invalid_input', 'threadId, capabilityId and proposedBy are required');
     }
@@ -3734,11 +5459,11 @@ export class HeadquarterOperations {
     const actor = this.#resolveActor(input.proposedBy, 'raise a mission proposal');
     if (!actor.ok) return actor;
     try {
-      assertNoSecretLikeContent(input.payload);
+      assertNoCredentialShape(input.payload);
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
-    const cap = this.queue.capabilities.get(input.capabilityId);
+    const cap = this.#capabilityFromStore(input.capabilityId);
     if (!cap) return fail('unknown_capability', `Unknown capability: ${input.capabilityId}`);
 
     const id = uuid();
@@ -3792,6 +5517,15 @@ export class HeadquarterOperations {
    * ordinary task — a Founder-gated capability still lands in `needs_approval`
    * exactly as if it had been created any other way.
    */
+  /**
+   * `proposeMission` above and this promotion are both deliberately AVAILABLE
+   * in safe mode, on exactly the argument the doc already records for
+   * `proposeAction` and `createTask` (Wave 5 correction round three, Medium
+   * A8): a proposal is INERT and reaches nothing, and the task a promotion
+   * creates cannot be claimed while safe mode stands, so nothing it carries can
+   * happen. Refusing them would stop a Founder recording the very work that
+   * fixes the store.
+   */
   promoteProposal(input: {
     proposalId: string;
     promotedBy: string;
@@ -3799,7 +5533,27 @@ export class HeadquarterOperations {
     project?: string;
     title?: string;
   }): OpsResult<CreatedTask> {
-    const proposal = this.getProposal(input.proposalId);
+    const unsafeCallerText = callerTextRefusal(input, ['project', 'title']);
+    if (unsafeCallerText) return unsafeCallerText;
+    // Scanned HERE as well as inside `createTask`, deliberately. The two
+    // fields are handed straight through, so today the delegated scan already
+    // refuses before any write — but "this write is safe because the method it
+    // calls scans" is exactly the kind of ordering assumption a later
+    // refactor breaks silently, and the enumeration in
+    // `facade-write-scan.test.ts` asks each text-storing write to carry its own
+    // guard rather than to inherit one.
+    try {
+      assertNoCredentialShape({ title: input.title ?? '', project: input.project ?? '' });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    // Enforcement-safe read (Wave 5 correction round sixteen, High B-3): this
+    // is the ONE bridge from chat to executable work, and `this.getProposal`
+    // is a public prototype slot. Patching it to report `status: 'proposed'`
+    // with a substituted payload promoted an already-promoted proposal a
+    // second time, into a fresh `github.open_pr` task carrying content nobody
+    // proposed. See `#proposalFromStore`.
+    const proposal = this.#proposalFromStore(input.proposalId);
     if (!proposal) return fail('proposal_not_found', `Unknown proposal: ${input.proposalId}`);
     if (proposal.status !== 'proposed') {
       return fail('proposal_not_open', `Proposal ${proposal.id} is already ${proposal.status}`, {
@@ -3855,14 +5609,32 @@ export class HeadquarterOperations {
    * review of `ff105a2`). An unknown or deactivated identity could otherwise
    * close other people's proposals and write a false name into the evidence
    * trail.
+   *
+   * Deliberately AVAILABLE in safe mode (Wave 5 correction round seven, Medium
+   * 1 — it was in neither column of the shipped tables). It is the CLOSING
+   * direction of `promoteProposal`, which is itself available: rejection can
+   * only take an open proposal off the table, it creates nothing and
+   * authorizes nothing, and it is the same asymmetry that keeps `denyTask` and
+   * `engageKillSwitch` available while `approveTask` and `releaseKillSwitch`
+   * are refused. `note` is scanned before the first write.
    */
   rejectProposal(proposalId: string, by: string, note: string): OpsResult<MissionProposal> {
-    const proposal = this.getProposal(proposalId);
+    const unsafeCallerText = callerTextRefusal({ proposalId, by }, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
+    // Enforcement-safe read, for the same reason as `promoteProposal`: the
+    // `status !== 'proposed'` guard below is what stops a decided proposal
+    // being decided again, and it may not be reached through a prototype slot.
+    const proposal = this.#proposalFromStore(proposalId);
     if (!proposal) return fail('proposal_not_found', `Unknown proposal: ${proposalId}`);
     if (proposal.status !== 'proposed') {
       return fail('proposal_not_open', `Proposal ${proposalId} is already ${proposal.status}`);
     }
     if (!note) return fail('invalid_input', 'Rejecting a proposal requires a note');
+    try {
+      assertNoCredentialShape({ note });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
     const actor = this.#resolveActor(by, 'reject a mission proposal');
     if (!actor.ok) return actor;
     this.#db
@@ -3879,27 +5651,14 @@ export class HeadquarterOperations {
     return ok(this.getProposal(proposalId)!);
   }
 
+  /**
+   * The deliberately PATCHABLE convenience read, for callers displaying a
+   * proposal. Every decision reads `#proposalFromStore` instead — see High
+   * B-3 there, and `test/authority-read-scan.test.ts`, which classifies each
+   * remaining read of this method in writing.
+   */
   getProposal(id: string): MissionProposal | null {
-    const row = this.#db.prepare(`SELECT * FROM hq_mission_proposals WHERE id = ?`).get(id) as
-      | Record<string, unknown>
-      | undefined;
-    if (!row) return null;
-    return {
-      id: row.id as string,
-      threadId: row.thread_id as string,
-      sourceMessageId: (row.source_message_id as string | null) ?? null,
-      capabilityId: row.capability_id as string,
-      payload: JSON.parse(row.payload as string),
-      idempotencyKey: (row.idempotency_key as string | null) ?? null,
-      digest: row.digest as string,
-      proposedBy: row.proposed_by as string,
-      proposedAt: row.proposed_at as string,
-      status: row.status as MissionProposalStatus,
-      taskId: (row.task_id as string | null) ?? null,
-      decidedBy: (row.decided_by as string | null) ?? null,
-      decidedAt: (row.decided_at as string | null) ?? null,
-      decisionNote: (row.decision_note as string | null) ?? null,
-    };
+    return this.#proposalFromStore(id);
   }
 
   listProposals(status?: MissionProposalStatus): MissionProposal[] {
@@ -3970,6 +5729,14 @@ export class HeadquarterOperations {
     /** Client dedupe hint — an INPUT to the derived key, never the key. */
     idempotencyKey?: string;
   }): OpsResult<{ mission: MissionRecord; deduplicated: boolean }> {
+    // `'planSpecs'` removed: it is a LOCAL of this method and a key of the
+    // explicit scan below, never a field of `input`, so naming it here skipped
+    // nothing (Wave 5 correction round thirteen, Low 2 — the same slip as
+    // `recordMemory`'s `'so'`, and found by the same derivation). The real
+    // object-form field is `plan`, which is not listed and is therefore scanned
+    // by the generic pass, which is correct.
+    const unsafeCallerText = callerTextRefusal(input, ['acceptanceCriteria', 'constraints', 'instruction', 'objective', 'planItems', 'project', 'scope', 'title']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const title = missionText('title', input.title, MAX_MISSION_TITLE_LENGTH, true);
     if (!title.ok) return fail('invalid_input', title.message);
@@ -4063,7 +5830,7 @@ export class HeadquarterOperations {
     // payloads are Founder input headed for storage, so they are scanned on
     // exactly the same terms.
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         title: title.value,
         objective: objective.value,
         scope: scope.value,
@@ -4230,7 +5997,14 @@ export class HeadquarterOperations {
         actor: input.requestedBy,
         kind: 'commanded',
         toStatus: 'planned',
-        detail: { planItemCount: items.length },
+        // `projectId` joins the detail because the event log is the only
+        // APPEND-ONLY record of what a mission's project link has ever been,
+        // and `hq_missions.project_id` is mutable (Wave 5 correction round
+        // seven, High NEW-4). `assignMissionToProject` already records both
+        // ends of every move; a mission CREATED under a project had no such
+        // record at all, so a raw `UPDATE ... SET project_id = NULL` erased the
+        // only trace. `#durableTaskProjectScopes` reads it.
+        detail: { planItemCount: items.length, projectId },
       });
       privileged.appendEvidence({
         actor: input.requestedBy,
@@ -4295,6 +6069,8 @@ export class HeadquarterOperations {
     expectedStatus?: string;
     requestedBy: string;
   }): OpsResult<MissionRecord> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.missionId || !input.requestedBy) {
       return fail('invalid_input', 'missionId and requestedBy are required');
     }
@@ -4344,7 +6120,7 @@ export class HeadquarterOperations {
     }
     if (note) {
       try {
-        assertNoSecretLikeContent({ note });
+        assertNoCredentialShape({ note });
       } catch (error) {
         return fail('invalid_input', errorMessage(error));
       }
@@ -4450,6 +6226,10 @@ export class HeadquarterOperations {
     supersedePlanItemSeqs?: number[];
     requestedBy: string;
   }): OpsResult<MissionRecord> {
+    // `'addSpecs'` removed for the reason `commandMission` gives above: a local
+    // and an explicit-scan key, not a field of `input` (round thirteen, Low 2).
+    const unsafeCallerText = callerTextRefusal(input, ['acceptanceCriteria', 'addPlanItems', 'amendment', 'constraints', 'objective', 'specifyPlanItems']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.missionId || !input.requestedBy) {
       return fail('invalid_input', 'missionId and requestedBy are required');
     }
@@ -4520,7 +6300,7 @@ export class HeadquarterOperations {
     }
 
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         amendment: amendment.value,
         objective: objective.value,
         constraints: constraints.value,
@@ -4741,6 +6521,8 @@ export class HeadquarterOperations {
     taskId: string;
     requestedBy: string;
   }): OpsResult<MissionRecord> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.missionId || !input.requestedBy || !input.taskId) {
       return fail('invalid_input', 'missionId, planItemSeq, taskId and requestedBy are required');
     }
@@ -4870,6 +6652,8 @@ export class HeadquarterOperations {
     /** Resolved principal id. Set by the boundary, never read from a body. */
     requestedBy: string;
   }): OpsResult<OrchestrationReport> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.missionId || !input.requestedBy) {
       return fail('invalid_input', 'missionId and requestedBy are required');
     }
@@ -5338,6 +7122,8 @@ export class HeadquarterOperations {
     projectId: string | null;
     requestedBy: string;
   }): OpsResult<MissionRecord> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.missionId || !input.requestedBy) {
       return fail('invalid_input', 'missionId and requestedBy are required');
     }
@@ -5481,13 +7267,68 @@ export class HeadquarterOperations {
    * `drift` come from the owning module so each contract stays test-pinned
    * where it is defined.
    */
+  /**
+   * The SAFE-MODE guard (Phase 13).
+   *
+   * Refuses an act while HQ has said, about itself, that its stored record
+   * cannot be trusted — the engine reports the file corrupt, an append-only
+   * guard the schema declares is missing, a declared append-only ledger holds
+   * fewer rows than the engine's own high-water mark says it reached, or the
+   * evidence hash chain does not verify.
+   *
+   * Reads the `#private` latched report and nothing else, because this decides
+   * whether a write lands: a patch of `hqReliabilityPosture` or of any other
+   * public read must not be able to buy an approval, a claim or an external
+   * call. Pinned by a hostile-patch regression test on the instance, on the
+   * prototype, and against a facade constructed AFTER the patch.
+   *
+   * What safe mode deliberately does NOT refuse, because refusing it would
+   * make the posture less safe rather than more:
+   *  - every READ (a Founder who cannot see the store cannot fix it);
+   *  - recovery and reconciliation (they are the acts that resolve the state);
+   *  - a fresh integrity assessment and a verified-backup record (the acts
+   *    that clear it or preserve a recovery point);
+   *  - ENGAGING a kill switch, which is the fail-safe direction. Releasing one
+   *    is refused.
+   */
+  #safeModeRefusal(action: string): OpsResult<never> | null {
+    if (!this.#integrityReport.safeMode) return null;
+    const blocking = this.#integrityReport.observations
+      .filter((observation) => observation.blocking)
+      .map((observation) => observation.finding);
+    // A categorical phrase rather than an empty pair of brackets. Safe mode can
+    // stand on a durable latch whose stored finding list could not be read
+    // through the closed vocabulary (a raw append), and "HQ is in SAFE MODE ()"
+    // would read like a bug in the refusal rather than like the honest answer,
+    // which is that HQ knows it stopped trusting itself and cannot say which
+    // finding did it. No vocabulary member is invented for it.
+    const named = blocking.length > 0 ? blocking.join(', ') : 'a latched finding HQ could not read back';
+    return fail(
+      'safe_mode_engaged',
+      `Cannot ${action}: HQ is in SAFE MODE (${named}). ${SAFE_MODE_STATEMENT}`,
+      { findings: blocking, assessmentDepth: this.#integrityReport.depth },
+    );
+  }
+
   #founderGateCapabilityGate(
     action: string,
     capabilityId: string,
     classify: (row: Capability | null) => 'missing' | 'altered' | 'disabled' | 'enabled',
     drift: (row: Capability) => string[],
     founderActNoun: string,
+    /**
+     * Phase 13: whether this act stays available while HQ is in safe mode.
+     * Default false — a Founder-gated command adds to the canonical record,
+     * and HQ does not add to a record it cannot stand behind. The reliability
+     * command passes true, because assessing the store and recording a
+     * verified backup are how safe mode is investigated and cleared.
+     */
+    permittedInSafeMode = false,
   ): OpsResult<never> | null {
+    if (!permittedInSafeMode) {
+      const safeMode = this.#safeModeRefusal(action);
+      if (safeMode) return safeMode;
+    }
     const row = this.#capabilityFromStore(capabilityId);
     const state = classify(row);
     if (state === 'enabled') return null;
@@ -5608,6 +7449,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ project: ProjectRecord; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['name', 'purpose', 'stream']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const name = missionText('name', input.name, MAX_PROJECT_NAME_LENGTH, true);
     if (!name.ok) return fail('invalid_input', name.message);
@@ -5621,7 +7464,7 @@ export class HeadquarterOperations {
     if (refusedCapability) return refusedCapability;
     // Everything that will be PERSISTED is scanned before anything is written.
     try {
-      assertNoSecretLikeContent({ name: name.value, purpose: purpose.value, stream: stream.value });
+      assertNoCredentialShape({ name: name.value, purpose: purpose.value, stream: stream.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -5699,6 +7542,8 @@ export class HeadquarterOperations {
     stream?: string | null;
     requestedBy: string;
   }): OpsResult<ProjectRecord> {
+    const unsafeCallerText = callerTextRefusal(input, ['name', 'purpose', 'stream']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.projectId || !input.requestedBy) {
       return fail('invalid_input', 'projectId and requestedBy are required');
     }
@@ -5743,7 +7588,7 @@ export class HeadquarterOperations {
     if (nextStream !== current.stream) changed.push('stream');
     if (changed.length === 0) return ok(current);
     try {
-      assertNoSecretLikeContent({ name: nextName, purpose: nextPurpose, stream: nextStream });
+      assertNoCredentialShape({ name: nextName, purpose: nextPurpose, stream: nextStream });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -5796,6 +7641,8 @@ export class HeadquarterOperations {
     expectedStatus?: string;
     requestedBy: string;
   }): OpsResult<ProjectRecord> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.projectId || !input.requestedBy) {
       return fail('invalid_input', 'projectId and requestedBy are required');
     }
@@ -5846,7 +7693,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({ note });
+      assertNoCredentialShape({ note });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -6017,6 +7864,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ product: ProductRecord; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['name', 'problem', 'summary', 'targetUsers']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     if (!input.projectId) return fail('invalid_input', 'projectId is required');
     if (!isProductType(input.productType)) {
@@ -6053,7 +7902,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         name: name.value,
         problem: problem.value,
         targetUsers: targetUsers.value,
@@ -6158,6 +8007,8 @@ export class HeadquarterOperations {
     expectedState?: string;
     requestedBy: string;
   }): OpsResult<ProductRecord> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.productId || !input.requestedBy) {
       return fail('invalid_input', 'productId and requestedBy are required');
     }
@@ -6207,7 +8058,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({ note });
+      assertNoCredentialShape({ note });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -6288,6 +8139,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ product: ProductRecord; artifactId: string; version: number; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['locator', 'name', 'note']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.productId || !input.requestedBy) {
       return fail('invalid_input', 'productId and requestedBy are required');
     }
@@ -6323,7 +8176,7 @@ export class HeadquarterOperations {
     const product = this.#productRecordFromStore(input.productId);
     if (!product) return fail('unknown_product', `Unknown product: ${input.productId}`);
     try {
-      assertNoSecretLikeContent({ name: name.value, locator: locator.value, note: note.value });
+      assertNoCredentialShape({ name: name.value, locator: locator.value, note: note.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -6555,6 +8408,3765 @@ export class HeadquarterOperations {
     return this.#productStorePresent;
   }
 
+  // ---- advanced reliability (Phase 13) ----
+
+  /**
+   * The Founder gate behind the two RELIABILITY COMMAND acts — assessing the
+   * store, and recording a verified backup. Recovery and reconciliation
+   * deliberately do not come through here; they sit behind approval authority
+   * plus independence, like `reconcileAction`.
+   */
+  #resolveReliabilityCommander(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(
+      actor,
+      action,
+      RELIABILITY_COMMAND_CAPABILITY.id,
+      'commanding HQ reliability',
+    );
+  }
+
+  /**
+   * The fail-closed capability gate for the same two acts, with
+   * `permittedInSafeMode` TRUE: assessing the store and recording a verified
+   * backup are how safe mode is investigated and cleared, so refusing them
+   * while it is engaged would make the posture a trap rather than a
+   * protection.
+   */
+  #reliabilityCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      RELIABILITY_COMMAND_CAPABILITY.id,
+      reliabilityCommandCapabilityState,
+      reliabilityCommandContractDrift,
+      'commanding HQ reliability',
+      true,
+    );
+  }
+
+  /**
+   * The canonical claim a run write must present, read ENFORCEMENT-SAFE.
+   *
+   * This is the whole authority model for opening a run and recording its
+   * attempts and outcome: the worker that HOLDS the live fenced claim on the
+   * canonical task is the one entity that can honestly say what that execution
+   * did. So the fact is read straight off `op_tasks` through `#db` —
+   * deliberately not through `queue.get`, which #200 documents as patchable
+   * and which enforcement never dispatches through.
+   *
+   * Deny by default in every direction: an unknown task, a task claimed by
+   * somebody else, a stale fence, and a task that is not in an executing state
+   * all refuse. It grants NOTHING — holding a claim already allows the worker
+   * to execute; this only lets it record what it did.
+   */
+  #runClaimFact(taskId: string): {
+    exists: boolean;
+    capabilityId: string;
+    status: string;
+    claimedBy: string | null;
+    fence: number;
+    claimNonce: string | null;
+  } {
+    const row = this.#db
+      .prepare(`SELECT capability_id, status, claimed_by, fence, claim_nonce FROM op_tasks WHERE id = ?`)
+      .get(taskId) as
+      | {
+          capability_id: string;
+          status: string;
+          claimed_by: string | null;
+          fence: number;
+          claim_nonce: string | null;
+        }
+      | undefined;
+    if (!row) {
+      return { exists: false, capabilityId: '', status: '', claimedBy: null, fence: -1, claimNonce: null };
+    }
+    return {
+      exists: true,
+      capabilityId: row.capability_id,
+      status: row.status,
+      claimedBy: row.claimed_by ?? null,
+      fence: Number(row.fence),
+      claimNonce: row.claim_nonce ?? null,
+    };
+  }
+
+  /** The statuses under which a worker genuinely holds an executing claim. */
+  #runClaimRefusal(
+    taskId: string,
+    workerId: string,
+    fence: number,
+    action: string,
+  ): OpsResult<never> | null {
+    const fact = this.#runClaimFact(taskId);
+    if (!fact.exists) return fail('unknown_task', `Unknown task: ${taskId}`);
+    if (fact.claimedBy !== workerId || fact.fence !== fence) {
+      return fail(
+        'stale_run_claim',
+        `Worker ${workerId} does not hold the current claim on task ${taskId} at fence ${fence} ` +
+          `(current ${fact.claimedBy ?? 'unclaimed'}/${fact.fence}); it cannot ${action}`,
+        { taskId },
+      );
+    }
+    if (fact.status !== 'assigned' && fact.status !== 'running') {
+      return fail(
+        'task_not_executing',
+        `Task ${taskId} is ${fact.status}; a run is recorded by the worker executing it`,
+        { status: fact.status },
+      );
+    }
+    return null;
+  }
+
+  /**
+   * One run's derived record, read PRIVATELY.
+   *
+   * ENFORCEMENT-SAFE for the reason `#productRecordFromStore` is: the current
+   * state decides whether a further attempt is admitted, and admitting one
+   * after an uncertain outcome is exactly the duplicate external action this
+   * phase exists to prevent. Derived from the append-only events off `#db`,
+   * never from `getRun()`.
+   */
+  #runRecordFromStore(id: string): RunRecord | null {
+    if (!this.#reliabilityStorePresent) return null;
+    const row = loadRun(this.#db, id);
+    if (!row) return null;
+    return deriveRunRecord(row, loadRunEvents(this.#db, id));
+  }
+
+  #listRunsFromStore(filter?: { taskId?: string; runKind?: RunKind }): RunRecord[] {
+    if (!this.#reliabilityStorePresent) return [];
+    // Fail closed: a supplied-but-unrecognized kind filter matches NOTHING.
+    if (filter?.runKind != null && !isRunKind(filter.runKind)) return [];
+    return loadRuns(this.#db)
+      .filter((row) => (filter?.taskId ? row.taskId === filter.taskId : true))
+      .filter((row) => (filter?.runKind ? row.runKind === filter.runKind : true))
+      .map((row) => deriveRunRecord(row, loadRunEvents(this.#db, row.id)));
+  }
+
+  /**
+   * The run on this task whose outcome is NOT settled, if there is one — the
+   * whole duplicate-lineage guard, in one place.
+   *
+   * Both halves of that guard used to key on `needsReconciliation` alone, and
+   * that left the exact window the phase exists to close (Wave 5 correction
+   * round three, High A3). A crashed attempt does not reach
+   * `needs_reconciliation` on its own: it sits at `attempting` until the
+   * Founder-gated `recoverInterruptedRuns` classifies it. So after a genuine
+   * process death — and in-process too — a second `openRun` with a distinct
+   * `idempotencyKey` derived a distinct `run_key` (no `run_key_conflict`),
+   * passed both guards, and `startRunAttempt` ADMITTED a fresh attempt at
+   * generation 1 on a `sideEffect: true` capability while the first attempt was
+   * still in flight and its worker still held the live fence. Recovery then
+   * admitted it never knew what the first attempt had done. That is the
+   * duplicate irreversible act, in the exact scenario Phase 13 was built for.
+   *
+   * `attempting` is included for the reason `needs_reconciliation` always was:
+   * both mean HQ cannot say what the last attempt did, and the honest answer to
+   * "may a second lineage start" is no in both. `open` is deliberately NOT
+   * included — a run with no attempt reserved has nothing in flight, and two
+   * genuinely separate pieces of work on one task remain expressible.
+   */
+  #unsettledRunOnTask(taskId: string, exceptRunId?: string): RunRecord | null {
+    return (
+      this.#listRunsFromStore({ taskId }).find(
+        (run) =>
+          run.id !== exceptRunId && (run.needsReconciliation || run.state === 'attempting'),
+      ) ?? null
+    );
+  }
+
+  /**
+   * The refusal that guard produces, worded for whichever of the two states
+   * stands.
+   *
+   * The CODE is the caller's, because the two `openRun` guards deliberately
+   * report different ones and always have: the pre-reservation guard says
+   * `run_state_conflict` (the task is in a state that admits no new run) and
+   * the in-reservation one says `run_attempt_refused` (the never-retried law,
+   * reached at the write). Widening WHICH runs the guard sees does not change
+   * what either site has always answered.
+   */
+  #unsettledRunRefusal(run: RunRecord, act: string, code: OpsError['code']): OpsError {
+    return run.needsReconciliation
+      ? {
+          code,
+          message:
+            `Task ${run.taskId} already carries run ${run.id} standing at ${run.state}, whose outcome is ` +
+            `unresolved (${run.outcome}); HQ will not ${act} on the same work. An uncertain outcome is ` +
+            'never retried automatically — establish what actually happened and reconcile that run first.',
+          details: { runId: run.id, state: run.state, outcome: run.outcome },
+        }
+      : {
+          code,
+          message:
+            `Task ${run.taskId} already carries run ${run.id} with an attempt OPEN (generation ` +
+            `${run.attempts}); HQ will not ${act} on the same work while it stands. Record that ` +
+            'attempt’s outcome, or — if the process carrying it is gone — run recovery, which classifies ' +
+            'it and demands a human reconciliation before anything else is attempted.',
+          details: { runId: run.id, state: run.state, outcome: run.outcome },
+        };
+  }
+
+  /**
+   * Does this capability reach outside HQ? FAIL-CLOSED: a capability row that
+   * cannot be read is treated as side-effecting, so an interrupted attempt on
+   * it is uncertain rather than conveniently harmless. Read through the
+   * `#private` closure, never `queue.capabilities`.
+   */
+  #runCapabilityIsSideEffecting(capabilityId: string): boolean {
+    const capability = this.#capabilityFromStore(capabilityId);
+    return capability ? capability.sideEffect : true;
+  }
+
+  #appendRunEvent(input: {
+    runId: string;
+    // The vocabulary itself, not a second hand-maintained spelling of it: a
+    // kind added to `RUN_EVENT_KINDS` must be writable here without a silent
+    // divergence between what the derivation understands and what the writer
+    // can produce.
+    kind: RunEventKind;
+    actor: string;
+    at: string;
+    detail: Record<string, unknown>;
+    attemptKey?: string | null;
+  }): void {
+    this.#db
+      .prepare(
+        `INSERT INTO hq_reliability_run_events (id, run_id, kind, actor, at, process_id, detail, attempt_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        uuid(),
+        input.runId,
+        input.kind,
+        input.actor,
+        input.at,
+        this.#processIdentity,
+        canonicalJson(input.detail),
+        input.attemptKey ?? null,
+      );
+  }
+
+  /**
+   * Open a run against a canonical task the calling worker is executing.
+   *
+   * A run is EXECUTION AUDIT and nothing else: it changes no task status,
+   * burns no approval, dispatches nothing and authorizes nothing. What it adds
+   * is the thing no canonical row holds — which PROCESS is carrying the work —
+   * so a restart can tell "interrupted" from "still running" without guessing.
+   *
+   * Duplicate-safe across processes and restarts by construction. The derived
+   * `run_key` deliberately excludes the claim fence, so a worker that crashed
+   * and re-claimed the same task finds the SAME run and inherits its
+   * unresolved outcome instead of starting a clean one beside it. The key is
+   * backed by a UNIQUE index and an append-only trigger, so the engine refuses
+   * the duplicate even when the two callers never shared memory.
+   */
+  openRun(input: {
+    taskId: string;
+    workerId: string;
+    fence: number;
+    runKind: RunKind;
+    label: string;
+    missionId?: string;
+    actionId?: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ run: RunRecord; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['label']);
+    if (unsafeCallerText) return unsafeCallerText;
+    if (!input.taskId || !input.workerId) return fail('invalid_input', 'taskId and workerId are required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!isRunKind(input.runKind)) {
+      return fail('invalid_input', `runKind must be one of: ${RUN_KINDS.join(', ')}`);
+    }
+    const label = missionText('label', input.label, MAX_RUN_LABEL_LENGTH, true);
+    if (!label.ok) return fail('invalid_input', label.message);
+    try {
+      assertNoCredentialShape({ label: label.value });
+    } catch {
+      // The message names what was actually checked (Wave 5 correction round
+      // four, Low L2). It used to say "looks like it contains a credential"
+      // over a check that only recognised an `api_key: value` assignment, so a
+      // caller told a bare `sk-...` had been shape-detected when it had been
+      // stored. It is shape-detected NOW, and the wording can say so.
+      return fail(
+        'invalid_input',
+        'The run label matches a known credential shape, or names a credential holder; a label is stored ' +
+          'permanently and served on the Founder reliability route, so nothing was recorded.',
+      );
+    }
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'run ledger unavailable on this database handle');
+    }
+    // Safe mode refuses OPENING new work to track, and deliberately not
+    // recovery or reconciliation of work already open.
+    const safeMode = this.#safeModeRefusal('open a run');
+    if (safeMode) return safeMode;
+    const claim = this.#runClaimRefusal(input.taskId, input.workerId, input.fence, 'open a run');
+    if (claim) return claim;
+    const fact = this.#runClaimFact(input.taskId);
+
+    // The SECOND half of the cross-restart duplicate guard (Wave 5 review,
+    // Medium finding 4). The derived key answers "is this the same run"; this
+    // answers "does this task already have a run nobody has resolved". They are
+    // different questions, and only the first was asked: an uncertain attempt
+    // stood at `needs_reconciliation` while a fresh open — reachable by nothing
+    // more than a different label, since the label used to be in the key —
+    // produced a clean run beside it and admitted a new attempt on the same
+    // work. `needs_reconciliation` means a human has to establish what happened
+    // in the world before anything else is attempted, so opening a run against
+    // that task is refused until they have.
+    const unsettled = this.#unsettledRunOnTask(input.taskId);
+    if (unsettled) {
+      // `#unsettledRunOnTask` covers BOTH unsettled states now, not
+      // `needsReconciliation` alone — see its note for the window that left
+      // open (Wave 5 correction round three, High A3).
+      return {
+        ok: false,
+        error: this.#unsettledRunRefusal(unsettled, 'open a second run', 'run_state_conflict'),
+      };
+    }
+
+    const runKey = runIdempotencyKey({
+      taskId: input.taskId,
+      runKind: input.runKind,
+      actionId: input.actionId?.trim() || null,
+      missionId: input.missionId?.trim() || null,
+      idempotencyKey: input.idempotencyKey?.trim() || null,
+    });
+    const id = `run-${uuid()}`;
+    const at = nowIso();
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    let refusal: OpsError | null = null;
+    privileged.reserve(() => {
+      const existing = loadRunByKey(this.#db, runKey);
+      if (existing) {
+        // Dedupe is for the SAME work being opened again — the crash-and-
+        // re-claim case the key exists for. It is not for two different pieces
+        // of work that happen to collide (Wave 5 Medium 4). Dropping `label`
+        // from the key was right (a "never retried" law cannot be keyed on
+        // caller free text) but it made the DEFAULT shape of two different
+        // runs on one task — `idempotencyKey` is optional — collide onto one
+        // key, and the collision returned `ok`, `deduplicated: true`, and the
+        // OTHER work's record. A caller that asked to roll a release back was
+        // handed a run labelled "publish the release note" and told it
+        // succeeded. Fail-closed at the attempt, but a correctness and
+        // auditability regression on the way there.
+        //
+        // So: same label, same work, dedupe as designed. Different label, a
+        // distinct refusal naming the standing run, and the caller supplies an
+        // `idempotencyKey` if the two are genuinely separate work. The stored
+        // label is NOT interpolated into the message — the caller can read the
+        // named run — so this refusal cannot become an echo channel.
+        if (existing.label !== label.value) {
+          refusal = {
+            code: 'run_key_conflict',
+            message:
+              `Task ${input.taskId} already carries run ${existing.id} under this run key, opened for ` +
+              'different work. A run key identifies the WORK, not its description: pass a distinct ' +
+              'idempotencyKey if this is genuinely a separate run, or reuse the standing one.',
+            details: { runId: existing.id, runKind: existing.runKind },
+          };
+          return;
+        }
+        dedupedTo = existing.id;
+        return;
+      }
+      // The second half of the "never retried" law, at the OPEN rather than at
+      // the attempt (Wave 5 Medium 2). `runAdmitsAttempt` refuses a further
+      // attempt on a run standing at `needs_reconciliation` — but a fresh RUN
+      // on the same task carries a fresh, admitted generation, so the refusal
+      // could be walked around simply by opening again under a deliberately
+      // different idempotency key. A task whose last word is "HQ does not know
+      // what happened" needs a human, not another run.
+      const unresolved = this.#unsettledRunOnTask(input.taskId);
+      if (unresolved) {
+        refusal = this.#unsettledRunRefusal(unresolved, 'open a second run', 'run_attempt_refused');
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_reliability_runs
+             (id, run_kind, task_id, mission_id, action_id, capability_id, worker_id, claim_fence,
+              claim_nonce, process_id, label, opened_at, run_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.runKind,
+          input.taskId,
+          input.missionId?.trim() || null,
+          input.actionId?.trim() || null,
+          fact.capabilityId,
+          input.workerId,
+          input.fence,
+          fact.claimNonce,
+          this.#processIdentity,
+          label.value,
+          at,
+          runKey,
+        );
+      this.#appendRunEvent({
+        runId: id,
+        kind: 'opened',
+        actor: input.workerId,
+        at,
+        detail: { runKind: input.runKind, taskId: input.taskId, processId: this.#processIdentity },
+      });
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `run:${id}`,
+        status: null,
+        actor: input.workerId,
+        summary: `Run opened (${input.runKind}) for task ${input.taskId}`,
+        detail: { taskId: input.taskId, runKind: input.runKind, executable: false },
+      });
+      privileged.appendEvidence({
+        taskId: input.taskId,
+        actor: input.workerId,
+        kind: 'run_opened',
+        payload: { runId: id, runKind: input.runKind, processId: this.#processIdentity, executable: false },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    if (dedupedTo) return ok({ run: this.#runRecordFromStore(dedupedTo)!, deduplicated: true });
+    return ok({ run: this.#runRecordFromStore(id)!, deduplicated: false });
+  }
+
+  /**
+   * Reserve the next ATTEMPT of a run — the duplicate-action guard, in the
+   * shape the Phase 8 side-effect key already established.
+   *
+   * Two independent refusals stand behind it, and both are needed. The pure
+   * derivation refuses an attempt from `attempting` (one is already open),
+   * from `needs_reconciliation` (HQ does not know what the last one did) and
+   * from `concluded` unless a human said `confirmed_not_executed`. And the
+   * UNIQUE index on `attempt_key` refuses a second reservation of the same
+   * generation from ANY process — including one that never ran this code.
+   *
+   * Returns the correlation id the caller must carry into whatever it is about
+   * to do, so an external system's record and HQ's record name the same
+   * attempt.
+   */
+  startRunAttempt(input: {
+    runId: string;
+    workerId: string;
+    fence: number;
+  }): OpsResult<{ run: RunRecord; correlationId: string; generation: number }> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
+    if (!input.runId || !input.workerId) return fail('invalid_input', 'runId and workerId are required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'run ledger unavailable on this database handle');
+    }
+    const safeMode = this.#safeModeRefusal('start a run attempt');
+    if (safeMode) return safeMode;
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    let correlationId = '';
+    let generation = 0;
+    privileged.reserve(() => {
+      const row = loadRun(this.#db, input.runId);
+      if (!row) {
+        refusal = { code: 'unknown_run', message: `Unknown run: ${input.runId}` };
+        return;
+      }
+      const claim = this.#runClaimRefusal(row.taskId, input.workerId, input.fence, 'start a run attempt');
+      if (claim && !claim.ok) {
+        refusal = claim.error;
+        return;
+      }
+      // Re-derived INSIDE the reservation, off the ledger, so a concurrent
+      // attempt cannot slip between a check and the insert.
+      const events = loadRunEvents(this.#db, input.runId);
+      const record = deriveRunRecord(row, events);
+      if (!record.admitsAttempt) {
+        refusal = {
+          code: 'run_attempt_refused',
+          message:
+            `Run ${input.runId} is ${record.state} with outcome ${record.outcome}; a further attempt is ` +
+            'refused. An uncertain outcome is never retried automatically — reconcile it explicitly after ' +
+            'checking the external system, and only a confirmed_not_executed opens another attempt.',
+          details: { state: record.state, outcome: record.outcome },
+        };
+        return;
+      }
+      // The same lineage guard, at the ATTEMPT (Wave 5 correction round three,
+      // High A3). `openRun` refuses a second lineage while one stands
+      // unsettled, but two runs can both stand at `open` — where nothing is in
+      // flight and nothing is refused — and then attempt one after the other.
+      // The result would be two live attempts on one task, which is the same
+      // duplicate act reached one step later.
+      const sibling = this.#unsettledRunOnTask(row.taskId, row.id);
+      if (sibling) {
+        refusal = this.#unsettledRunRefusal(
+          sibling,
+          'start an attempt on a second run',
+          'run_attempt_refused',
+        );
+        return;
+      }
+      generation = runAttemptGeneration(events);
+      correlationId = `${row.id}#${generation}`;
+      this.#appendRunEvent({
+        runId: input.runId,
+        kind: 'attempt_started',
+        actor: input.workerId,
+        at: nowIso(),
+        detail: { correlationId, generation, processId: this.#processIdentity },
+        attemptKey: runAttemptKey(row.runKey, generation),
+      });
+      privileged.appendEvidence({
+        taskId: row.taskId,
+        actor: input.workerId,
+        kind: 'run_attempt_started',
+        payload: { runId: input.runId, correlationId, generation, executable: false },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    return ok({ run: this.#runRecordFromStore(input.runId)!, correlationId, generation });
+  }
+
+  /**
+   * Record what the attempt did. `outcome_unknown` is a first-class answer and
+   * the honest one whenever the worker cannot tell — it moves the run to
+   * `needs_reconciliation`, where no further attempt is admitted until a human
+   * checks the real world.
+   *
+   * Two shapes, and the difference between them is the whole authority
+   * boundary of this phase:
+   *
+   *  - against an OPEN attempt, this CLOSES the run (`outcome_recorded`);
+   *  - against a run a concurrent recovery already classified, it records a
+   *    late `worker_report` and closes nothing.
+   *
+   * The second used to close the run too, and that was a hole rather than a
+   * kindness. `deriveRunRecord`'s `outcome_recorded` branch concludes, so
+   * `needsReconciliation` went false — and the `openRun` guard that refuses a
+   * new run on a task standing at "HQ does not know what happened" lifted with
+   * it. The worker whose own attempt was in doubt could then open a second run
+   * on the same task and start a second attempt, on a NON-IDEMPOTENT
+   * external-side-effect capability, with no independent principal anywhere in
+   * the loop — precisely the duplicate irreversible act `reconcileRun` demands
+   * independence, a step-up and an idempotency check to prevent. A live worker
+   * can still tell the truth; it just cannot also be the judge of it.
+   */
+  recordRunOutcome(input: {
+    runId: string;
+    workerId: string;
+    fence: number;
+    outcome: RunOutcome;
+    failureCategory?: RunFailureCategory;
+    note?: string;
+  }): OpsResult<{ run: RunRecord }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
+    if (!input.runId || !input.workerId) return fail('invalid_input', 'runId and workerId are required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!isReportableRunOutcome(input.outcome)) {
+      return fail('invalid_input', 'outcome must be succeeded, failed, not_executed or outcome_unknown');
+    }
+    const failureCategory = input.failureCategory ?? 'none';
+    if (!isRunFailureCategory(failureCategory)) {
+      return fail('invalid_input', 'failureCategory is not a member of the closed vocabulary');
+    }
+    const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoCredentialShape({ note: note.value ?? '' });
+    } catch {
+      return fail('invalid_input', 'The run note looks like it contains a credential; nothing was recorded.');
+    }
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'run ledger unavailable on this database handle');
+    }
+    const safeMode = this.#safeModeRefusal('record a run outcome');
+    if (safeMode) return safeMode;
+
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    privileged.reserve(() => {
+      const row = loadRun(this.#db, input.runId);
+      if (!row) {
+        refusal = { code: 'unknown_run', message: `Unknown run: ${input.runId}` };
+        return;
+      }
+      const claim = this.#runClaimRefusal(row.taskId, input.workerId, input.fence, 'record a run outcome');
+      if (claim && !claim.ok) {
+        refusal = claim.error;
+        return;
+      }
+      const record = deriveRunRecord(row, loadRunEvents(this.#db, input.runId));
+      // A LATE but truthful report is accepted (Wave 5 Medium 1) — as
+      // TESTIMONY, not as a conclusion (Wave 5 Critical 1). Recovery
+      // classifies every run whose `process_id` is not the recovering
+      // process — which proves "not me", never "dead" — so a live worker
+      // mid-attempt can find its run classified interrupted by a concurrent
+      // Founder-gated recovery. Refusing its statement outright left the
+      // ledger permanently asserting an interruption that never happened. The
+      // worker still holds the LIVE FENCED CLAIM, already checked above and
+      // unobtainable by a dead process, so it is exactly the entity this phase
+      // trusts to SAY what it saw. It is not the entity this phase lets DECIDE
+      // what happened: that is `reconcileRun`, which requires an independent
+      // principal, a step-up and an idempotent capability. So the late path
+      // appends `worker_report`, which the derivation folds in beside the
+      // interruption while `state` stays `needs_reconciliation` — the
+      // `openRun` guard, the attempt guard and the idempotency rule all stay
+      // exactly where they were.
+      const lateAfterInterruption = record.interruptedWithoutReport;
+      if (record.state !== 'attempting' && !lateAfterInterruption) {
+        refusal = {
+          code: 'run_state_conflict',
+          message: `Run ${input.runId} is ${record.state}; an outcome is recorded against an open attempt`,
+          details: { state: record.state },
+        };
+        return;
+      }
+      this.#appendRunEvent({
+        runId: input.runId,
+        kind: lateAfterInterruption ? 'worker_report' : 'outcome_recorded',
+        actor: input.workerId,
+        at: nowIso(),
+        detail: {
+          outcome: input.outcome,
+          failureCategory,
+          note: note.value ?? '',
+          correlationId: record.lastCorrelationId,
+          // Stated on the record rather than smoothed over: this outcome was
+          // reported after a recovery pass had already classified the run.
+          afterInterruption: lateAfterInterruption,
+        },
+      });
+      privileged.appendEvidence({
+        taskId: row.taskId,
+        actor: input.workerId,
+        kind: lateAfterInterruption ? 'run_worker_report' : 'run_outcome_recorded',
+        payload: {
+          runId: input.runId,
+          outcome: input.outcome,
+          failureCategory,
+          correlationId: record.lastCorrelationId,
+          // A late statement CLOSES NOTHING: the run stays at
+          // needs_reconciliation until an independent principal reconciles it.
+          closesRun: !lateAfterInterruption,
+          executable: false,
+        },
+      });
+    });
+    if (refusal) return { ok: false, error: refusal };
+    return ok({ run: this.#runRecordFromStore(input.runId)! });
+  }
+
+  /**
+   * CRASH / RESTART RECOVERY — the classification pass.
+   *
+   * Every run this ledger holds that is still `open` or `attempting` and was
+   * opened by a DIFFERENT process is classified. Stated precisely, because the
+   * precision is the point (Wave 5 Medium 1): `process_id` proves the run was
+   * opened by a process that is NOT the one running this recovery. It does not
+   * prove that process is dead, and HQ holds no liveness signal that would —
+   * there is no heartbeat and no boot nonce here. A recovery run while another
+   * process is genuinely mid-attempt will therefore classify that attempt as
+   * interrupted. What HQ does about that is not pretend otherwise: the run's
+   * carrier, if it is alive and still holds the live fenced claim, may record
+   * the outcome it actually observed afterwards (`recordRunOutcome`), and the
+   * interruption stays in the ledger as the classification it was.
+   *
+   * Each classified run is closed or flagged:
+   *
+   *  - never attempted → concluded `not_executed`. Provable from the ledger:
+   *    no attempt was ever reserved, so nothing external can have happened.
+   *  - attempted, capability has no side effect → concluded `not_executed`.
+   *    The capability cannot reach outside HQ, which is the same column the
+   *    queue itself uses at lease expiry.
+   *  - attempted, capability has (or may have) a side effect →
+   *    `needs_reconciliation`, outcome `outcome_unknown`. NEVER retried. A
+   *    capability row that cannot be read counts as side-effecting.
+   *
+   * Runs opened by THIS process are left strictly alone: they may genuinely be
+   * in flight, and closing them would be the recovery inventing a crash.
+   *
+   * It writes nothing into any other ledger. Interrupted canonical work owned
+   * elsewhere is REPORTED as counts with the canonical path that resolves it.
+   */
+  recoverInterruptedRuns(input: { requestedBy: string; reason?: 'process_interrupted' | 'stale_lease' | 'provider_outage' | 'partial_attempt' | 'stale_fence' }): OpsResult<HqRecoveryReport> {
+    const unsafeCallerText = callerTextRefusal(input, ['reason']);
+    if (unsafeCallerText) return unsafeCallerText;
+    const gate = this.#assertApprovalAuthority(input.requestedBy, 'recover interrupted runs');
+    if (gate) return gate;
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'run ledger unavailable on this database handle');
+    }
+    const reason = input.reason ?? 'process_interrupted';
+    // A closed union in the type, and scanned anyway: the type is not a
+    // runtime check, an untyped in-process caller can hand this method any
+    // string, and the value is carried into the run events this reports. One
+    // rule with no exceptions is worth more than an argument about which
+    // parameters are "really" free text.
+    try {
+      assertNoCredentialShape({ reason });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    const privileged = this.#requirePrivilegedQueue();
+    const classified: HqRecoveryClassification[] = [];
+    privileged.reserve(() => {
+      for (const row of loadRuns(this.#db)) {
+        if (row.processId === this.#processIdentity) continue;
+        const record = deriveRunRecord(row, loadRunEvents(this.#db, row.id));
+        const verdict = classifyInterruptedRun(record, {
+          capabilitySideEffect: this.#runCapabilityIsSideEffecting(row.capabilityId),
+          reason,
+        });
+        if (!verdict) continue;
+        const at = nowIso();
+        this.#appendRunEvent({
+          runId: row.id,
+          kind: 'interrupted',
+          actor: input.requestedBy,
+          at,
+          detail: {
+            reason: verdict.reason,
+            uncertain: verdict.uncertain,
+            failureCategory: 'process_interrupted',
+            openedByProcess: row.processId,
+            recoveredByProcess: this.#processIdentity,
+          },
+        });
+        privileged.appendEvidence({
+          taskId: row.taskId,
+          actor: input.requestedBy,
+          kind: 'run_interrupted',
+          payload: {
+            runId: row.id,
+            reason: verdict.reason,
+            uncertain: verdict.uncertain,
+            outcome: verdict.outcome,
+            executable: false,
+          },
+        });
+        classified.push({
+          runId: row.id,
+          taskId: row.taskId,
+          openedByProcess: row.processId,
+          reason: verdict.reason,
+          uncertain: verdict.uncertain,
+          outcome: verdict.outcome,
+        });
+      }
+    });
+    return ok(this.#recoveryReport(classified));
+  }
+
+  /**
+   * What canonical work stands interrupted in ledgers this phase does not own.
+   *
+   * COUNTS only, and read straight off `#db`. Each line names the canonical
+   * path that resolves it, because the honest thing to do about somebody
+   * else's ledger is to point at its own door.
+   */
+  #canonicalInterruptions(): HqCanonicalInterruptions {
+    const actionsAwaitingReconciliation = this.#actionStorePresent
+      ? loadActionIntents(this.#db).filter((intent) => {
+          const view = deriveActionView(intent, loadActionEvents(this.#db, intent.id));
+          return view.state === 'attempted' || view.state === 'outcome_unknown';
+        }).length
+      : 0;
+    const tasksOutcomeUnknown = (
+      this.#db.prepare(`SELECT COUNT(*) AS n FROM op_tasks WHERE status = 'outcome_unknown'`).get() as {
+        n: number;
+      }
+    ).n;
+    const tasksWithExpiredLease = (
+      this.#db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM op_tasks
+           WHERE status IN ('assigned', 'running') AND lease_expires_at IS NOT NULL AND lease_expires_at < ?`,
+        )
+        .get(nowIso()) as { n: number }
+    ).n;
+    return {
+      actionsAwaitingReconciliation,
+      tasksOutcomeUnknown,
+      tasksWithExpiredLease,
+      resolvedBy: {
+        actionsAwaitingReconciliation: 'HeadquarterOperations.reconcileAction (the Phase 8 gateway owns it)',
+        tasksOutcomeUnknown: 'HeadquarterOperations.reconcileTask (the Operator queue owns it)',
+        tasksWithExpiredLease: 'OperatorQueue.sweepExpiredLeases (the Operator queue owns it)',
+      },
+      statement: RECOVERY_SCOPE_STATEMENT,
+    };
+  }
+
+  #recoveryReport(classified: readonly HqRecoveryClassification[]): HqRecoveryReport {
+    const runs = this.#listRunsFromStore();
+    return {
+      processIdentity: this.#processIdentity,
+      classified: [...classified],
+      interruptedTotal: classified.length,
+      nowNeedingReconciliation: runs.filter((run) => run.needsReconciliation).length,
+      canonical: this.#canonicalInterruptions(),
+      safeMode: this.#integrityReport.safeMode,
+      retryStatement: RUN_RETRY_STATEMENT,
+    };
+  }
+
+  /**
+   * Reconcile a run whose outcome HQ does not know, after a human checked the
+   * real world.
+   *
+   * Same authority shape as `reconcileAction`, deliberately: approval
+   * authority, plus INDEPENDENCE from the worker that ran it — the entity
+   * whose attempt is in doubt does not get to declare what it did. And the
+   * same idempotency rule: `confirmed_not_executed` is refused for a
+   * non-idempotent capability, because reopening an attempt of something that
+   * cannot be safely repeated is how a duplicate irreversible act happens.
+   */
+  reconcileRun(input: {
+    runId: string;
+    decision: RunReconcileDecision;
+    note: string;
+    requestedBy: string;
+  }): OpsResult<{ run: RunRecord }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
+    const runId = input.runId?.trim() ?? '';
+    if (!runId) return fail('invalid_input', 'runId is required');
+    if (!isRunReconcileDecision(input.decision)) {
+      return fail('invalid_input', `decision must be one of: ${RUN_RECONCILE_DECISIONS.join(', ')}`);
+    }
+    const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, true);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoCredentialShape({ note: note.value });
+    } catch {
+      return fail('invalid_input', 'The reconciliation note looks like it contains a credential; nothing was recorded.');
+    }
+    const gate = this.#assertApprovalAuthority(input.requestedBy, 'reconcile a run outcome');
+    if (gate) return gate;
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'run ledger unavailable on this database handle');
+    }
+    const privileged = this.#requirePrivilegedQueue();
+    let refusal: OpsError | null = null;
+    privileged.reserve(() => {
+      const row = loadRun(this.#db, runId);
+      if (!row) {
+        refusal = { code: 'unknown_run', message: `Unknown run: ${runId}` };
+        return;
+      }
+      const record = deriveRunRecord(row, loadRunEvents(this.#db, runId));
+      if (record.state !== 'needs_reconciliation') {
+        refusal = {
+          code: 'run_state_conflict',
+          message: `Run ${runId} is ${record.state}; only a run whose outcome is unknown is reconciled`,
+          details: { state: record.state },
+        };
+        return;
+      }
+      if (row.workerId === input.requestedBy) {
+        refusal = {
+          code: 'not_permitted',
+          message: `${input.requestedBy} carried run ${runId} and cannot reconcile its outcome: reconciliation requires an independent principal`,
+          details: { actor: input.requestedBy },
+        };
+        return;
+      }
+      if (input.decision === 'confirmed_not_executed') {
+        const capability = this.#capabilityFromStore(row.capabilityId);
+        if (!capability?.idempotent) {
+          refusal = {
+            code: 'not_permitted',
+            message:
+              `Capability ${row.capabilityId} is not idempotent; an uncertain execution cannot be reopened for ` +
+              'another attempt — close it as succeeded or failed after investigation',
+            details: { capabilityId: row.capabilityId },
+          };
+          return;
+        }
+      }
+      const at = nowIso();
+      this.#appendRunEvent({
+        runId,
+        kind: 'reconciled',
+        actor: input.requestedBy,
+        at,
+        detail: {
+          decision: input.decision,
+          note: note.value,
+          correlationId: record.lastCorrelationId,
+        },
+      });
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `run:${runId}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: `Run reconciled ${input.decision}`,
+        detail: { taskId: row.taskId, decision: input.decision, executable: false },
+      });
+      privileged.appendEvidence({
+        taskId: row.taskId,
+        actor: input.requestedBy,
+        // The WITNESS the fold corroborates a `reconciled` ledger row against
+        // (Wave 5 correction round sixteen, Critical B-2). One spelling, in
+        // `reliability-command.ts` beside the check that reads it, appended
+        // inside the same reservation as the ledger row so the pair lands
+        // together or not at all.
+        kind: RUN_RECONCILED_EVIDENCE_KIND,
+        payload: {
+          runId,
+          decision: input.decision,
+          note: note.value,
+          correlationId: record.lastCorrelationId,
+          executable: false,
+        },
+      });
+      this.#commitReconciliationWitness();
+    });
+    if (refusal) return { ok: false, error: refusal };
+    return ok({ run: this.#runRecordFromStore(runId)! });
+  }
+
+  /**
+   * Commit to the evidence log at the point a reconciliation lands (Wave 5
+   * correction round seventeen, High 1).
+   *
+   * The corroboration a `reconciled` row rests on is a standing link in
+   * `op_evidence`, and a writer holding the file open can append one. Until
+   * this existed, that two-append forgery left every health surface reporting
+   * `safeMode: false, observations: []`. Committing HERE is what makes the
+   * difference observable: an HONEST reconciliation's witness is covered by a
+   * commitment the instant it lands, so
+   * `uncommittedReconciliationWitnesses` counts only witnesses HQ did not
+   * write — see that function for what "covered" means and for the residual
+   * (a writer who also appends a checkpoint is not counted).
+   *
+   * LAST inside the caller's reservation, so the committed tip includes the
+   * evidence entry just appended and so the pair lands together or not at all
+   * — the same placement and the same safe-mode condition
+   * `assessHqIntegrity` uses: a commitment is HQ standing behind the record,
+   * and safe mode is HQ saying it cannot.
+   */
+  #commitReconciliationWitness(): void {
+    if (this.#integrityReport.safeMode) return;
+    recordIntegrityCheckpoint(this.#db, {
+      id: `checkpoint-${uuid()}`,
+      recordedAt: nowIso(),
+      processId: this.#processIdentity,
+      recordedBy: 'hq_reconciliation',
+    });
+  }
+
+  /**
+   * Run the FULL integrity assessment and re-latch the safe-mode verdict.
+   *
+   * This is the only path that can CLEAR safe mode, and it clears it only by
+   * finding nothing blocking — there is deliberately no override parameter, no
+   * force flag and no "acknowledge" that turns a blocking finding into a
+   * cleared one. Repairing a corrupt store is a Founder act performed against
+   * a verified backup, outside HQ; HQ's job is to say so and to keep saying so
+   * until it is true.
+   *
+   * Permitted in safe mode by construction, and it writes an evidence entry
+   * recording that the assessment happened and what it found (categorical
+   * finding names only), the verdict row that entry corroborates, and — only
+   * when the assessment found nothing blocking — one durable checkpoint.
+   *
+   * REFUSED on a read-only handle (Wave 5 correction round five, Low 2). All
+   * three of those writes are part of the act: "record first, latch second"
+   * means a verdict HQ could not record is a verdict HQ does not act on, and a
+   * read-only handle cannot record one. It used to be attempted anyway —
+   * `#reliabilityStorePresent` is TRUE for a read-only handle over a modern
+   * file, so the append ran and the engine's `SqliteError: attempt to write a
+   * readonly database` escaped this facade as a thrown exception rather than an
+   * `OpsResult`, against this module's own "refusals, not exceptions" rule.
+   */
+  assessHqIntegrity(input: { requestedBy: string }): OpsResult<HqIntegrityView> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
+    const refusedActor = this.#resolveReliabilityCommander(input.requestedBy, 'assess HQ store integrity');
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#reliabilityCapabilityGate('assess HQ store integrity');
+    if (refusedCapability) return refusedCapability;
+    if (this.#db.readonly) {
+      return fail(
+        'invalid_input',
+        'HQ integrity cannot be assessed through a read-only handle: the assessment records a verdict, the ' +
+          'evidence entry that corroborates it and the durable checkpoint, and a verdict HQ cannot record ' +
+          'is a verdict HQ does not act on. Open the database with a writable HQ command and assess there.',
+      );
+    }
+
+    const before = this.#integrityReport.safeMode;
+    // Deliberately WITHOUT `guardsMissingAsFound`: a fresh assessment asks
+    // about the file as it stands NOW, which is the only way a boot-time
+    // finding can ever be cleared. That is also why clearing takes an
+    // assessment rather than a restart — a restart would re-create the guards
+    // and then report the file it had just repaired.
+    const report = fullIntegrity(this.#db, {
+      // The `#private` closure, NEVER `this.queue.evidence.verifyChain()`.
+      // `evidence_chain_broken` is a safe-mode blocking finding, so the read
+      // behind it is enforcement and may not travel through a patchable
+      // convenience surface — the Wave 5 High. See the field's note.
+      verifyEvidenceChain: this.#verifyEvidenceChainFromStore,
+      reliabilitySchemaPresent: this.#reliabilityStorePresent,
+      // The durable commitment is checked HERE too, and needs no argument: the
+      // full pass runs `structuralIntegrity` beneath it, which reads
+      // `contradictedChainCommitment` directly. This is the only path that
+      // clears a latch, so a log that cannot satisfy what HQ recorded about it
+      // has to be visible to it, or a Founder assessment would clear a verdict
+      // about a destroyed audit log (Wave 5 correction round four, High H1;
+      // round five, High 1).
+      //
+      // The one as-found observation an assessment may NOT clear (Wave 5
+      // correction round five, Medium 1). Guards are deliberately omitted above
+      // because HQ re-creating a trigger genuinely repairs the file's guard set
+      // — the file as it now stands really does carry it. A ledger HQ had to
+      // re-create EMPTY is not repaired by the re-creation: the rows are gone,
+      // and an assessment that looked only at the healthy empty table certified
+      // a destroyed store as clean. Carried for the ledgers THIS process found
+      // missing; the durable half that survives a restart is the checkpoint's
+      // high-water commitment, `regressedImmutableLedgers`.
+      immutableTablesAbsentAsFound: this.#immutableLedgersRestoredAtBoot,
+    });
+    const findings = report.observations.map((observation) => observation.finding);
+    // RECORD first, latch second, and both inside ONE reservation (Wave 5
+    // review, Low finding 8 and High finding 1). Previously the field was
+    // assigned before the evidence append, so a throw in the append left safe
+    // mode engaged-or-cleared with no audit entry at all. Now the verdict row
+    // and the evidence entry land together or not at all, and the in-memory
+    // latch is only updated once they have: a verdict HQ could not record is a
+    // verdict HQ does not act on.
+    const privileged = this.#requirePrivilegedQueue();
+    const verdictId = `verdict-${uuid()}`;
+    try {
+      privileged.reserve(() => {
+        // Verdict, then its corroborating evidence entry, then the COMMITMENT —
+        // one reservation, so all three land together or not at all. The
+        // concurrent lane put the evidence append first so that a chain tip
+        // stored ON the verdict row would already include that entry; that
+        // mechanism is gone (see the boundary note on `recordIntegrityCheckpoint`)
+        // and the freshness it wanted is delivered by the checkpoint, which is
+        // written LAST and therefore commits to a tip that already carries this
+        // assessment's own entry.
+        if (this.#reliabilityStorePresent) {
+          appendIntegrityVerdict(this.#db, {
+            id: verdictId,
+            assessedAt: nowIso(),
+            depth: report.depth,
+            safeMode: report.safeMode,
+            findings,
+            processId: this.#processIdentity,
+            assessedBy: input.requestedBy,
+          });
+        }
+        privileged.appendEvidence({
+          actor: input.requestedBy,
+          kind: INTEGRITY_ASSESSED_EVIDENCE_KIND,
+          payload: {
+            // The verdict row this entry corroborates — the pair that makes
+            // `SAFE_MODE_STATEMENT`'s "only a fresh full assessment clears it"
+            // true rather than aspirational. Null when there is no ledger to
+            // record a verdict in, which `verdictRecorded` already says.
+            verdictId: this.#reliabilityStorePresent ? verdictId : null,
+            depth: report.depth,
+            safeMode: report.safeMode,
+            safeModeChanged: before !== report.safeMode,
+            findings,
+            // False on a handle whose FILE carries no verdict ledger — a
+            // database written before the Wave 5 correction. The verdict is then
+            // process-local and SAFE_MODE_STATEMENT says so; nothing pretends
+            // otherwise. It no longer says "or a read-only one", which was
+            // false: `#reliabilityStorePresent` is TRUE for a read-only handle
+            // over a modern file, so that case reached the append and threw
+            // rather than reporting anything. A read-only handle is refused
+            // above, before any of this runs (Wave 5 correction round five,
+            // Low 2).
+            verdictRecorded: this.#reliabilityStorePresent,
+            executable: false,
+          },
+        });
+        // The COMMITMENT, inside the same reservation and last, so its tip
+        // includes the evidence entry just appended and so it lands with the
+        // verdict or not at all. Only a CLEAN assessment commits: a checkpoint is
+        // HQ standing behind the record, and a blocking finding is HQ saying it
+        // cannot. Nothing is written when the chain has not advanced past what is
+        // already committed — see `recordIntegrityCheckpoint`.
+        if (!report.safeMode) {
+          recordIntegrityCheckpoint(this.#db, {
+            id: `checkpoint-${uuid()}`,
+            recordedAt: nowIso(),
+            processId: this.#processIdentity,
+            recordedBy: input.requestedBy,
+          });
+        }
+      });
+    } catch (error) {
+      // A verdict HQ could not record is a verdict HQ does not act on — that
+      // rule is older than this catch and is unchanged: `#integrityReport` is
+      // deliberately NOT assigned here, so a latch that was engaged stays
+      // engaged and one that was clear is not silently engaged by a failed
+      // write. What changes is that the caller is TOLD (Wave 5 correction round
+      // fourteen, High 2). This method used to throw the driver's own
+      // `SqliteError` uncaught, and round fourteen executed a single permitted
+      // `INSERT` that made it do so on an otherwise-clean store: the Founder's
+      // only route to clearing a latch answered with a crash rather than a
+      // refusal, and the unauthenticated snapshot CLI died with it.
+      return fail(
+        'operator_rejected',
+        `HQ assessed its own store but could NOT record the verdict, so nothing about safe mode has ` +
+          `changed: ${errorMessage(error)}. Nothing but HQ appends to those ledgers and their guards ` +
+          `refuse a DELETE, so this is a file another writer has changed. The assessment HQ reached ` +
+          `found ${findings.length === 0 ? 'nothing blocking' : findings.join(', ')}, and it is not ` +
+          `acted on because it is not on the record.`,
+        { findings },
+      );
+    }
+    this.#integrityReport = report;
+    return ok(this.#integrityView());
+  }
+
+  /**
+   * Record a file as a VERIFIED recovery point.
+   *
+   * The verification is the whole value, so it is performed here rather than
+   * trusted from the caller: the path must be absolute, a regular non-symlink
+   * file within the size bound, must open as a readable SQLite database, must
+   * pass `integrity_check`, and must actually be an HQ database. Only then is
+   * a row written, carrying the sha256 HQ computed itself over the bytes it
+   * checked — never a digest the caller declared.
+   *
+   * HQ does not TAKE the backup and does not restore one. Taking a backup
+   * safely (inode reservation, no-replace publication, directory-entry
+   * commits) already lives in `@factoryos/hq-host`'s durable persistence
+   * owner, and restoring is a deliberate operator act against a stopped
+   * process. This is the register that says which files were checked, by
+   * whom, and what they hashed to.
+   */
+  recordVerifiedBackup(input: {
+    backupPath: string;
+    requestedBy: string;
+    note?: string;
+  }): OpsResult<{ backup: BackupRecordView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['backupPath', 'note']);
+    if (unsafeCallerText) return unsafeCallerText;
+    const backupPath = input.backupPath?.trim() ?? '';
+    if (!backupPath) return fail('invalid_input', 'backupPath is required');
+    if (backupPath.length > MAX_BACKUP_PATH_LENGTH) {
+      return fail('invalid_input', `backupPath exceeds ${MAX_BACKUP_PATH_LENGTH} characters`);
+    }
+    const note = missionText('note', input.note, MAX_RUN_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    // The scan the "every facade write that stores caller text" rule promised
+    // and this method did not have (Wave 5 correction round six, High 4). The
+    // backup register is APPEND-ONLY and this note is served verbatim on
+    // `GET /api/hq/control/reliability`, which applies the strict scan to its
+    // whole response — so one accepted credential made that route 500 FOREVER:
+    // the row cannot be deleted, cannot be updated, and a restart re-reads it.
+    // Executed against the previous head with a real verified backup file: 200,
+    // then accepted, then 500 across a restart.
+    try {
+      assertNoCredentialShape({ note: note.value ?? '' });
+    } catch {
+      return fail(
+        'invalid_input',
+        'The backup note looks like it contains a credential; nothing was recorded. The backup register is ' +
+          'append-only and this note is published on the Founder reliability route, so a stored credential ' +
+          'could be neither removed nor served.',
+      );
+    }
+    const refusedActor = this.#resolveReliabilityCommander(input.requestedBy, 'record a verified backup');
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#reliabilityCapabilityGate('record a verified backup');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#reliabilityStorePresent) {
+      return fail('invalid_input', 'backup register unavailable on this database handle');
+    }
+
+    // The live database's own path travels with the candidate, so registering
+    // the file HQ is running on as a "recovery point" is refused on identity
+    // (Wave 5 correction round six, Low 3). `sidecar_journal_present` catches
+    // it only while a process holds it open; SQLite removes the sidecars on a
+    // clean close, so between runs the live file verified perfectly.
+    const verification = verifyHqBackupFile(backupPath, {
+      liveDatabasePath: typeof this.#db.name === 'string' ? this.#db.name : null,
+      // HQ's OWN full assessment of the copy, which `store/` cannot compute
+      // alone (Wave 5 correction round eleven, High 1). A module import, not a
+      // property on any object a caller holding `HeadquarterOperations` can
+      // reach: an enforcement input may not travel through a patchable
+      // delegate, which is the same rule `#verifyEvidenceChainFromStore`
+      // follows.
+      assessCandidate: assessHqBackupCandidate,
+    });
+    if (!verification.verified) {
+      return fail(
+        'backup_verification_failed',
+        `That file was not recorded as a recovery point: ${verification.refusals.join(', ')}. ` +
+          'A backup HQ has not verified is not a backup HQ will vouch for.',
+        { refusals: verification.refusals },
+      );
+    }
+
+    // The path HQ actually OPENED, not the alias the caller may have named. A
+    // symlinked ancestor is not refused (see `verifyHqBackupFile`), but the
+    // register must not say a file was verified at a path that merely points at
+    // it — the recovery point's identity is the file, and the key is derived
+    // from it (Wave 5 Low).
+    const verifiedPath = verification.resolvedPath ?? backupPath;
+    // The SECOND stored column. `note` is already refused above, by the guard
+    // the other lane placed before the actor gate, so this scan is narrowed to
+    // the path alone rather than repeating it (Wave 5 correction round seven,
+    // Medium 2, reconciled with round six High 4 — both lanes found this
+    // method, each closed a different column of it, and both closures stand).
+    // The path cannot be scanned up there: what is stored is the path HQ
+    // actually OPENED, which does not exist until `verifyHqBackupFile` has
+    // resolved it. `hq_reliability_backups` is append-only and both columns are
+    // published on the reliability view, which the read boundary scans, so a
+    // value the read refuses would be a permanent outage on the exact route a
+    // Founder needs while investigating one.
+    try {
+      assertNoCredentialShape({ backupPath: verifiedPath });
+    } catch (error) {
+      return fail('invalid_input', errorMessage(error));
+    }
+    const recordKey = backupRecordKey({ backupPath: verifiedPath, contentDigest: verification.digest! });
+    const id = `backup-${uuid()}`;
+    const at = nowIso();
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_reliability_backups WHERE record_key = ?`)
+        .get(recordKey) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_reliability_backups
+             (id, backup_path, content_digest, size_bytes, schema_tables, verified_at, verified_by,
+              process_id, note, record_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          verifiedPath,
+          verification.digest,
+          verification.sizeBytes,
+          verification.schemaTables,
+          at,
+          input.requestedBy,
+          this.#processIdentity,
+          note.value,
+          recordKey,
+        );
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `backup:${id}`,
+        status: null,
+        actor: input.requestedBy,
+        summary: 'Verified HQ backup recorded as a recovery point',
+        detail: { sizeBytes: verification.sizeBytes, schemaTables: verification.schemaTables, executable: false },
+      });
+      privileged.appendEvidence({
+        actor: input.requestedBy,
+        kind: 'hq_backup_verified',
+        payload: {
+          backupId: id,
+          contentDigest: verification.digest,
+          sizeBytes: verification.sizeBytes,
+          schemaTables: verification.schemaTables,
+          executable: false,
+        },
+      });
+    });
+    if (dedupedTo) {
+      return ok({ backup: this.#backupView(dedupedTo)!, deduplicated: true });
+    }
+    return ok({ backup: this.#backupView(id)!, deduplicated: false });
+  }
+
+  // ---- reliability reads ----
+
+  /** One run's derived record, or null (including over a pre-Phase-13 read-only file). */
+  getRun(id: string): RunRecord | null {
+    if (!id) return null;
+    return this.#runRecordFromStore(id);
+  }
+
+  listRuns(filter?: { taskId?: string; runKind?: RunKind }): RunRecord[] {
+    return this.#listRunsFromStore(filter);
+  }
+
+  /** The bounded wire read: newest first, with the true total stated beside it. */
+  listRunsBounded(filter?: { taskId?: string; runKind?: RunKind }): {
+    runs: RunRecord[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.#listRunsFromStore(filter).reverse();
+    const page = all.slice(0, RUN_READ_LIMIT);
+    return { runs: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  #backupView(id: string): BackupRecordView | null {
+    if (!this.#reliabilityStorePresent) return null;
+    const row = this.#db.prepare(`SELECT * FROM hq_reliability_backups WHERE id = ?`).get(id) as
+      | Record<string, unknown>
+      | undefined;
+    if (!row) return null;
+    return backupRowToView({
+      seq: row.seq as number,
+      id: row.id as string,
+      backupPath: row.backup_path as string,
+      contentDigest: row.content_digest as string,
+      sizeBytes: Number(row.size_bytes),
+      schemaTables: Number(row.schema_tables),
+      verifiedAt: row.verified_at as string,
+      verifiedBy: row.verified_by as string,
+      processId: row.process_id as string,
+      note: (row.note as string | null) ?? null,
+    });
+  }
+
+  listVerifiedBackupsBounded(): {
+    backups: BackupRecordView[];
+    total: number;
+    truncated: boolean;
+  } {
+    if (!this.#reliabilityStorePresent) return { backups: [], total: 0, truncated: false };
+    const all = loadBackupRecords(this.#db).reverse();
+    const page = all.slice(0, BACKUP_READ_LIMIT).map(backupRowToView);
+    return { backups: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  #integrityView(): HqIntegrityView {
+    return {
+      safeMode: this.#integrityReport.safeMode,
+      depth: this.#integrityReport.depth,
+      observations: this.#integrityReport.observations.map((observation) => ({ ...observation })),
+      durability: { ...this.#integrityReport.durability },
+      safeModeStatement: SAFE_MODE_STATEMENT,
+      depthStatement: INTEGRITY_DEPTH_STATEMENT,
+    };
+  }
+
+  /**
+   * The Founder-facing reliability picture: the latched integrity verdict, the
+   * durability posture, what this ledger is holding, and what canonical work
+   * stands interrupted elsewhere. A pure READ — it re-assesses nothing and
+   * latches nothing, because a GET must never be the thing that changes a
+   * safety posture.
+   */
+  hqReliabilityPosture(): HqReliabilityPosture {
+    const runs = this.#listRunsFromStore();
+    return {
+      processIdentity: this.#processIdentity,
+      storePresent: this.#reliabilityStorePresent,
+      integrity: this.#integrityView(),
+      runs: {
+        total: runs.length,
+        needsReconciliation: runs.filter((run) => run.needsReconciliation).length,
+        openOrAttempting: runs.filter((run) => run.state === 'open' || run.state === 'attempting').length,
+        openedByOtherProcesses: runs.filter((run) => run.processId !== this.#processIdentity).length,
+      },
+      verifiedBackups: this.#reliabilityStorePresent ? loadBackupRecords(this.#db).length : 0,
+      // Computed LIVE and latched nowhere — this is an observation about the
+      // file as it now stands, and a GET that latched a safety posture would
+      // be the thing this method's own docblock refuses (round seventeen,
+      // High 1).
+      commitments: {
+        uncommittedReconciliationWitnesses: uncommittedReconciliationWitnesses(this.#db),
+        statement: RECONCILIATION_COMMITMENT_STATEMENT,
+      },
+      canonical: this.#canonicalInterruptions(),
+      ledgerStatement: RUN_LEDGER_STATEMENT,
+      retryStatement: RUN_RETRY_STATEMENT,
+    };
+  }
+
+  /**
+   * Counts over closed vocabularies for the UNAUTHENTICATED artifact.
+   *
+   * ENFORCEMENT-SAFE, and it has to be: this is the one read on the path that
+   * produces `hq-snapshot.json`, so a same-realm patch of a public method here
+   * would be a patch of what the world is told. It reads
+   * `#listRunsFromStore` and the `#private` latched report — deliberately not
+   * `listRuns()` or `hqReliabilityPosture()`.
+   *
+   * No run label, task/mission/action id, worker id, correlation id, backup
+   * path, digest or finding detail crosses. The finding MAP is closed by
+   * construction: every key passes the vocabulary check inside
+   * `summarizeReliability`, and anything else is counted as `unrecognized`.
+   */
+  reliabilitySummary(): ReliabilitySnapshotView {
+    // The RUN LEDGER may be absent while the integrity verdict is not.
+    // `#reliabilityStorePresent` answers only "does this file carry the Phase
+    // 13 run tables"; `#integrityReport` is computed over the WHOLE file, and
+    // the two disagree on exactly the case that matters — a genuine
+    // pre-Phase-13 database with a dropped append-only guard. This branch used
+    // to return `emptyReliabilitySnapshot(false)`, which HARD-CODES
+    // `safeMode: false`, `findings: {}` and `durabilityMeetsRequirement: true`
+    // without consulting the verdict at all, so the unauthenticated artifact
+    // published "everything is fine" while HQ had latched safe mode — and
+    // because the snapshot's provenance note is gated on that same flag, the
+    // "HQ is in SAFE MODE" sentence was suppressed too (Wave 5 review, Medium
+    // finding C-1; law 8, and the one thing this phase exists to prevent).
+    //
+    // The run half is stated as absent — no runs, no backups, storePresent
+    // false — and the integrity half is the real verdict, on both branches.
+    //
+    // The other correction lane fixed the same finding by passing the real
+    // verdict into `emptyReliabilitySnapshot(false, integrity)` on this
+    // branch. That helper keeps the required-integrity signature that lane
+    // gave it — it can no longer be called without a verdict, and its own
+    // test pins that — but the BRANCH is gone here: the integrity fields are
+    // composed exactly once, so the absent-store and present-store answers
+    // cannot drift apart in a later change.
+    const storePresent = this.#reliabilityStorePresent;
+    return summarizeReliability({
+      storePresent,
+      runs: storePresent ? this.#listRunsFromStore() : [],
+      verifiedBackups: storePresent ? loadBackupRecords(this.#db).length : 0,
+      safeMode: this.#integrityReport.safeMode,
+      assessmentDepth: this.#integrityReport.depth,
+      findings: this.#integrityReport.observations.map((observation) => observation.finding),
+      durabilityMeetsRequirement: this.#integrityReport.durability.meetsRequirement,
+    });
+  }
+
+  /**
+   * Whether this database carries the Phase 13 ledger. False only for a
+   * read-only handle over a pre-Phase-13 file; run reads then answer
+   * empty/null and the snapshot states the absence rather than an empty store.
+   */
+  reliabilityStorePresent(): boolean {
+    return this.#reliabilityStorePresent;
+  }
+
+  /** This process's identity — the fact a restart is detected by. */
+  hqProcessIdentity(): string {
+    return this.#processIdentity;
+  }
+
+  // ---- cost + intelligence optimization (Phase 14) ----
+
+  /**
+   * The Founder gate behind the two INTELLIGENCE COMMAND acts — recording a
+   * model/provider observation, and setting a budget policy.
+   *
+   * Recording a routing decision, an outcome and a cost entry deliberately do
+   * NOT come through here: they sit behind the live fenced claim on the
+   * canonical task, exactly like a Phase 13 run event, because the worker
+   * carrying the work is the one entity that can honestly say what it used.
+   */
+  #resolveIntelligenceCommander(actor: string, action: string): OpsResult<never> | null {
+    return this.#resolveFounderGateActor(
+      actor,
+      action,
+      INTELLIGENCE_COMMAND_CAPABILITY.id,
+      'commanding HQ intelligence policy',
+    );
+  }
+
+  /**
+   * The fail-closed capability gate for the same two acts, with
+   * `permittedInSafeMode` FALSE — the default. Both ADD to the canonical
+   * record (a cost fact, a spending ceiling), and HQ does not add to a record
+   * it cannot currently stand behind.
+   */
+  #intelligenceCapabilityGate(action: string): OpsResult<never> | null {
+    return this.#founderGateCapabilityGate(
+      action,
+      INTELLIGENCE_COMMAND_CAPABILITY.id,
+      intelligenceCommandCapabilityState,
+      intelligenceCommandContractDrift,
+      'commanding HQ intelligence policy',
+    );
+  }
+
+  /**
+   * The CURRENT budget ceiling for a scope, read PRIVATELY.
+   *
+   * ENFORCEMENT-SAFE, and it is the single most important read in the phase:
+   * this row decides whether a proposal is blocked, whether it needs a Founder
+   * decision, and which tiers are permitted at all. A same-realm patch of
+   * `listIntelligenceBudgetsBounded` or `intelligenceBudgetDecision` must therefore
+   * buy nothing — pinned on the instance, on the prototype, and against a
+   * facade constructed AFTER the patch.
+   */
+  #budgetFromStore(scope: {
+    scopeKind: BudgetScope;
+    scopeId: string;
+    window: BudgetWindow;
+  }): BudgetRow | null {
+    if (!this.#intelligenceStorePresent) return null;
+    return latestBudgetFor(loadBudgets(this.#db), scope);
+  }
+
+  /** Every cost entry, read privately. Feeds the budget evaluation. */
+  #costEntriesFromStore(): CostEntryRow[] {
+    if (!this.#intelligenceStorePresent) return [];
+    return loadCostEntries(this.#db);
+  }
+
+  /**
+   * The entries a scope's ceiling is measured against.
+   *
+   * The window filter is a PREFIX comparison on `recordedAt` — the instant HQ
+   * itself stamped — so it needs no timezone rule and no arithmetic: a `day`
+   * ceiling counts entries HQ recorded today, a `month` ceiling this month's.
+   * `total` counts everything ever recorded for the scope.
+   *
+   * It used to compare `occurredAt`, which the CALLER supplies (Wave 5
+   * High 3). Under a `deployment/day` ceiling of 100 with 90 observed, an
+   * entry declaring `occurredAt: "0000-00-00T00:00:00Z"` with an amount of
+   * 1,000,000 was accepted and the ceiling still reported `within_ceiling`:
+   * the entry simply fell outside the window it was being measured against.
+   * `occurredAt` stays as reported metadata; it measures nothing.
+   */
+  #entriesForScope(
+    scope: { scopeKind: BudgetScope; scopeId: string; window: BudgetWindow },
+    at: string,
+  ): CostEntryRow[] {
+    const prefix = scope.window === 'day' ? at.slice(0, 10) : scope.window === 'month' ? at.slice(0, 7) : '';
+    // Memoised per evaluation: a scope is measured over every entry, and the
+    // canonical lookups below are one query each.
+    const canonicalMemo = new Map<string, { missionIds: string[]; projectIds: string[] }>();
+    const canonicalOf = (taskId: string): { missionIds: string[]; projectIds: string[] } => {
+      let value = canonicalMemo.get(taskId);
+      if (!value) {
+        value = this.#canonicalTaskScopes(taskId);
+        canonicalMemo.set(taskId, value);
+      }
+      return value;
+    };
+    const durableProjectMemo = new Map<string, string[]>();
+    const durableProjectsOf = (taskId: string): string[] => {
+      let value = durableProjectMemo.get(taskId);
+      if (!value) {
+        value = this.#durableTaskProjectScopes(taskId);
+        durableProjectMemo.set(taskId, value);
+      }
+      return value;
+    };
+    const providerMemo = new Map<string, string | null>();
+    const boundProviderOf = (taskId: string): string | null => {
+      if (providerMemo.has(taskId)) return providerMemo.get(taskId) ?? null;
+      const bound = this.#taskBoundProvider(taskId);
+      const value = bound == null ? null : normalizeProviderId(bound);
+      providerMemo.set(taskId, value);
+      return value;
+    };
+    return this.#costEntriesFromStore()
+      .filter((entry) => {
+        switch (scope.scopeKind) {
+          // CANONICAL membership, not the entry's own stored column (Wave 5
+          // correction round three, High B1 / Medium B5).
+          //
+          // `mission_id` and `project_id` on a cost entry hold ONE value, and
+          // `#canonicalTaskScopes` derives EVERY mission a task is linked to.
+          // Matching the column therefore stopped a mission ceiling
+          // accumulating the moment a task was linked to a second mission —
+          // the non-first mission's ceiling was evaluated against ZERO entries
+          // — and WHICH of the two ceilings bound was decided by uuid sort
+          // order, so twelve runs of one configuration enforced eight times and
+          // bypassed four. Identical spend under an identical ceiling read
+          // `blocked, observed 5000000` with one link and `within_ceiling,
+          // observed 0` with two, through `linkMissionPlanItem`, a supported
+          // facade call, with no raw SQL anywhere.
+          //
+          // `hq_mission_plan_items` is the one place HQ records that a task
+          // belongs to a mission, so deriving membership from it here is the
+          // canonical-truth answer rather than a second store that can drift
+          // from it.
+          //
+          // **The stored columns DO measure, and the sentence that used to sit
+          // here said they did not** (Wave 5 correction round seven, Low 5). It
+          // read "the stored columns stay as recorded attribution and measure
+          // nothing", and the round-four paragraph immediately below it — which
+          // adds `entry.missionIds` to this very predicate — has contradicted it
+          // ever since. What round three took away was the stored columns being
+          // the ONLY answer; what round four gave back was their being one of
+          // two, unioned, so that a link broken afterwards cannot take a
+          // recorded spend out of the ceiling that governed it. Corrected here
+          // rather than deleted, because a reader arriving at the union needs to
+          // know which round changed what.
+          //
+          // CANONICAL membership UNION the attribution HQ itself recorded on
+          // the entry (Wave 5 correction round four, High H2).
+          //
+          // The canonical half alone was fail-OPEN in the one direction that
+          // matters. `#canonicalTaskScopes` answers "every mission this task
+          // belongs to NOW", so breaking the link erased the SPEND from the
+          // ceiling it had exhausted: `blocked, observed 5000` became
+          // `within_ceiling, observed 0`, and the previously refused write was
+          // then RECORDED. Three routes reached it — a supported facade call
+          // (`assignMissionToProject({projectId: null})` by a principal holding
+          // only `hq.mission_command`), a raw `UPDATE hq_mission_plan_items SET
+          // mission_id`, and `DELETE FROM hq_missions` — and none of them was a
+          // finding anywhere.
+          //
+          // `mission_id` and `project_id` on this row are HQ-DERIVED, never
+          // caller-supplied (`recordIntelligenceCost` writes them from
+          // `#canonicalTaskScopes`), and the row is append-only. So the union
+          // is monotone against every supported route: once HQ has filed a
+          // spend under a mission, no later relinking can take it out of that
+          // mission's measurement, and no caller can put it into another's.
+          //
+          // It is NOT "unforgeable", which is what this comment said until
+          // round ten, Medium 1. `hq_intel_cost_entries` is append-only by
+          // trigger and carries no hash chain, so a writer holding the file can
+          // DROP the four guards, `UPDATE ... SET mission_ids='[]',
+          // project_ids='[]'` in place, and put the guards back. Executed on a
+          // task with its OWN recorded spend — the half that had always held —
+          // the observed figure went 5000 to 0 and a refused `critical_review`
+          // was ACCEPTED, with the row count unchanged at 1 and both integrity
+          // depths reporting `safeMode: false` and no observation. That is the
+          // count-preserving in-place rewrite class in Phase 13's residual
+          // list, not a route this union was ever going to close.
+          //
+          // The recorded half is EVERY scope HQ derived at record time, not the
+          // single `mission_id`/`project_id` column (Wave 5 correction round
+          // six, High 3). That column holds one of N, so the union it produced
+          // was complete only for the mission or project that sorted first, and
+          // the OTHER one's ceiling could be nullified by moving its mission to
+          // a different project — `assignMissionToProject`, no raw SQL,
+          // `hq.mission_command` alone: `blocked, observed 5000` became
+          // `within_ceiling, observed 0` and the refused decision was recorded.
+          // The canonical half still stays: it is what lets a ceiling start
+          // governing a task that is linked to a mission AFTER the spend.
+          case 'mission':
+            return (
+              canonicalOf(entry.taskId).missionIds.includes(scope.scopeId) ||
+              entry.missionIds.includes(scope.scopeId)
+            );
+          // The project half takes a THIRD term, and for the same reason the
+          // second one exists (Wave 5 correction round seven, High NEW-4):
+          // `hq_missions.project_id` is mutable, so canonical membership can be
+          // narrowed after the fact. `#durableTaskProjectScopes` reads every
+          // project the task's mission(s) have EVER been bound to off the
+          // append-only mission event log, which no later relinking can shrink.
+          // Applied to the MEASUREMENT as well as to the governing set, so
+          // spend recorded after a link was broken still counts against the
+          // ceiling it is governed by — the two surfaces agree by construction
+          // rather than by argument.
+          case 'project':
+            return (
+              canonicalOf(entry.taskId).projectIds.includes(scope.scopeId) ||
+              durableProjectsOf(entry.taskId).includes(scope.scopeId) ||
+              entry.projectIds.includes(scope.scopeId)
+            );
+          // The provider scope is measured against the task's canonical
+          // BINDING, never against the caller-supplied column. On a bound task
+          // the two are equal by enforcement (`provider_binding_mismatch`); on
+          // an UNBOUND task the column was whatever the caller wrote, and a
+          // claim-holding worker used it to push an unrelated provider's
+          // Founder ceiling from `observed 0` to `blocked, observed 999999`.
+          // Spend HQ cannot attribute to a provider is spend that measures no
+          // provider ceiling.
+          case 'provider': {
+            // The binding HQ RECORDED on the entry, union the one the payload
+            // carries now. `provider_bound` is HQ's own statement, written at
+            // record time and append-only, so a later `UPDATE op_tasks SET
+            // payload` cannot move already-recorded spend out of the ceiling
+            // that governed it — which it could while this read went to the
+            // mutable payload alone (Wave 5 correction round four, High H2
+            // route (c)). An entry HQ could not attribute measures no provider
+            // ceiling, exactly as before.
+            if (entry.providerBound && entry.providerId === scope.scopeId) return true;
+            const bound = boundProviderOf(entry.taskId);
+            return bound != null && bound === scope.scopeId;
+          }
+          // `model` stays on the entry's own column, and that is a stated
+          // limitation rather than an oversight: nothing in canonical truth
+          // binds a task to a MODEL, so HQ has no derivation to prefer. It is
+          // why a model-scoped ceiling is readable but does not by itself
+          // constrain a decision write — see `#governingBudgetScopes`.
+          case 'model':
+            return entry.modelId === scope.scopeId;
+          case 'deployment':
+            return true;
+          default:
+            // Fail closed: an unrecognized scope matches NOTHING, so a ceiling
+            // it might carry can never be reported as "within".
+            return false;
+        }
+      })
+      // The window is measured on `recordedAt`, which HQ SETS, and never on
+      // `occurredAt`, which the caller supplies (Wave 5 High 3). Filtering on
+      // the caller's field meant one field moved an entry out of the window a
+      // ceiling was counting, so a day ceiling was evaded by declaring a
+      // different day.
+      .filter((entry) => prefix === '' || entry.recordedAt.startsWith(prefix));
+  }
+
+  /**
+   * The budget answer, computed from ENFORCEMENT-SAFE reads only.
+   *
+   * `#private` and used by every write that is spend-adjacent, so the public
+   * `intelligenceBudgetDecision()` below is a projection of this and never the
+   * other way round.
+   */
+  #budgetEvaluation(scope: {
+    scopeKind: BudgetScope;
+    scopeId: string;
+    window: BudgetWindow;
+  }): BudgetEvaluation {
+    const at = nowIso();
+    return evaluateBudget({
+      budget: this.#budgetFromStore(scope),
+      entries: this.#entriesForScope(scope, at).map((entry) => ({
+        amountMinorUnits: entry.fact.amountMinorUnits,
+        currency: entry.fact.currency,
+      })),
+    });
+  }
+
+  /**
+   * The mission(s) and project(s) a canonical task belongs to — read straight
+   * off `hq_mission_plan_items` / `hq_missions` through `#db`.
+   *
+   * This is the canonical answer to "whose budget is this work spending", and
+   * it is deliberately a query rather than a parameter. A plan item is the one
+   * place HQ records that a task belongs to a mission, and a mission's
+   * `project_id` the one place a mission belongs to a project; nothing else in
+   * HQ links a task to either. A task linked to no plan item belongs to no
+   * mission, which is answered as the empty list rather than as "unconstrained".
+   */
+  /**
+   * The mission, project and provider scopes HQ has already ATTRIBUTED spend
+   * from this task to — read off its own append-only cost entries.
+   *
+   * Not a second authority store and not a second truth: every one of these
+   * columns was written by HQ from the canonical record at the moment the entry
+   * was recorded (`recordIntelligenceCost` derives them; no caller supplies
+   * one), and the rows can never be updated or deleted. So this answers a
+   * different question from `#canonicalTaskScopes` — "whose ceiling has this
+   * work already been charged against", rather than "whose ceiling applies to
+   * it now" — and a ceiling that has been charged does not stop applying
+   * because a link was later broken.
+   */
+  #recordedScopesForTask(taskId: string): {
+    missionIds: string[];
+    projectIds: string[];
+    providerIds: string[];
+  } {
+    if (!this.#intelligenceStorePresent) return { missionIds: [], projectIds: [], providerIds: [] };
+    const missionIds = new Set<string>();
+    const projectIds = new Set<string>();
+    const providerIds = new Set<string>();
+    for (const entry of this.#costEntriesFromStore()) {
+      if (entry.taskId !== taskId) continue;
+      // EVERY recorded scope, not the first-sorting one (Wave 5 correction
+      // round six, High 3): a governing set built from one of N left the other
+      // ceiling out of the evaluation entirely.
+      for (const missionId of entry.missionIds) missionIds.add(missionId);
+      for (const projectId of entry.projectIds) projectIds.add(projectId);
+      // Only a binding HQ VOUCHED for. A caller-declared provider on an
+      // unbound task is an attribution claim, not a scope — the same rule
+      // `#entriesForScope` applies to the measurement.
+      if (entry.providerBound) providerIds.add(normalizeProviderId(entry.providerId));
+    }
+    return {
+      missionIds: [...missionIds].sort(),
+      projectIds: [...projectIds].sort(),
+      providerIds: [...providerIds].sort(),
+    };
+  }
+
+  /**
+   * Every project a task's mission(s) have EVER been bound to, read off the
+   * append-only mission event log.
+   *
+   * **`#canonicalTaskScopes` alone was fail-open for the PROJECT half, and the
+   * round-four fix did not reach it** (Wave 5 correction round seven, High
+   * NEW-4). The `spentUnder` union closed the routes only for a task that has
+   * already recorded spend of its own; a task that has not is governed by the
+   * canonical link alone, and the canonical link is a MUTABLE column. Executed
+   * against `d97b8a6` with a project ceiling exhausted by task A and the attack
+   * on task B in the same project: a principal holding only
+   * `hq.mission_command` — no approval authority, no `hq.intelligence_command`
+   * — called `assignMissionToProject({ projectId: null })`, a supported facade
+   * call with no raw SQL, and `permittedTiers` widened from
+   * `["deterministic_local"]` to all five while a `critical_review` decision
+   * was ACCEPTED. That same principal calling `setIntelligenceBudget` directly
+   * is correctly `refused(not_permitted)`, which is what made the facade route
+   * an authority bypass rather than an authority. A raw `UPDATE hq_missions SET
+   * project_id = NULL` did the same.
+   *
+   * The membership is therefore derived from HISTORY rather than from the
+   * current column. `hq_mission_events` is append-only and engine-guarded
+   * (`no_rewrite`, `no_erase`, `no_replace`, and it is a declared
+   * `ENGINE_IMMUTABLE_TABLES` member), `assignMissionToProject` records BOTH
+   * ends of every move it makes, and `commandMission` records the project a
+   * mission was created under. So clearing the current link narrows nothing:
+   * the act of clearing it is itself the record that the project once governed.
+   * Monotone in the same sense the `spentUnder` union is — it can only ever ADD
+   * scopes, and no caller supplies one.
+   *
+   * **This used to say "monotone and UNFORGEABLE", and the residual below used
+   * to be scoped to an old build. Both were false** (round ten, Medium 1).
+   * `hq_mission_events` carries no hash chain: its append-only property is held
+   * by three triggers, and a trigger is a row in `sqlite_master` that a writer
+   * holding the file can DROP and put back. Executed against a CURRENT-build
+   * mission that WAS assigned through the facade — three `DROP TRIGGER`, one
+   * count-preserving update of the event log's `detail` column through
+   * `json_remove(detail, '$.projectId', '$.to', '$.from')`, three
+   * `CREATE TRIGGER`, then one write clearing `hq_missions.project_id` — the
+   * governing set fell from
+   * `["deployment", "project:task_project"]` to `["deployment"]`,
+   * `permittedTiers` widened from `["deterministic_local"]` to all five, and a
+   * `critical_review` decision was ACCEPTED under an exhausted ceiling. No
+   * `DELETE`, no `INSERT`, no row-count change, no restart, no Founder act, and
+   * `structuralIntegrity` and `fullIntegrity` both reported `safeMode: false`
+   * with no observation.
+   *
+   * That is not a new capability and it is not specific to this term: it is the
+   * count-preserving IN-PLACE REWRITE class that Phase 13's residual list
+   * already carries for every guarded-but-unhashed ledger, and the same one
+   * pass also empties the `spentUnder` half by rewriting `mission_ids` /
+   * `project_ids` on `hq_intel_cost_entries`. It needs raw file access and DDL
+   * privileges, which is a writer who could equally rewrite anything else here.
+   *
+   * **What it does not reach, stated rather than implied.** Every SUPPORTED
+   * route is closed: `assignMissionToProject({ projectId: null })` by a
+   * principal holding only `hq.mission_command` is refused its effect, and so
+   * is a raw `UPDATE hq_missions SET project_id = NULL`, both executed. What it
+   * does not reach is (a) a writer who lifts the engine guards and rewrites the
+   * event detail in place, per the paragraph above, and (b) a mission CREATED
+   * with a project by a build older than the `commanded` event detail and never
+   * re-assigned through the facade, whose link is then cleared by raw SQL —
+   * such a mission left no history to derive from in the first place. Both are
+   * in Phase 14's NOT-fixed list, at the cost each was executed at.
+   */
+  #durableTaskProjectScopes(taskId: string): string[] {
+    if (!this.#missionStorePresent) return [];
+    const projectIds = new Set<string>();
+    try {
+      const rows = this.#db
+        .prepare(
+          `SELECT DISTINCT e.detail AS detail
+             FROM hq_mission_plan_items p
+             JOIN hq_mission_events e ON e.mission_id = p.mission_id
+            WHERE p.task_id = ?
+              AND e.kind IN ('project_assigned', 'commanded')
+              AND e.detail IS NOT NULL`,
+        )
+        .all(taskId) as { detail: unknown }[];
+      for (const row of rows) {
+        let detail: unknown;
+        try {
+          detail = JSON.parse(String(row.detail));
+        } catch {
+          // A detail column that does not parse carries no scope. It is a
+          // column a raw writer can put anything in, so it must be inert here
+          // rather than an exception — the `json_valid` precedent.
+          continue;
+        }
+        if (detail == null || typeof detail !== 'object') continue;
+        const record = detail as Record<string, unknown>;
+        for (const key of ['from', 'to', 'projectId']) {
+          const value = record[key];
+          if (typeof value === 'string' && value !== '') projectIds.add(value);
+        }
+      }
+    } catch {
+      // No mission event log on this handle: no history to derive from, which
+      // is the empty answer and not "unconstrained" — the canonical link and
+      // the recorded attribution still govern.
+      return [];
+    }
+    return [...projectIds].sort();
+  }
+
+  /**
+   * **The mission comes from the PLAN ITEM's own column, and the join is a LEFT
+   * one** (Wave 5 correction round thirteen, High 3). This used to read
+   * `m.id AS mission_id` through `JOIN hq_missions m ON m.id = p.mission_id`,
+   * which made the mission scope depend on a row in ANOTHER table still
+   * carrying the identity the plan item names. `hq_missions` carries `no_erase`
+   * and `no_replace` and — until this round — nothing that guarded an UPDATE of
+   * `id`, so one raw `UPDATE hq_missions SET id = …`, no DDL and no row-count
+   * change, made the inner join match nothing: `governedBy` lost the mission,
+   * `permittedTiers` widened from `['deterministic_local']` to all five,
+   * `budgetDecision` went `blocked` -> `within_ceiling`, and a `critical_review`
+   * write that had been refused was ACCEPTED — while the Founder's own budget
+   * report still read `blocked`, so the report and the enforcement disagreed.
+   * 12 of 12 fresh ids, `structuralIntegrity` clean throughout.
+   *
+   * The authoritative link is `hq_mission_plan_items.mission_id`, which is
+   * write-once by its own `no_remission` guard, so it is read directly and the
+   * mission row is consulted only for the PROJECT it belongs to. The join being
+   * LEFT is the whole difference: a mission row that cannot be found no longer
+   * removes the mission scope, it only leaves the project one underived — and
+   * `#durableTaskProjectScopes` derives that from the append-only event log
+   * regardless.
+   *
+   * The identity itself is ALSO guarded now (`trg_hq_missions_no_reidentify`),
+   * so this is the read-side half of a fix whose write-side half stands beside
+   * it. Neither is a substitute for the other: the guard can be dropped and
+   * re-created in three statements like every other engine guard, and this
+   * derivation then still holds.
+   */
+  #canonicalTaskScopes(taskId: string): { missionIds: string[]; projectIds: string[] } {
+    if (!this.#missionStorePresent) return { missionIds: [], projectIds: [] };
+    const rows = this.#db
+      .prepare(
+        `SELECT DISTINCT p.mission_id AS mission_id, m.project_id AS project_id
+           FROM hq_mission_plan_items p
+           LEFT JOIN hq_missions m ON m.id = p.mission_id
+          WHERE p.task_id = ?`,
+      )
+      .all(taskId) as { mission_id: string | null; project_id: string | null }[];
+    const missionIds = new Set<string>();
+    const projectIds = new Set<string>();
+    for (const row of rows) {
+      if (typeof row.mission_id === 'string' && row.mission_id !== '') missionIds.add(row.mission_id);
+      if (typeof row.project_id === 'string' && row.project_id !== '') projectIds.add(row.project_id);
+    }
+    return { missionIds: [...missionIds].sort(), projectIds: [...projectIds].sort() };
+  }
+
+  /**
+   * Every budget policy that GOVERNS one canonical task — derived, never named
+   * by a caller.
+   *
+   * `budgetScope` used to be an optional argument on `intelligenceRoutingProposal`
+   * and `recordIntelligenceDecision`, taken verbatim, and nothing checked that
+   * the named scope had anything to do with the task, its mission, its project
+   * or its bound provider. Since `evaluation.permittedTiers` and
+   * `evaluation.decision` are the WHOLE of what `#resolveRecordedTier` enforces
+   * against, that made the caller the chooser of the policy governing its own
+   * write: the same task, the same worker and the same live fence produced
+   * `tier_not_permitted` under the default scope and a recorded
+   * `critical_review` under a scope the caller named instead (Wave 5 review,
+   * High finding B-1). The parameter is gone; there is no way to name a scope
+   * here at all.
+   *
+   * What governs is:
+   *  - `deployment`/`total` — the baseline, always, exactly as before;
+   *  - every mission the task is canonically linked to, and every project
+   *    those missions belong to;
+   *  - the provider the canonical payload BINDS the task to, when it binds one.
+   *
+   * For each of those, every window a Founder has actually recorded a ceiling
+   * for. A scope with no recorded row is not evaluated: absence of a mission
+   * ceiling is absence of a mission policy, and the deployment baseline already
+   * answers "no policy anywhere". Model scopes are absent by construction —
+   * nothing in canonical truth binds a task to a MODEL, so HQ has no honest
+   * derivation for one and does not invent it. Recorded as a real limitation:
+   * a model-scoped ceiling can be read through `intelligenceBudgetDecision`
+   * but does not by itself constrain a decision write.
+   *
+   * The other correction lane derived the same thing as
+   * `#canonicalWorkIdentity` + `#canonicalBudgetScopes`, and that
+   * implementation is dropped rather than kept beside this one. Two
+   * differences decided it, both in the fail-closed direction: it took the
+   * FIRST plan item only (`ORDER BY seq LIMIT 1`), so a task linked to two
+   * missions was governed by one of their ceilings and not the other; and it
+   * excluded the `provider` scope on the argument that a cost entry's
+   * `providerId` is caller-declared and in a different vocabulary from the
+   * execution binding.
+   *
+   * **Both of those arguments were more right than the answer that replaced
+   * them, and the third correction round had to finish the job** (High B1,
+   * High B2). Deriving EVERY mission here was necessary and was not
+   * sufficient: the cost entry's own `mission_id` column holds one value, and
+   * `#entriesForScope` matched THAT — so a task linked to two missions had the
+   * non-first mission's ceiling evaluated against zero entries, and which of
+   * the two bound was decided by uuid sort order. And the "different
+   * vocabulary" objection was literally true rather than obsolete: the
+   * refusal it was answered with (`provider_binding_mismatch`) made a cost
+   * entry against a provider-bound task IMPOSSIBLE, so the provider scope was
+   * dead and its ceiling stayed at `observed: 0` forever.
+   *
+   * Both are closed now, and neither by an argument: `#entriesForScope`
+   * derives mission, project and provider membership from canonical truth per
+   * entry, and `normalizeProviderId` folds the canonical uppercase binding into
+   * this lane's slug vocabulary so the two really are one.
+   */
+  #governingBudgetScopes(taskId: string): GoverningBudgetScope[] {
+    const scopes: GoverningBudgetScope[] = [
+      { ...DEPLOYMENT_BUDGET_SCOPE, derivedFrom: 'deployment' },
+    ];
+    if (!this.#intelligenceStorePresent) return scopes;
+    const budgets = loadBudgets(this.#db);
+    const has = (scopeKind: BudgetScope, scopeId: string, window: BudgetWindow): boolean =>
+      latestBudgetFor(budgets, { scopeKind, scopeId, window }) != null;
+    const canonical = this.#canonicalTaskScopes(taskId);
+    const boundProvider = this.#taskBoundProvider(taskId);
+    // Every scope this task has ALREADY SPENT UNDER, taken from HQ's own
+    // append-only attribution on its cost entries (Wave 5 correction round
+    // four, High H2).
+    //
+    // `#canonicalTaskScopes` answers "which ceilings apply to this task NOW",
+    // and that alone was fail-open: breaking the mission link dropped the
+    // exhausted ceiling out of the governing set entirely, so a refused write
+    // became a recorded one. Route (a) needed no raw SQL at all — a principal
+    // holding `hq.mission_command`, without approval authority and without
+    // `hq.intelligence_command`, called
+    // `assignMissionToProject({ projectId: null })` and the project ceiling
+    // stopped governing. That same principal raising the ceiling directly is
+    // correctly REFUSED, which is what made the route a bypass rather than an
+    // authority.
+    //
+    // A scope a task has spent under continues to govern it. The attribution
+    // is HQ-derived and the rows are append-only, so this can only ever ADD
+    // constraints — it is monotone in the fail-closed direction, and no caller
+    // can name a scope here any more than before.
+    const spentUnder = this.#recordedScopesForTask(taskId);
+    // And every project the task's mission(s) have EVER been bound to, from the
+    // append-only mission event log (Wave 5 correction round seven, High
+    // NEW-4). The union above closes the routes only for a task that has
+    // already recorded spend; a task with none of its own was governed by the
+    // MUTABLE `hq_missions.project_id` alone, so clearing the link — through a
+    // supported facade call held by a principal with no budget authority at
+    // all — took an exhausted ceiling out of the governing set. See
+    // `#durableTaskProjectScopes`.
+    const durableProjects = this.#durableTaskProjectScopes(taskId);
+    const candidates: { kind: BudgetScope; id: string; from: GoverningBudgetScope['derivedFrom'] }[] = [
+      ...[...new Set([...canonical.missionIds, ...spentUnder.missionIds])].map((id) => ({
+        kind: 'mission' as const,
+        id,
+        from: 'task_mission' as const,
+      })),
+      ...[
+        ...new Set([...canonical.projectIds, ...durableProjects, ...spentUnder.projectIds]),
+      ].map((id) => ({
+        kind: 'project' as const,
+        id,
+        from: 'task_project' as const,
+      })),
+      ...spentUnder.providerIds.map((id) => ({
+        kind: 'provider' as const,
+        id,
+        from: 'task_bound_provider' as const,
+      })),
+      // Folded into THIS lane's vocabulary, which is what makes the two
+      // vocabularies actually one (Wave 5 correction round three, High B2). The
+      // canonical binding is `CLAUDE`; every budget scope id, cost entry column
+      // and derived key here is a lowercase slug. Without the fold a Founder's
+      // provider ceiling could never match a single recorded entry.
+      ...(boundProvider
+        ? [
+            {
+              kind: 'provider' as const,
+              id: normalizeProviderId(boundProvider),
+              from: 'task_bound_provider' as const,
+            },
+          ]
+        : []),
+    ];
+    const seenCandidates = new Set<string>();
+    for (const candidate of candidates) {
+      // The live binding and a recorded one can name the same provider; a scope
+      // may be derived once and only once.
+      const key = `${candidate.kind}\u001f${candidate.id}`;
+      if (seenCandidates.has(key)) continue;
+      seenCandidates.add(key);
+      for (const window of BUDGET_WINDOWS) {
+        if (!has(candidate.kind, candidate.id, window)) continue;
+        scopes.push({
+          scopeKind: candidate.kind,
+          scopeId: candidate.id,
+          window,
+          derivedFrom: candidate.from,
+        });
+      }
+    }
+    // The deployment baseline's other windows too, when a Founder recorded them.
+    for (const window of BUDGET_WINDOWS) {
+      if (window === DEPLOYMENT_BUDGET_SCOPE.window) continue;
+      if (!has('deployment', DEPLOYMENT_BUDGET_SCOPE.scopeId, window)) continue;
+      scopes.push({
+        scopeKind: 'deployment',
+        scopeId: DEPLOYMENT_BUDGET_SCOPE.scopeId,
+        window,
+        derivedFrom: 'deployment',
+      });
+    }
+    return scopes;
+  }
+
+  /**
+   * The ONE budget answer a decision write is enforced against: the most
+   * restrictive of every governing policy, with the INTERSECTION of their
+   * permitted tiers. See `#governingBudgetScopes` and `combineBudgetEvaluations`.
+   */
+  #governingBudgetEvaluation(taskId: string): {
+    decision: BudgetDecision;
+    permittedTiers: IntelligenceTier[];
+    reason: string;
+    governedBy: GoverningBudgetScope[];
+  } {
+    return combineBudgetEvaluations(
+      this.#governingBudgetScopes(taskId).map((scope) => ({
+        scope,
+        evaluation: this.#budgetEvaluation(scope),
+      })),
+    );
+  }
+
+  /**
+   * Resolve a CALLER-SUPPLIED routing decision id.
+   *
+   * Bounded and shape-checked before it is used for anything, and the refusal
+   * carries the CODE alone rather than the caller's text (Wave 5 Low 8). The
+   * value used to be unbounded and unscanned and was interpolated verbatim
+   * into the refusal message — the same gap that justified removing the
+   * caller-supplied `missionId` / `projectId` in the previous round, left
+   * standing on the one id a caller still passes. HQ mints
+   * `inteldec-<uuid>`, so a strict slug within a bound rejects everything else
+   * before a store read, and the caller already knows which id it sent.
+   */
+  #resolveDecisionReference(raw: unknown): OpsResult<DecisionRecord> {
+    const id = typeof raw === 'string' ? raw.trim() : '';
+    if (!isIdentifierSlug(id, MAX_DECISION_ID_LENGTH)) {
+      return fail(
+        'invalid_input',
+        'decisionId must be an HQ-minted routing decision id (a bounded lowercase slug)',
+      );
+    }
+    const record = this.#decisionRecordFromStore(id);
+    if (!record) {
+      return fail(
+        'unknown_intelligence_decision',
+        'Unknown routing decision: the id given is not in the intelligence ledger, and nothing was recorded.',
+      );
+    }
+    return ok(record);
+  }
+
+  /**
+   * CANONICAL truth about a decision's task, handed to every derivation.
+   *
+   * `bound_provider` and the risk class inside `characteristics` are stored
+   * columns on an append-only table, so a raw appender could choose both — and
+   * the Founder route publishes the first as "the provider the canonical
+   * payload binds" while `decisionIsProvablyAvoidable` computes the floor from
+   * the second (Wave 5 review, Medium finding B-3). Both are re-derived here,
+   * from `op_tasks` and `op_capabilities`, through the `#private` closures the
+   * rest of the phase already enforces on.
+   */
+  #canonicalDecisionFacts(): {
+    boundProvider: (taskId: string) => string | null;
+    riskClass: (taskId: string) => RiskClass;
+  } {
+    return {
+      boundProvider: (taskId: string) => this.#taskBoundProvider(taskId),
+      riskClass: (taskId: string) => {
+        const fact = this.#runClaimFact(taskId);
+        // Fail closed twice over: a task that cannot be read, and a capability
+        // that cannot be read, are both `founder_gate` — the strictest class.
+        if (!fact.exists) return 'founder_gate';
+        return riskClassForRouting(this.#capabilityFromStore(fact.capabilityId));
+      },
+    };
+  }
+
+  #decisionRecordFromStore(id: string): DecisionRecord | null {
+    if (!this.#intelligenceStorePresent) return null;
+    const row = loadDecision(this.#db, id);
+    if (!row) return null;
+    return deriveDecisionRecord(row, {
+      outcomes: loadDecisionOutcomes(this.#db),
+      escalations: loadDecisions(this.#db),
+      canonical: this.#canonicalDecisionFacts(),
+    });
+  }
+
+  #listDecisionRecordsFromStore(filter?: { taskId?: string }): DecisionRecord[] {
+    if (!this.#intelligenceStorePresent) return [];
+    const rows = loadDecisions(this.#db);
+    const outcomes = loadDecisionOutcomes(this.#db);
+    const canonical = this.#canonicalDecisionFacts();
+    return rows
+      .filter((row) => (filter?.taskId ? row.taskId === filter.taskId : true))
+      .map((row) => deriveDecisionRecord(row, { outcomes, escalations: rows, canonical }));
+  }
+
+  #observationsFromStore(): ModelObservationRow[] {
+    if (!this.#intelligenceStorePresent) return [];
+    return loadModelObservations(this.#db);
+  }
+
+  /**
+   * The provider the CANONICAL payload binds this task to — read straight off
+   * `op_tasks` through `#db`, deliberately NOT through `queue.get()`.
+   *
+   * A routing decision RECORDS this; it never proposes a different one, and
+   * there is no parameter anywhere in the phase that could. `readProviderBinding`
+   * is the same function the queue's own claim/start enforcement uses, so the
+   * value recorded here is by construction the value that decides execution.
+   */
+  #taskBoundProvider(taskId: string): string | null {
+    const row = this.#db.prepare(`SELECT payload FROM op_tasks WHERE id = ?`).get(taskId) as
+      | { payload: string | null }
+      | undefined;
+    if (!row) return null;
+    let payload: Record<string, unknown> | null = null;
+    try {
+      const parsed: unknown = JSON.parse(row.payload ?? 'null');
+      payload = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+    } catch {
+      payload = null;
+    }
+    const binding = readProviderBinding(payload);
+    return binding.bound ? binding.provider : null;
+  }
+
+  /**
+   * Record one OBSERVATION about a provider/model — capability, availability
+   * and unit cost, with provenance.
+   *
+   * HQ never invents a price. The cost half of this write goes through
+   * `normalizeCostFact`, so an `unknown` provenance may not carry an amount, a
+   * known provenance may not omit one, and an `estimated` amount must name its
+   * BASIS. A registry entry that could not say where its number came from
+   * would be the exact fabrication this phase exists to prevent.
+   *
+   * The registry is metadata: registering an observation activates nothing,
+   * connects nothing, authenticates nothing and grants nothing. It does not
+   * make a provider available, and no routing path reads it to decide who
+   * executes — that is the canonical binding's job and only its job.
+   */
+  recordModelObservation(input: {
+    providerId: string;
+    /** The exact model id when it was OBSERVED; null when it was not. */
+    modelId?: string | null;
+    locality: ModelLocality;
+    availability: ModelAvailability;
+    capabilityFacts?: readonly ModelCapabilityFact[];
+    contextWindowTokens?: number | null;
+    unitCostProvenance: CostProvenance;
+    unitCostMinorUnits?: number | null;
+    unitCostCurrency?: string | null;
+    unitCostUnitKind: CostUnitKind;
+    unitCostBasis?: string;
+    source: ObservationSource;
+    observedBy: string;
+    note?: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ observation: ModelObservationRow; deduplicated: boolean }> {
+    // `'basis'` removed: the explicit scan below spells the field
+    // `unitCostBasis` under the KEY `basis`, and the key is not the field
+    // (round thirteen, Low 2). `unitCostBasis` is now scanned by the generic
+    // pass as well, which is where it always should have been.
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
+    // The same fold as `recordIntelligenceCost`, so a registry observation and a
+    // cost entry name a provider the same way and a Founder can write either
+    // spelling.
+    const providerId = normalizeProviderId(input.providerId ?? '');
+    if (!isIdentifierSlug(providerId, MAX_PROVIDER_ID_LENGTH)) {
+      return fail(
+        'invalid_input',
+        'providerId must be a slug of letters, digits, dot, colon, dash or underscore',
+      );
+    }
+    const modelIdRaw = (input.modelId ?? '').trim();
+    if (modelIdRaw !== '' && !isIdentifierSlug(modelIdRaw, MAX_MODEL_ID_LENGTH)) {
+      return fail('invalid_input', 'modelId must be a lowercase slug, or omitted when it was not observed');
+    }
+    const modelId = modelIdRaw === '' ? null : modelIdRaw;
+    if (!isModelLocality(input.locality)) {
+      return fail('invalid_input', `locality must be one of: ${MODEL_LOCALITIES.join(', ')}`);
+    }
+    if (!isModelAvailability(input.availability)) {
+      return fail('invalid_input', `availability must be one of: ${MODEL_AVAILABILITY_STATES.join(', ')}`);
+    }
+    if (!isObservationSource(input.source)) {
+      return fail('invalid_input', `source must be one of: ${OBSERVATION_SOURCES.join(', ')}`);
+    }
+    // DEDUPED, and bounded by the closed vocabulary itself (Wave 5 Medium 7):
+    // the route's `stringArrayField` caps neither length nor repetition, so an
+    // array of ten thousand copies of one legal member would otherwise land
+    // permanently in an append-only, un-erasable table and be echoed on every
+    // read. A set of a five-member vocabulary can hold at most five.
+    const facts = [...new Set(input.capabilityFacts ?? [])];
+    if (facts.some((fact) => !isModelCapabilityFact(fact))) {
+      return fail('invalid_input', `capabilityFacts must be drawn from: ${MODEL_CAPABILITY_FACTS.join(', ')}`);
+    }
+    const contextWindowTokens = input.contextWindowTokens ?? null;
+    if (
+      contextWindowTokens != null &&
+      (!Number.isInteger(contextWindowTokens) || contextWindowTokens < 0)
+    ) {
+      return fail('invalid_input', 'contextWindowTokens must be a whole number of tokens, or omitted');
+    }
+    const cost = normalizeCostFact({
+      provenance: input.unitCostProvenance,
+      amountMinorUnits: input.unitCostMinorUnits ?? null,
+      currency: input.unitCostCurrency ?? null,
+      unitKind: input.unitCostUnitKind,
+      basis: input.unitCostBasis,
+    });
+    if (!cost.ok) {
+      return fail('cost_provenance_conflict', costRefusalMessage(cost.refusal), { refusal: cost.refusal });
+    }
+    const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoCredentialShape({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
+    } catch {
+      return fail('invalid_input', 'The note or basis looks like it contains a credential; nothing was recorded.');
+    }
+
+    const refusedActor = this.#resolveIntelligenceCommander(input.observedBy, 'record a model observation');
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#intelligenceCapabilityGate('record a model observation');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'intelligence registry unavailable on this database handle');
+    }
+
+    const at = nowIso();
+    const key = observationIdempotencyKey({
+      providerId,
+      modelId,
+      observedAt: at.slice(0, 10),
+      source: input.source,
+      idempotencyKey: input.idempotencyKey?.trim() || null,
+    });
+    const id = `intelobs-${uuid()}`;
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_intel_model_observations WHERE observation_key = ?`)
+        .get(key) as { id: string } | undefined;
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_intel_model_observations
+             (id, provider_id, model_id, locality, availability, capability_facts, context_window_tokens,
+              unit_cost_provenance, unit_cost_minor_units, unit_cost_currency, unit_cost_unit_kind,
+              unit_cost_basis, source, observed_at, observed_by, note, observation_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          providerId,
+          modelId,
+          input.locality,
+          input.availability,
+          canonicalJson(facts),
+          contextWindowTokens,
+          cost.fact.provenance,
+          cost.fact.amountMinorUnits,
+          cost.fact.currency,
+          cost.fact.unitKind,
+          cost.fact.basis,
+          input.source,
+          at,
+          input.observedBy,
+          note.value ?? null,
+          key,
+        );
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `intel_observation:${id}`,
+        status: null,
+        actor: input.observedBy,
+        summary: `Model observation recorded for ${providerId}`,
+        detail: {
+          providerId,
+          modelObserved: modelId != null,
+          unitCostState: cost.fact.state,
+          activatesProvider: false,
+          executable: false,
+        },
+      });
+      privileged.appendEvidence({
+        actor: input.observedBy,
+        kind: 'intelligence_observation_recorded',
+        payload: {
+          observationId: id,
+          providerId,
+          unitCostProvenance: cost.fact.provenance,
+          unitCostState: cost.fact.state,
+          activatesProvider: false,
+          executable: false,
+        },
+      });
+    });
+    const resolvedId = dedupedTo ?? id;
+    const observation =
+      this.#observationsFromStore().find((row) => row.id === resolvedId) ?? null;
+    if (!observation) return fail('invalid_input', 'the observation could not be read back');
+    return ok({ observation, deduplicated: dedupedTo != null });
+  }
+
+  /**
+   * Set a BUDGET POLICY for a scope: a ceiling, a currency, and the tiers
+   * permitted under it.
+   *
+   * A ceiling BLOCKS or DEMANDS A DECISION; it never grants. Setting one
+   * activates no provider, enables no paid service, and authorizes no spend —
+   * `authorizesSpend: false` rides on every evaluation, and nothing in HQ
+   * treats a ceiling as permission. Raising a ceiling does not make a paid
+   * provider available; only the Founder, outside HQ, can do that.
+   *
+   * Append-only versioned: a new policy is a new row at the next version, and
+   * the old one stays readable. The permitted tier list is stored as CHECKED
+   * members, so a policy carrying a tier outside the vocabulary is refused
+   * here rather than read back as one.
+   */
+  setIntelligenceBudget(input: {
+    scopeKind: BudgetScope;
+    scopeId: string;
+    window: BudgetWindow;
+    ceilingMinorUnits: number;
+    currency: string;
+    permittedTiers: readonly IntelligenceTier[];
+    setBy: string;
+    note?: string;
+  }): OpsResult<{ budget: BudgetRecord }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
+    if (!isBudgetScope(input.scopeKind)) {
+      return fail('invalid_input', `scopeKind must be one of: ${BUDGET_SCOPES.join(', ')}`);
+    }
+    if (!isBudgetWindow(input.window)) {
+      return fail('invalid_input', `window must be one of: ${BUDGET_WINDOWS.join(', ')}`);
+    }
+    // A PROVIDER scope id is folded into this lane's vocabulary, so a Founder
+    // may write `CLAUDE` or `claude` and get the one ceiling that the derived
+    // governing scope will actually match (Wave 5 correction round three, High
+    // B2). Every other scope kind is already single-vocabulary and is left
+    // exactly as written — case-folding a mission id would merge two Founder
+    // scopes that are genuinely different.
+    const scopeId = canonicalBudgetScopeId(input.scopeKind, input.scopeId ?? '');
+    if (scopeId === '' || scopeId.length > MAX_MODEL_ID_LENGTH) {
+      return fail('invalid_input', 'scopeId is required');
+    }
+    if (!Number.isInteger(input.ceilingMinorUnits) || input.ceilingMinorUnits < 0) {
+      return fail('invalid_input', 'ceilingMinorUnits must be a whole, non-negative number of minor units');
+    }
+    if (input.ceilingMinorUnits > MAX_COST_MINOR_UNITS) {
+      return fail('invalid_input', `ceilingMinorUnits exceeds ${MAX_COST_MINOR_UNITS}`);
+    }
+    const currency = (input.currency ?? '').trim();
+    if (!isCurrencyCode(currency)) {
+      return fail('invalid_input', 'currency must be a three-letter uppercase code; HQ never converts between them');
+    }
+    // Deduped for the same reason, and with the same effect: the permitted set
+    // is a SET, so a repeated member is neither meaningful nor storable twice.
+    const permitted = [...new Set(input.permittedTiers ?? [])];
+    if (permitted.some((tier) => !isIntelligenceTier(tier))) {
+      return fail('invalid_input', `permittedTiers must be drawn from: ${INTELLIGENCE_TIERS.join(', ')}`);
+    }
+    const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoCredentialShape({ note: note.value ?? '' });
+    } catch {
+      return fail('invalid_input', 'The note looks like it contains a credential; nothing was recorded.');
+    }
+
+    const refusedActor = this.#resolveIntelligenceCommander(input.setBy, 'set a budget policy');
+    if (refusedActor) return refusedActor;
+    const refusedCapability = this.#intelligenceCapabilityGate('set a budget policy');
+    if (refusedCapability) return refusedCapability;
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'budget policy unavailable on this database handle');
+    }
+
+    const scope = { scopeKind: input.scopeKind, scopeId, window: input.window };
+    const id = `intelbudget-${uuid()}`;
+    const at = nowIso();
+    const privileged = this.#requirePrivilegedQueue();
+    let recordedId = id;
+    privileged.reserve(() => {
+      const current = latestBudgetFor(loadBudgets(this.#db), scope);
+      const version = (current?.version ?? 0) + 1;
+      const key = budgetKey({ ...scope, version });
+      this.#db
+        .prepare(
+          `INSERT INTO hq_intel_budgets
+             (id, scope_kind, scope_id, window_kind, ceiling_minor_units, currency, permitted_tiers,
+              version, set_at, set_by, note, budget_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          scope.scopeKind,
+          scope.scopeId,
+          scope.window,
+          input.ceilingMinorUnits,
+          currency,
+          canonicalJson(permitted),
+          version,
+          at,
+          input.setBy,
+          note.value ?? null,
+          key,
+        );
+      recordedId = id;
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `intel_budget:${id}`,
+        status: null,
+        actor: input.setBy,
+        summary: `Budget policy v${version} set for ${scope.scopeKind} ${scope.scopeId} (${scope.window})`,
+        detail: {
+          scopeKind: scope.scopeKind,
+          window: scope.window,
+          version,
+          grantsSpend: false,
+          activatesPaidProvider: false,
+          executable: false,
+        },
+      });
+      privileged.appendEvidence({
+        actor: input.setBy,
+        kind: 'intelligence_budget_set',
+        payload: {
+          budgetId: id,
+          scopeKind: scope.scopeKind,
+          window: scope.window,
+          version,
+          permittedTiers: permitted,
+          grantsSpend: false,
+          activatesPaidProvider: false,
+          executable: false,
+        },
+      });
+    });
+    const row = loadBudgets(this.#db).find((entry) => entry.id === recordedId);
+    if (!row) return fail('invalid_input', 'the budget policy could not be read back');
+    return ok({ budget: budgetRowToRecord(row) });
+  }
+
+  /**
+   * The budget answer for a scope. A pure READ that writes nothing and grants
+   * nothing: `grantsSpend` and `authorizesPaidActivation` are literal `false`
+   * on every branch, including `within_ceiling`.
+   */
+  intelligenceBudgetDecision(input: {
+    scopeKind: BudgetScope;
+    scopeId: string;
+    window: BudgetWindow;
+  }): OpsResult<BudgetEvaluation> {
+    if (!isBudgetScope(input.scopeKind)) {
+      return fail('invalid_input', `scopeKind must be one of: ${BUDGET_SCOPES.join(', ')}`);
+    }
+    if (!isBudgetWindow(input.window)) {
+      return fail('invalid_input', `window must be one of: ${BUDGET_WINDOWS.join(', ')}`);
+    }
+    // Folded exactly as `setIntelligenceBudget` folds it, so a read and a write
+    // of the same provider ceiling cannot land on two different scope ids.
+    const scopeId = canonicalBudgetScopeId(input.scopeKind, input.scopeId ?? '');
+    if (scopeId === '') return fail('invalid_input', 'scopeId is required');
+    return ok(this.#budgetEvaluation({ scopeKind: input.scopeKind, scopeId, window: input.window }));
+  }
+
+  /**
+   * The routing PROPOSAL for a canonical task — a read, and a recommendation.
+   *
+   * The risk class is NOT a parameter: it is read from the task's canonical
+   * capability through `#capabilityFromStore`, so a caller cannot describe
+   * risky work as harmless to get a cheaper tier. Everything the caller does
+   * supply is a description of the WORK, and none of it can lower the floor
+   * below what the canonical risk class imposes.
+   *
+   * There is deliberately no provider or model parameter, and the routing
+   * INTERFACE has no field that could name one. Provider truth is the
+   * canonical binding's; a proposal that disagreed with it would simply be
+   * ignored by `OperatorQueue.claim`/`start`. What the facade returns is
+   * `RoutingProposal & { taskId; boundProvider; governedBy }`, and
+   * `boundProvider` is OBSERVED off the task's canonical payload by
+   * `#taskBoundProvider` — a report of what will execute, not a choice, and
+   * there is no parameter that could make it say anything else.
+   *
+   * There is no BUDGET SCOPE parameter either, and there used to be (Wave 5
+   * review, High finding B-1 / High 2 — both correction lanes found it). See
+   * `#governingBudgetScopes`: the scopes are derived from the task's canonical
+   * mission(s), project(s) and provider binding, plus the deployment baseline,
+   * every applicable scope binds at once, and the most restrictive of them
+   * governs.
+
+   */
+  intelligenceRoutingProposal(input: {
+    taskId: string;
+    complexity: TaskComplexity;
+    contextSize: ContextSize;
+    workKind: WorkKind;
+    latency?: LatencyRequirement;
+    privacy?: PrivacyRequirement;
+  }): OpsResult<
+    RoutingProposal & {
+      taskId: string;
+      boundProvider: string | null;
+      governedBy: GoverningBudgetScope[];
+    }
+  > {
+    const characteristics = this.#characteristicsFor(input);
+    if (!characteristics.ok) return characteristics;
+    const evaluation = this.#governingBudgetEvaluation(input.taskId.trim());
+    const proposal = computeRoutingProposal({
+      characteristics: characteristics.data,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+    });
+    return ok({
+      ...proposal,
+      taskId: input.taskId,
+      // OBSERVED from the canonical payload, never chosen here.
+      boundProvider: this.#taskBoundProvider(input.taskId),
+      // Which recorded policies actually governed this answer, so a reader can
+      // see that the set was derived rather than supplied.
+      governedBy: evaluation.governedBy,
+    });
+  }
+
+  /**
+   * Build the task characteristics, taking the RISK CLASS from canonical truth.
+   *
+   * Fail closed: a task whose capability row cannot be read is treated as
+   * `founder_gate`, the strictest class — which forces the highest floor and a
+   * `critical_review` requirement. An unreadable capability must never be the
+   * cheap path.
+   */
+  #characteristicsFor(input: {
+    taskId: string;
+    complexity: TaskComplexity;
+    contextSize: ContextSize;
+    workKind: WorkKind;
+    latency?: LatencyRequirement;
+    privacy?: PrivacyRequirement;
+  }): OpsResult<TaskCharacteristics> {
+    const taskId = (input.taskId ?? '').trim();
+    if (taskId === '') return fail('invalid_input', 'taskId is required');
+    if (!(TASK_COMPLEXITIES as readonly string[]).includes(input.complexity)) {
+      return fail('invalid_input', `complexity must be one of: ${TASK_COMPLEXITIES.join(', ')}`);
+    }
+    if (!(CONTEXT_SIZES as readonly string[]).includes(input.contextSize)) {
+      return fail('invalid_input', `contextSize must be one of: ${CONTEXT_SIZES.join(', ')}`);
+    }
+    if (!(WORK_KINDS as readonly string[]).includes(input.workKind)) {
+      return fail('invalid_input', `workKind must be one of: ${WORK_KINDS.join(', ')}`);
+    }
+    const latency = input.latency ?? 'unspecified';
+    if (!(LATENCY_REQUIREMENTS as readonly string[]).includes(latency)) {
+      return fail('invalid_input', `latency must be one of: ${LATENCY_REQUIREMENTS.join(', ')}`);
+    }
+    const privacy = input.privacy ?? 'unrestricted';
+    if (!(PRIVACY_REQUIREMENTS as readonly string[]).includes(privacy)) {
+      return fail('invalid_input', `privacy must be one of: ${PRIVACY_REQUIREMENTS.join(', ')}`);
+    }
+    const fact = this.#runClaimFact(taskId);
+    if (!fact.exists) return fail('unknown_task', `Unknown task: ${taskId}`);
+    const capability = this.#capabilityFromStore(fact.capabilityId);
+    // Fail closed on an unreadable capability: the strictest class, never the
+    // convenient one. The rule itself lives in `riskClassForRouting` so it can
+    // be asserted directly — it was previously an inline conditional that no
+    // test reached, because an FK makes the null branch unreachable through
+    // the ordinary path (Wave 5 review, Low finding 5).
+    const riskClass: RiskClass = riskClassForRouting(capability);
+    return ok({
+      complexity: input.complexity,
+      contextSize: input.contextSize,
+      workKind: input.workKind,
+      riskClass,
+      latency,
+      privacy,
+    });
+  }
+
+  /**
+   * RECORD a routing decision against a canonical task the calling worker is
+   * executing.
+   *
+   * Authority is the LIVE FENCED CLAIM, exactly as for a Phase 13 run: the
+   * worker carrying the work is the one entity that can honestly say which
+   * tier it used. It grants nothing — holding a claim already lets a worker
+   * execute; this only lets it record what kind of intelligence it applied.
+   *
+   * The tier is bounded in ONE direction only. A caller may record a tier
+   * STRONGER than the computed floor (a lane that used more than it needed
+   * should be able to say so, and the analytics then count it as provably
+   * avoidable when the work succeeded), and may never record one weaker, one
+   * outside the permitted set, or one below a required reviewer tier. That is
+   * law 6, and it is enforced here rather than advertised: there is no
+   * parameter that bypasses it and no code path that skips it.
+   */
+  recordIntelligenceDecision(input: {
+    taskId: string;
+    workerId: string;
+    fence: number;
+    label: string;
+    complexity: TaskComplexity;
+    contextSize: ContextSize;
+    workKind: WorkKind;
+    latency?: LatencyRequirement;
+    privacy?: PrivacyRequirement;
+    /** Optional, and bounded BELOW by the policy floor. Never below it. */
+    tier?: IntelligenceTier;
+    idempotencyKey?: string;
+  }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean }> {
+    // `taskId` and `workerId` reach `hq_intel_decisions.task_id` /
+    // `.issued_by` through `#insertDecision` (Wave 5 correction round
+    // thirteen, Medium 1). The INSERT is behind that private helper, so this
+    // method's own body carried no write marker and none of its parameters was
+    // enumerated by the facade write scan. `label` keeps its own bound and its
+    // own refusal message immediately below.
+    const unsafeCallerText = callerTextRefusal(input, ['label']);
+    if (unsafeCallerText) return unsafeCallerText;
+    const label = missionText('label', input.label, MAX_DECISION_LABEL_LENGTH, true);
+    if (!label.ok) return fail('invalid_input', label.message);
+    try {
+      assertNoCredentialShape({ label: label.value });
+    } catch {
+      // See `openRun`'s label refusal: the same asymmetry, the same fix, and
+      // the same corrected wording (Wave 5 correction round four, H3 / L2).
+      return fail(
+        'invalid_input',
+        'The decision label matches a known credential shape, or names a credential holder; a label is ' +
+          'stored permanently and served on the Founder intelligence route, so nothing was recorded.',
+      );
+    }
+    if (!input.workerId) return fail('invalid_input', 'workerId is required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    const characteristics = this.#characteristicsFor(input);
+    if (!characteristics.ok) return characteristics;
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'intelligence ledger unavailable on this database handle');
+    }
+    // Safe mode refuses a spend-adjacent append, like every other write that
+    // adds to a record HQ cannot currently stand behind.
+    const safeMode = this.#safeModeRefusal('record an intelligence routing decision');
+    if (safeMode) return safeMode;
+    const claim = this.#runClaimRefusal(
+      input.taskId,
+      input.workerId,
+      input.fence,
+      'record an intelligence routing decision',
+    );
+    if (claim) return claim;
+
+    // Every ceiling that applies to THIS task, most restrictive wins. Which
+    // one applies is not a caller parameter any more (Wave 5 High 2 / B-1).
+    const evaluation = this.#governingBudgetEvaluation(input.taskId);
+    const proposal = computeRoutingProposal({
+      characteristics: characteristics.data,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+    });
+    const chosen = this.#resolveRecordedTier(proposal, input.tier);
+    if (!chosen.ok) return chosen;
+
+    // Mission and project come from CANONICAL truth, never from the caller.
+    // They were free-text parameters written verbatim, so a claim-holding
+    // worker could attribute its own spend to a mission and project that do
+    // not exist — evading its real mission ceiling — or to a third party's, to
+    // push that scope towards `blocked` (Wave 5 review, High finding B-2). A
+    // task linked to no plan item is attributed to no mission, which is the
+    // honest answer and not a gap: HQ records what the plan says.
+    const canonical = this.#canonicalTaskScopes(input.taskId);
+    return this.#insertDecision({
+      taskId: input.taskId,
+      missionId: canonical.missionIds[0] ?? null,
+      projectId: canonical.projectIds[0] ?? null,
+      tier: chosen.data,
+      floorTier: proposal.floorTier,
+      requiredReviewTier: proposal.requiredReviewTier,
+      escalatedFrom: null,
+      escalationTrigger: null,
+      characteristics: characteristics.data,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+      label: label.value!,
+      issuedBy: input.workerId,
+      idempotencyKey: input.idempotencyKey?.trim() || null,
+    });
+  }
+
+  /**
+   * The one place a recorded tier is checked against the policy — law 6.
+   *
+   * FIVE refusals, and no path around them: a proposal that named no tier at
+   * all, a `local_only` privacy requirement, a tier the policy does not
+   * permit, a tier below the computed floor, and a tier that does not satisfy
+   * a required reviewer tier.
+   *
+   * The privacy one was missing, and the docblock here said "Four refusals,
+   * and no path around them" while `intelligence-command.ts` called
+   * `local_only` "a hard constraint … Where the work's material may go" (Wave
+   * 5 correction round fifteen, High 3 — introduced by this diff).
+   * `computeRoutingProposal` applies the privacy CAP correctly, so a proposal
+   * with no caller-named tier was right; naming a tier bypassed the proposal
+   * entirely and this method never looked at
+   * `proposal.characteristics.privacy`. Reproduced: a router proposal of
+   * `deterministic_local` plus an explicit `tier: 'critical_review'` recorded
+   * `{"ok":true,"tier":"critical_review"}` with
+   * `"privacy":"local_only"` on the ledger row — HQ's own record saying the
+   * material may go to a cloud tier on work declared local-only.
+   *
+   * Checked FIRST among the requested-tier refusals, deliberately: it is the
+   * only one of the five that is about where DATA may go rather than about
+   * what the policy will pay for, so it is the reason a caller should be told
+   * even when a cheaper refusal would also apply.
+   *
+   * The escalation path funnels through here too (see
+   * `escalateIntelligenceDecision`), with a `proposal` recomputed from the
+   * prior decision's stored characteristics — so an escalation cannot climb
+   * out of `local_only` either. That path had NO privacy input at all before
+   * this.
+   */
+  #resolveRecordedTier(
+    proposal: RoutingProposal,
+    requested: IntelligenceTier | undefined,
+  ): OpsResult<IntelligenceTier> {
+    if (requested === undefined) {
+      if (proposal.tier == null) {
+        return fail(
+          'intelligence_routing_refused',
+          `No tier is admissible for this work under the current policy (${proposal.refusal}). ` +
+            BUDGET_POLICY_STATEMENT,
+          { refusal: proposal.refusal, floorTier: proposal.floorTier },
+        );
+      }
+      return ok(proposal.tier);
+    }
+    if (!isIntelligenceTier(requested)) {
+      return fail('invalid_input', `tier must be one of: ${INTELLIGENCE_TIERS.join(', ')}`);
+    }
+    if (proposal.characteristics.privacy === 'local_only' && requested !== LOCAL_ONLY_TIER) {
+      return fail(
+        'privacy_requires_local',
+        `This work is recorded as ${proposal.characteristics.privacy}, which admits ${LOCAL_ONLY_TIER} and ` +
+          `nothing else, so tier ${requested} is refused. Where the work's material may go is a hard ` +
+          'constraint, not a preference a caller can name its way past — and it is not widened by a budget, ' +
+          'a permitted set, or an escalation.',
+        { privacy: proposal.characteristics.privacy, admissibleTier: LOCAL_ONLY_TIER },
+      );
+    }
+    if (proposal.budgetDecision === 'blocked') {
+      return fail(
+        'budget_ceiling_blocks',
+        'The budget ceiling for this scope has been reached, so no tier is recorded. A ceiling blocks; ' +
+          'raising it is a Founder act and it still grants no spend.',
+      );
+    }
+    if (!proposal.permittedTiers.includes(requested)) {
+      return fail(
+        'tier_not_permitted',
+        `Tier ${requested} is not in the permitted set for this scope ` +
+          `(${proposal.permittedTiers.join(', ') || 'none recorded'}). ` +
+          'Widening it is a Founder policy act, and it still activates no paid provider.',
+        { permittedTiers: [...proposal.permittedTiers] },
+      );
+    }
+    // The REVIEW requirement is checked BEFORE the floor, deliberately. The
+    // floor already includes the review requirement (it is one of the terms
+    // the max is taken over), so a tier that fails the review check always
+    // fails the floor check too — and `tier_below_policy_floor` would then be
+    // the only refusal a caller ever saw for the most important rule in the
+    // phase. Naming the actual reason is worth the ordering.
+    if (!proposalSatisfiesReviewRequirement({ tier: requested, requiredReviewTier: proposal.requiredReviewTier })) {
+      return fail(
+        'review_tier_required',
+        `This work requires an independent review at ${proposal.requiredReviewTier}, and tier ${requested} ` +
+          'does not satisfy it. A cheaper tier never bypasses a required reviewer tier, and this refusal ' +
+          'does not replace the canonical approval the Phase 8 gateway still requires.',
+        { requiredReviewTier: proposal.requiredReviewTier },
+      );
+    }
+    if (tierRank(requested) < tierRank(proposal.floorTier)) {
+      return fail(
+        'tier_below_policy_floor',
+        `Tier ${requested} is below the floor ${proposal.floorTier} this work's own recorded ` +
+          'characteristics and canonical risk class impose. Cheapest is bounded by "still meets the ' +
+          'requirement", never the other way round.',
+        { floorTier: proposal.floorTier },
+      );
+    }
+    return ok(requested);
+  }
+
+  /** The shared decision INSERT, used by both the first record and an escalation. */
+  #insertDecision(input: {
+    taskId: string;
+    missionId: string | null;
+    projectId: string | null;
+    tier: IntelligenceTier;
+    floorTier: IntelligenceTier;
+    requiredReviewTier: IntelligenceTier | null;
+    escalatedFrom: string | null;
+    escalationTrigger: EscalationTrigger | null;
+    characteristics: TaskCharacteristics | null;
+    permittedTiers: readonly IntelligenceTier[];
+    budgetDecision: BudgetDecision;
+    label: string;
+    issuedBy: string;
+    idempotencyKey: string | null;
+  }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean }> {
+    const key = decisionIdempotencyKey({
+      taskId: input.taskId,
+      tier: input.tier,
+      escalatedFrom: input.escalatedFrom,
+      label: input.label,
+      idempotencyKey: input.idempotencyKey,
+    });
+    const id = `inteldec-${uuid()}`;
+    const at = nowIso();
+    const boundProvider = this.#taskBoundProvider(input.taskId);
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    privileged.reserve(() => {
+      const existing = loadDecisionByKey(this.#db, key);
+      if (existing) {
+        dedupedTo = existing.id;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_intel_decisions
+             (id, task_id, mission_id, project_id, tier, floor_tier, required_review_tier, escalated_from,
+              escalation_trigger, bound_provider, characteristics, permitted_tiers, budget_decision, label,
+              issued_at, issued_by, process_id, decision_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.taskId,
+          input.missionId,
+          input.projectId,
+          input.tier,
+          input.floorTier,
+          input.requiredReviewTier,
+          input.escalatedFrom,
+          input.escalationTrigger,
+          boundProvider,
+          canonicalJson(input.characteristics ?? {}),
+          canonicalJson([...input.permittedTiers]),
+          input.budgetDecision,
+          input.label,
+          at,
+          input.issuedBy,
+          this.#processIdentity,
+          key,
+        );
+      this.#store.appendEvent({
+        subjectKind: 'system',
+        subjectId: `intel_decision:${id}`,
+        status: null,
+        actor: input.issuedBy,
+        summary: `Intelligence routing decision recorded at tier ${input.tier} for task ${input.taskId}`,
+        detail: {
+          taskId: input.taskId,
+          tier: input.tier,
+          escalatedFrom: input.escalatedFrom,
+          boundProviderUnchanged: true,
+          executable: false,
+        },
+      });
+      privileged.appendEvidence({
+        taskId: input.taskId,
+        actor: input.issuedBy,
+        kind: input.escalatedFrom ? 'intelligence_decision_escalated' : 'intelligence_decision_recorded',
+        payload: {
+          decisionId: id,
+          tier: input.tier,
+          floorTier: input.floorTier,
+          requiredReviewTier: input.requiredReviewTier,
+          escalatedFrom: input.escalatedFrom,
+          boundProvider,
+          substitutedProvider: false,
+          executable: false,
+        },
+      });
+    });
+    const resolvedId = dedupedTo ?? id;
+    const decision = this.#decisionRecordFromStore(resolvedId);
+    if (!decision) return fail('invalid_input', 'the routing decision could not be read back');
+    return ok({ decision, deduplicated: dedupedTo != null });
+  }
+
+  /**
+   * Escalate a recorded decision to a stronger tier — law 7.
+   *
+   * The canonical identity is carried by REFERENCE off the prior decision:
+   * this method takes a decision id and a trigger, and has NO parameter for a
+   * task, mission or project, so an escalation is structurally incapable of
+   * moving work to different canonical work. It creates no authority: the new
+   * row is another recommendation, the claim it was recorded under is the same
+   * claim, and no approval, capability or binding changes.
+   */
+  escalateIntelligenceDecision(input: {
+    decisionId: string;
+    workerId: string;
+    fence: number;
+    trigger: EscalationTrigger;
+    idempotencyKey?: string;
+  }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean; escalation: EscalationProposal }> {
+    // Same helper, same reason as `recordIntelligenceDecision` (Wave 5
+    // correction round thirteen, Medium 1): the escalation record is written
+    // by `#insertDecision`, and `workerId` lands in `issued_by`.
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
+    if (!input.decisionId || !input.workerId) {
+      return fail('invalid_input', 'decisionId and workerId are required');
+    }
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!isEscalationTrigger(input.trigger)) {
+      return fail('invalid_input', `trigger must be one of: ${ESCALATION_TRIGGERS.join(', ')}`);
+    }
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'intelligence ledger unavailable on this database handle');
+    }
+    const safeMode = this.#safeModeRefusal('escalate an intelligence routing decision');
+    if (safeMode) return safeMode;
+    const resolvedPrior = this.#resolveDecisionReference(input.decisionId);
+    if (!resolvedPrior.ok) return resolvedPrior;
+    const prior = resolvedPrior.data;
+    const claim = this.#runClaimRefusal(
+      prior.taskId,
+      input.workerId,
+      input.fence,
+      'escalate an intelligence routing decision',
+    );
+    if (claim) return claim;
+
+    // An escalation moves UP the tier order, so evaluating a wider scope than
+    // the one the first decision was bound by would let it climb past a
+    // mission or project ceiling that the first decision honoured.
+    // The same derived, most-restrictive answer the original record was
+    // enforced against — not the deployment baseline alone, which would have
+    // let an escalation reach a tier the task's own mission ceiling forbids.
+    const evaluation = this.#governingBudgetEvaluation(prior.taskId);
+    const escalation = deriveEscalation({
+      from: {
+        id: prior.id,
+        tier: prior.tier,
+        identity: { taskId: prior.taskId, missionId: prior.missionId, projectId: prior.projectId },
+        requiredReviewTier: prior.requiredReviewTier,
+      },
+      trigger: input.trigger,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+    });
+    if (!escalation.ok) {
+      return fail(
+        'escalation_refused',
+        `The decision was not escalated (${escalation.refusal}). ${ESCALATION_STATEMENT}`,
+        { refusal: escalation.refusal },
+      );
+    }
+    // THE SAME enforcement point the first record goes through (Wave 5
+    // correction round three, Medium B3). `#resolveRecordedTier` is documented
+    // as "the ONE place a recorded tier is checked against the policy — law 6",
+    // and this path never ran it: `deriveEscalation` picked the cheapest higher
+    // permitted tier and consulted neither the required reviewer tier nor the
+    // computed floor. Reproduced through supported calls only — a Founder
+    // re-registering a capability at a higher risk class through the documented
+    // registry upsert — the enforced path refused `low_cost` with
+    // `review_tier_required` while escalation recorded `low_cost` anyway
+    // against a `critical_review` requirement.
+    //
+    // `deriveEscalation` now skips a tier that cannot satisfy the review
+    // requirement, and this re-derivation is the half that also covers the
+    // FLOOR and the permitted set as they stand at escalation time. Two checks
+    // rather than one, deliberately, because the pure derivation is exported and
+    // callable without a database.
+    const priorCharacteristics = prior.characteristics;
+    if (!priorCharacteristics) {
+      // Fail closed. A stored `characteristics` column that cannot be read
+      // through the closed vocabularies means HQ cannot compute the policy this
+      // escalation would have to satisfy, and an escalation moves UP the tier
+      // order — recording one it cannot check is exactly the fabrication law 6
+      // exists to prevent.
+      return fail(
+        'escalation_refused',
+        'The prior decision’s recorded characteristics cannot be read through the closed vocabularies, so ' +
+          'the policy this escalation would have to satisfy cannot be computed. ' +
+          ESCALATION_STATEMENT,
+        { refusal: 'prior_decision_has_no_tier' },
+      );
+    }
+    const proposal = computeRoutingProposal({
+      characteristics: priorCharacteristics,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+    });
+    const chosen = this.#resolveRecordedTier(proposal, escalation.escalation.toTier);
+    if (!chosen.ok) return chosen;
+    const inserted = this.#insertDecision({
+      // Copied from the ESCALATION, which copied them from the prior decision.
+      taskId: escalation.escalation.identity.taskId,
+      missionId: escalation.escalation.identity.missionId,
+      projectId: escalation.escalation.identity.projectId,
+      tier: chosen.data,
+      floorTier: isIntelligenceTier(prior.floorTier) ? prior.floorTier : escalation.escalation.toTier,
+      // The CURRENT canonical requirement when it is stronger than the one the
+      // prior row carries, so a row escalated after a risk class was raised
+      // records the requirement it actually has to meet.
+      requiredReviewTier: proposal.requiredReviewTier ?? prior.requiredReviewTier,
+      escalatedFrom: prior.id,
+      escalationTrigger: input.trigger,
+      characteristics: prior.characteristics,
+      permittedTiers: evaluation.permittedTiers,
+      budgetDecision: evaluation.decision,
+      label: prior.label,
+      issuedBy: input.workerId,
+      idempotencyKey: input.idempotencyKey?.trim() || null,
+    });
+    if (!inserted.ok) return inserted;
+    // Law 8: a categorical reason in a returned view may never contradict the
+    // record (Wave 5 review, Low finding 4).
+    //
+    // `decisionIdempotencyKey` deliberately excludes the escalation TRIGGER —
+    // the same escalation re-recorded is one row, which is what an append-only
+    // ledger with an idempotency rule is for. The consequence is that a second
+    // escalation naming a DIFFERENT trigger dedupes to the row already held,
+    // and the row's trigger is the one HQ actually stores. Returning the
+    // caller's would hand back a view saying `quality_not_met` over a record
+    // that says `reviewer_requested`. So the stored one is authoritative here,
+    // exactly as `#decisionRecordFromStore` is authoritative for the decision
+    // itself.
+    //
+    // `requiresFounderDecision` is the SIBLING of the same defect (Wave 5
+    // review, Low finding B-6): it was computed from the request-time
+    // evaluation, so when a second escalation deduped to a standing row it
+    // could disagree with the budget decision that row actually holds. It is
+    // projected from the STORED row too, by the same rule — a view may not
+    // contradict the record it claims to describe.
+    const storedTrigger = inserted.data.decision.escalationTrigger;
+    const storedBudgetDecision = inserted.data.decision.budgetDecision;
+    const storedRequiresFounderDecision =
+      storedBudgetDecision === 'requires_founder_decision' &&
+      escalation.escalation.toTier !== 'deterministic_local';
+    const escalationView: EscalationProposal = {
+      ...escalation.escalation,
+      trigger: storedTrigger ?? escalation.escalation.trigger,
+      requiresFounderDecision: storedRequiresFounderDecision,
+    };
+    return ok({ ...inserted.data, escalation: escalationView });
+  }
+
+  /**
+   * Record what the work at a recorded tier actually produced.
+   *
+   * Authorized by the live fenced claim on the DECISION's canonical task, so
+   * the entity that did the work is the one that reports on it. Exactly one
+   * outcome per decision, by construction: the key IS the decision id, backed
+   * by a UNIQUE index and the append-only trigger, so a second report cannot
+   * quietly overwrite the first.
+   */
+  recordIntelligenceOutcome(input: {
+    decisionId: string;
+    workerId: string;
+    fence: number;
+    result: DecisionResult;
+    reviewedByTier?: IntelligenceTier;
+    note?: string;
+  }): OpsResult<{ decision: DecisionRecord; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
+    if (!input.decisionId || !input.workerId) {
+      return fail('invalid_input', 'decisionId and workerId are required');
+    }
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    if (!isDecisionResult(input.result)) {
+      return fail('invalid_input', `result must be one of: ${DECISION_RESULTS.join(', ')}`);
+    }
+    if (input.reviewedByTier !== undefined && !isIntelligenceTier(input.reviewedByTier)) {
+      return fail('invalid_input', `reviewedByTier must be one of: ${INTELLIGENCE_TIERS.join(', ')}`);
+    }
+    const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    // The 30th write site the "29 call sites" claim missed (Wave 5 correction
+    // round six, Medium 4), found again independently in round seven: its two
+    // sibling writes, `recordIntelligenceCost` and `setIntelligenceBudget`,
+    // already scanned their notes and this one did not. No read publishes this
+    // column TODAY, so nothing 500s — which makes it a latent brick rather than
+    // a live one: the row is append-only, so the first read that ever serves it
+    // repeats High 4 verbatim and cannot be undone. The rule is "every facade
+    // write that stores caller text", not "every one that is currently
+    // published". Two lanes wrote this guard against the same finding; one
+    // survives, with the field-named refusal message the rest of this file
+    // uses.
+    try {
+      assertNoCredentialShape({ note: note.value ?? '' });
+    } catch {
+      return fail(
+        'invalid_input',
+        'The outcome note looks like it contains a credential; nothing was recorded.',
+      );
+    }
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'intelligence ledger unavailable on this database handle');
+    }
+    const safeMode = this.#safeModeRefusal('record an intelligence outcome');
+    if (safeMode) return safeMode;
+    const resolvedDecision = this.#resolveDecisionReference(input.decisionId);
+    if (!resolvedDecision.ok) return resolvedDecision;
+    const decision = resolvedDecision.data;
+    const claim = this.#runClaimRefusal(
+      decision.taskId,
+      input.workerId,
+      input.fence,
+      'record an intelligence outcome',
+    );
+    if (claim) return claim;
+
+    const key = decisionOutcomeKey(decision.id);
+    const id = `intelout-${uuid()}`;
+    const at = nowIso();
+    const privileged = this.#requirePrivilegedQueue();
+    let deduplicated = false;
+    privileged.reserve(() => {
+      const existing = this.#db
+        .prepare(`SELECT id FROM hq_intel_decision_outcomes WHERE outcome_key = ?`)
+        .get(key) as { id: string } | undefined;
+      if (existing) {
+        deduplicated = true;
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_intel_decision_outcomes
+             (id, decision_id, result, reviewed_by_tier, note, recorded_at, recorded_by, outcome_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, decision.id, input.result, input.reviewedByTier ?? null, note.value ?? null, at, input.workerId, key);
+      privileged.appendEvidence({
+        taskId: decision.taskId,
+        actor: input.workerId,
+        kind: 'intelligence_outcome_recorded',
+        payload: {
+          decisionId: decision.id,
+          tier: decision.tier,
+          result: input.result,
+          reviewedByTier: input.reviewedByTier ?? null,
+          executable: false,
+        },
+      });
+    });
+    const updated = this.#decisionRecordFromStore(decision.id);
+    if (!updated) return fail('invalid_input', 'the routing decision could not be read back');
+    return ok({ decision: updated, deduplicated });
+  }
+
+  /**
+   * Record ONE observed usage/cost entry against a canonical task.
+   *
+   * Law 2 lands here. `normalizeCostFact` refuses an `unknown` provenance
+   * carrying an amount, a known provenance without one, an `estimated` amount
+   * with no stated basis, a negative or non-integer amount, and a missing or
+   * malformed currency. What that adds up to is that HQ can record "we do not
+   * know what this cost" and can record "we were billed 1234 minor units of
+   * USD", and cannot record anything in between that looks like the second
+   * while being the first.
+   *
+   * Authorized by the live fenced claim, like every other execution-audit
+   * write: the worker that made the call is the one that can say what it used.
+   */
+  recordIntelligenceCost(input: {
+    taskId: string;
+    workerId: string;
+    fence: number;
+    providerId: string;
+    modelId?: string | null;
+    /**
+     * The routing decision this cost belongs to, when there is one. Checked
+     * against the ledger and against THIS task (Wave 5 Medium 8): it used to
+     * be unvalidated caller free text.
+     *
+     * `missionId` and `projectId` are deliberately NOT parameters. They are
+     * derived from the task's canonical mission link, because omitting a
+     * mission id hid a spend from an exhausted mission ceiling and made three
+     * of the five `BUDGET_SCOPES` meaningless.
+     */
+    decisionId?: string;
+    provenance: CostProvenance;
+    amountMinorUnits?: number | null;
+    currency?: string | null;
+    unitKind: CostUnitKind;
+    unitsObserved?: number | null;
+    basis?: string;
+    occurredAt?: string;
+    note?: string;
+    idempotencyKey?: string;
+  }): OpsResult<{ entry: CostEntryRecord; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['basis', 'modelId', 'note', 'providerId']);
+    if (unsafeCallerText) return unsafeCallerText;
+    if (!input.workerId) return fail('invalid_input', 'workerId is required');
+    if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
+    // FOLDED into this lane's vocabulary before it is checked (Wave 5
+    // correction round three, High B2). The canonical routing binding is
+    // `CLAUDE` and every id stored here is a lowercase slug, so demanding the
+    // slug of the caller and then demanding equality with the uppercase binding
+    // made a bound task's cost entry structurally impossible: `CLAUDE` failed
+    // the slug rule, `claude` failed the binding rule, and `Claude` failed the
+    // slug rule again. The `provider` budget scope was dead as a result.
+    const providerId = normalizeProviderId(input.providerId ?? '');
+    if (!isIdentifierSlug(providerId, MAX_PROVIDER_ID_LENGTH)) {
+      return fail('invalid_input', 'providerId must be a slug of letters, digits, dot, colon, dash or underscore');
+    }
+    const modelIdRaw = (input.modelId ?? '').trim();
+    if (modelIdRaw !== '' && !isIdentifierSlug(modelIdRaw, MAX_MODEL_ID_LENGTH)) {
+      return fail('invalid_input', 'modelId must be a lowercase slug, or omitted when it was not observed');
+    }
+    const modelId = modelIdRaw === '' ? null : modelIdRaw;
+    // Scanned at the FACADE, not only at the route (Wave 5 review, Low finding
+    // B-8). `recordIntelligenceCost` has no route at all, so its only callers
+    // are in-process and were unscanned — and the slug rule accepts
+    // `sk-proj-…`, which is a credential shape that reads as a perfectly legal
+    // provider id.
+    try {
+      // `assertBrowserSafe` rather than `assertNoSecretLikeContent`: the latter
+      // is the `key: value` heuristic, and a bare `sk-proj-…` is not that
+      // shape. The shape patterns are what a provider id can accidentally be.
+      assertBrowserSafe({ providerId, modelId }, 'cost_entry');
+    } catch {
+      return fail(
+        'invalid_input',
+        'The providerId or modelId looks like it contains a credential; nothing was recorded.',
+      );
+    }
+    const cost = normalizeCostFact({
+      provenance: input.provenance,
+      amountMinorUnits: input.amountMinorUnits ?? null,
+      currency: input.currency ?? null,
+      unitKind: input.unitKind,
+      basis: input.basis,
+    });
+    if (!cost.ok) {
+      return fail('cost_provenance_conflict', costRefusalMessage(cost.refusal), { refusal: cost.refusal });
+    }
+    const unitsObserved = input.unitsObserved ?? null;
+    if (unitsObserved != null && (!Number.isInteger(unitsObserved) || unitsObserved < 0)) {
+      return fail('invalid_input', 'unitsObserved must be a whole, non-negative count, or omitted when unobserved');
+    }
+    const note = missionText('note', input.note, MAX_INTEL_NOTE_LENGTH, false);
+    if (!note.ok) return fail('invalid_input', note.message);
+    try {
+      assertNoCredentialShape({ note: note.value ?? '', basis: cost.fact.basis ?? '' });
+    } catch {
+      return fail('invalid_input', 'The note or basis looks like it contains a credential; nothing was recorded.');
+    }
+    if (!this.#intelligenceStorePresent) {
+      return fail('invalid_input', 'cost ledger unavailable on this database handle');
+    }
+    const safeMode = this.#safeModeRefusal('record an intelligence cost entry');
+    if (safeMode) return safeMode;
+    const claim = this.#runClaimRefusal(
+      input.taskId,
+      input.workerId,
+      input.fence,
+      'record an intelligence cost entry',
+    );
+    if (claim) return claim;
+
+    // The provider must be the one the CANONICAL payload binds, when it binds
+    // one (Wave 5 review, High finding B-2). `providerId` was written verbatim,
+    // so a claim-holding worker could record its spend against
+    // `a.provider.never.bound` — evading its own provider ceiling, and pushing
+    // spend into a scope somebody else is answerable for. Same rule, same
+    // refusal code, as the queue's own claim/start enforcement.
+    const boundProvider = this.#taskBoundProvider(input.taskId);
+    if (boundProvider != null && normalizeProviderId(boundProvider) !== providerId) {
+      return fail(
+        'provider_binding_mismatch',
+        `Task ${input.taskId} is canonically bound to provider ${boundProvider}; a cost entry may not be ` +
+          `attributed to ${providerId}. No substitution is made, and the binding is not something a cost ` +
+          'record can change.',
+        { boundProvider, providerId },
+      );
+    }
+    // An UNBOUND task is not a licence to file spend against anybody's ceiling
+    // (Wave 5 correction round three, Medium B5). The check above only ran when
+    // a binding existed, so a claim-holding worker on an unbound task filed its
+    // spend against an unrelated provider and pushed that Founder ceiling from
+    // `observed 0` to `blocked, observed 999999`. The entry is still RECORDED —
+    // the provider it names is a real fact the worker is reporting, and
+    // refusing it would lose the spend from the deployment total — but it
+    // measures no PROVIDER ceiling, because HQ has no canonical statement that
+    // this work ran there. `#entriesForScope` enforces that from the binding
+    // rather than from this column, so the two halves cannot drift.
+
+    const at = nowIso();
+    /*
+     * The entry's IDENTITY has to be something the caller DECLARED (Wave 5
+     * correction round five, Low 3).
+     *
+     * `occurredAt` used to default to `nowIso()` and then feed `costEntryKey`,
+     * so an entry recorded without one carried a millisecond wall clock as part
+     * of its own identity. Two identical calls therefore almost never collided:
+     * executed at a 0 ms gap, a 2 ms gap and a 30 ms gap, an unchanged replay
+     * of a 6000-unit entry was ACCEPTED as a second row every time and the
+     * Founder ceiling observed 12000 from 6000 actually spent. The documented
+     * protection — "a second entry with the same identity and a different
+     * figure is `cost_entry_conflict`" — was true of the key and vacuous in
+     * practice, because the default path essentially never produced the same
+     * identity. A fabricated figure in the FALSE-ALARM direction is as much a
+     * fabrication as one in the reassuring direction.
+     *
+     * So an entry must declare at least one of the two things that can
+     * distinguish it from a replay, and the key uses the DECLARED instant only:
+     *
+     *  - `idempotencyKey`, which is the caller saying "this is the same
+     *    observation I may already have reported" and is now stated as the
+     *    mitigation it is rather than left as an unmentioned option; or
+     *  - `occurredAt`, a real instant the caller observed, which is a fact
+     *    about the spend rather than about the moment the call was made.
+     *
+     * Fail closed on unknown, and never dedupe on a fabricated identity: HQ
+     * genuinely cannot tell a replay from a second real spend when the caller
+     * declares neither, and inventing a wall clock to tell them apart
+     * over-reports while inventing a match would under-report against a Founder
+     * ceiling. It refuses instead.
+     */
+    const declaredOccurredAt = (input.occurredAt ?? '').trim();
+    const idempotencyKey = input.idempotencyKey?.trim() || null;
+    const occurredAt = declaredOccurredAt || at;
+    /*
+     * A REAL instant, BOUNDED against the clock — the two correction lanes'
+     * checks folded into one (Wave 5 review, High findings B-2 / High 3).
+     *
+     * The only check used to be `/^\d{4}-\d{2}-\d{2}T/`, which is a pattern
+     * rather than a date: under a `deployment/day` ceiling of 100 with 90
+     * observed, an entry with `occurredAt: "0000-00-00T00:00:00Z"` and an
+     * amount of 1,000,000 was ACCEPTED and the ceiling still reported
+     * `within_ceiling`; so was a 999,999-unit entry dated 2099-01-01, which no
+     * `day` or `month` window could see, leaving the scope reading `observed:
+     * 0`. Both lanes reproduced it; one answered with "must parse, and may not
+     * be in the future", the other with "must sit inside a bounded interval
+     * around now". The bounded interval is the surviving rule because it closes
+     * BOTH directions, and the future half of it keeps the other lane's
+     * refusal by name.
+     *
+     * Structurally, the window filter also moved off `occurred_at` entirely
+     * onto `recorded_at`, which HQ sets (see `#entriesForScope`), so
+     * `occurredAt` is reported-only metadata and this bound is the defence in
+     * depth that keeps it close to the truth rather than the thing the ceiling
+     * rests on. A real observation is recorded close to when it happened; a
+     * lane recording later has `recorded_at` for that, and both are on the row.
+     */
+    const occurredMs = Date.parse(occurredAt);
+    if (!Number.isFinite(occurredMs)) {
+      return fail('invalid_input', 'occurredAt must be a real ISO-8601 instant, or omitted');
+    }
+    const skewMs = occurredMs - Date.parse(at);
+    if (skewMs > MAX_COST_OCCURRED_AT_FUTURE_MS) {
+      return fail(
+        'invalid_input',
+        'occurredAt is in the future by more than the tolerated clock skew. A cost cannot have been ' +
+          'incurred after the moment it is recorded, and an instant outside the bounded interval around ' +
+          'now would place recorded spend in a budget window it did not happen in.',
+      );
+    }
+    if (-skewMs > MAX_COST_OCCURRED_AT_PAST_MS) {
+      return fail(
+        'invalid_input',
+        'occurredAt is more than thirty days behind now. It must sit inside the bounded interval around ' +
+          'now — at most one hour ahead and thirty days behind — because an instant outside that window ' +
+          'would place recorded spend in a budget window it did not happen in.',
+      );
+    }
+    // A referenced decision must EXIST and belong to THIS task (Wave 5 Medium
+    // 8): a cost entry citing another task's decision is an attribution claim
+    // HQ can check, so it checks it.
+    const decisionId = input.decisionId?.trim() || null;
+    if (decisionId !== null) {
+      const resolved = this.#resolveDecisionReference(decisionId);
+      if (!resolved.ok) return resolved;
+      if (resolved.data.taskId !== input.taskId) {
+        return fail(
+          'invalid_input',
+          'The cited routing decision belongs to a different task; a cost entry may only cite a decision ' +
+            'recorded against the task it is recorded on.',
+        );
+      }
+    }
+    // LAST of the refusals, deliberately: every check above is about whether
+    // this entry may be recorded at all, and this one is about whether HQ can
+    // tell it apart from a replay. Putting it earlier would have changed which
+    // refusal an unbound provider or a foreign decision id gets back, which is
+    // a worse answer to a worse question.
+    if (declaredOccurredAt === '' && idempotencyKey === null) {
+      return fail(
+        'invalid_input',
+        'A cost entry must carry an idempotencyKey, or the occurredAt instant it was observed at, so a ' +
+          'replay of the same observation can be recognized rather than counted twice. HQ will not stamp ' +
+          'an identity of its own on a spend figure: a wall clock read at the moment of the call makes ' +
+          'every replay look like a new entry.',
+      );
+    }
+    const key = costEntryKey({
+      taskId: input.taskId,
+      providerId,
+      modelId,
+      // The DECLARED instant, never the defaulted one. `occurredAt` above still
+      // falls back to `at` for the stored column — the row records when HQ was
+      // told, which is honest metadata — but a wall clock HQ read for itself is
+      // not part of anything's identity. With an `idempotencyKey` and no
+      // declared instant, the key is the caller's key: two replays a minute
+      // apart collide, which is exactly what an idempotency key is for.
+      occurredAt: declaredOccurredAt || null,
+      unitKind: cost.fact.unitKind,
+      idempotencyKey,
+    });
+    const id = `intelcost-${uuid()}`;
+    // CANONICAL attribution, exactly as for a decision. Mission and project
+    // were free-text parameters written verbatim and never checked for
+    // existence, so an entry could be filed against a mission that does not
+    // exist — or against a real one belonging to somebody else.
+    const canonicalScopes = this.#canonicalTaskScopes(input.taskId);
+    const privileged = this.#requirePrivilegedQueue();
+    let dedupedTo: string | null = null;
+    let conflict: OpsError | null = null;
+    privileged.reserve(() => {
+      const existing = this.#db.prepare(`SELECT * FROM hq_intel_cost_entries WHERE entry_key = ?`).get(key) as
+        | Record<string, unknown>
+        | undefined;
+      if (existing) {
+        // Deduping is only honest when the two entries say the SAME thing.
+        // `costEntryKey` covers the entry's IDENTITY (task, provider, model,
+        // instant, unit kind, idempotency key) and deliberately not its
+        // figures, so first-write-wins used to let a `billed 0` recorded first
+        // permanently suppress the true amount — silently, and without setting
+        // `unknownAmountEntries`, so `evaluateBudget` answered `within_ceiling`
+        // over a fabricated zero (Wave 5 review, Medium finding B-5). A second
+        // entry that disagrees is now a REFUSAL a caller can see and a Founder
+        // can act on, rather than a silent `deduplicated: true`.
+        const stored = readStoredCostFact({
+          provenance: existing.provenance,
+          amountMinorUnits: existing.amount_minor_units,
+          currency: existing.currency,
+          unitKind: existing.unit_kind,
+          basis: existing.basis,
+        });
+        // EVERY figure the row carries, not three of them (Wave 5 correction
+        // round three, Low B8). The amount check closed the case where a
+        // `billed 0` recorded first permanently suppressed the true amount;
+        // `unitsObserved`, `basis` and `decisionId` were left on the same
+        // silent first-write-wins path, and each is a published claim: a second
+        // entry with the same amount but `unitsObserved` 9,999,999 deduped and
+        // kept the first row's 10, an invented `basis` deduped and kept
+        // nothing, and a citation of a real `decisionId` deduped onto a row
+        // whose `decision_id` stayed null. `units_observed` goes out on the
+        // Founder route and `basis` is what law 2 says an `estimated` amount
+        // must NAME, so silently discarding either is the same defect class the
+        // amount check was added to close.
+        const storedUnitsObserved =
+          existing.units_observed == null ? null : Number(existing.units_observed);
+        const storedDecisionId = (existing.decision_id as string | null) ?? null;
+        if (
+          stored.provenance !== cost.fact.provenance ||
+          stored.amountMinorUnits !== cost.fact.amountMinorUnits ||
+          stored.currency !== cost.fact.currency ||
+          stored.basis !== cost.fact.basis ||
+          storedUnitsObserved !== unitsObserved ||
+          storedDecisionId !== decisionId
+        ) {
+          conflict = {
+            code: 'cost_entry_conflict',
+            message:
+              'A cost entry is already recorded for this task, provider, model, instant and unit kind, and it ' +
+              'says something different. HQ does not overwrite a recorded figure and does not silently keep ' +
+              'the first: record the correction under its own idempotency key so both stand in the ledger.',
+            details: { entryId: String(existing.id) },
+          };
+          return;
+        }
+        dedupedTo = String(existing.id);
+        return;
+      }
+      this.#db
+        .prepare(
+          `INSERT INTO hq_intel_cost_entries
+             (id, task_id, mission_id, project_id, mission_ids, project_ids, decision_id, provider_id,
+              provider_bound, model_id,
+              provenance,
+              amount_minor_units, currency, unit_kind, units_observed, basis, occurred_at, recorded_at,
+              recorded_by, note, entry_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          id,
+          input.taskId,
+          canonicalScopes.missionIds[0] ?? null,
+          canonicalScopes.projectIds[0] ?? null,
+          // EVERY derived scope, not just the first (Wave 5 correction round
+          // six, High 3). The two single columns above are kept because they
+          // are what an older row carries and what several readers display; the
+          // MEASUREMENT reads these arrays, because a task linked to two
+          // missions files its spend under both and a ceiling that has been
+          // charged has to stay charged whichever of them is later moved.
+          JSON.stringify(canonicalScopes.missionIds),
+          JSON.stringify(canonicalScopes.projectIds),
+          decisionId,
+          providerId,
+          // HQ's OWN statement about the caller's attribution claim, taken from
+          // the canonical binding read a few lines above and enforced equal to
+          // `providerId` when it exists. Written once, on an append-only row,
+          // so a later payload rewrite cannot change what was true (Wave 5
+          // correction round four, High H2 route (c) / Medium M6).
+          boundProvider != null ? 1 : 0,
+          modelId,
+          cost.fact.provenance,
+          cost.fact.amountMinorUnits,
+          cost.fact.currency,
+          cost.fact.unitKind,
+          unitsObserved,
+          cost.fact.basis,
+          occurredAt,
+          at,
+          input.workerId,
+          note.value ?? null,
+          key,
+        );
+      privileged.appendEvidence({
+        taskId: input.taskId,
+        actor: input.workerId,
+        kind: 'intelligence_cost_recorded',
+        payload: {
+          entryId: id,
+          providerId,
+          provenance: cost.fact.provenance,
+          amountKnown: cost.fact.state === 'known',
+          executable: false,
+        },
+      });
+    });
+    if (conflict) return { ok: false, error: conflict };
+    const resolvedId = dedupedTo ?? id;
+    const row = this.#costEntriesFromStore().find((entry) => entry.id === resolvedId);
+    if (!row) return fail('invalid_input', 'the cost entry could not be read back');
+    return ok({ entry: costEntryToRecord(row), deduplicated: dedupedTo != null });
+  }
+
+  /** One recorded routing decision, or null. A read; grants nothing. */
+  getIntelligenceDecision(id: string): DecisionRecord | null {
+    return this.#decisionRecordFromStore(id);
+  }
+
+  /** Bounded reads. The true total is always stated beside the page. */
+  listModelObservationsBounded(): {
+    observations: ModelObservationRow[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.#observationsFromStore().reverse();
+    const page = all.slice(0, OBSERVATION_READ_LIMIT);
+    return { observations: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  listIntelligenceDecisionsBounded(filter?: { taskId?: string }): {
+    decisions: DecisionRecord[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.#listDecisionRecordsFromStore(filter).reverse();
+    const page = all.slice(0, DECISION_READ_LIMIT);
+    return { decisions: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  listIntelligenceCostEntriesBounded(): {
+    entries: CostEntryRecord[];
+    total: number;
+    truncated: boolean;
+  } {
+    const all = this.#costEntriesFromStore().reverse().map(costEntryToRecord);
+    const page = all.slice(0, COST_READ_LIMIT);
+    return { entries: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  listIntelligenceBudgetsBounded(): { budgets: BudgetRecord[]; total: number; truncated: boolean } {
+    if (!this.#intelligenceStorePresent) return { budgets: [], total: 0, truncated: false };
+    const all = loadBudgets(this.#db).reverse().map(budgetRowToRecord);
+    const page = all.slice(0, BUDGET_READ_LIMIT);
+    return { budgets: page, total: all.length, truncated: all.length > page.length };
+  }
+
+  /**
+   * Truthful analytics over what was actually recorded. A read: it computes no
+   * projection, converts no currency and invents no confidence.
+   */
+  intelligenceAnalytics(): IntelligenceAnalyticsView {
+    // The SAME canonical derivation the ceilings are measured against, so the
+    // Founder's report and the ceiling that blocked a write can never disagree
+    // about whose spend it was (Wave 5 correction round four, Medium M5 / M6).
+    const memo = new Map<string, { missionIds: string[]; projectIds: string[] }>();
+    return summarizeIntelligenceAnalytics({
+      decisions: this.#listDecisionRecordsFromStore(),
+      costs: this.#costEntriesFromStore(),
+      observations: this.#observationsFromStore(),
+      canonicalScopesOf: (taskId: string) => {
+        let value = memo.get(taskId);
+        if (!value) {
+          value = this.#canonicalTaskScopes(taskId);
+          memo.set(taskId, value);
+        }
+        return value;
+      },
+    });
+  }
+
+  /** The Founder-gated picture. Statements, counts, and two literal falses. */
+  hqIntelligencePosture(): IntelligencePostureView {
+    return {
+      storePresent: this.#intelligenceStorePresent,
+      defaultPermittedTiers: [...DEFAULT_PERMITTED_TIERS],
+      observations: this.#observationsFromStore().length,
+      decisions: this.#listDecisionRecordsFromStore().length,
+      costEntries: this.#costEntriesFromStore().length,
+      budgets: this.#intelligenceStorePresent ? loadBudgets(this.#db).length : 0,
+      routingStatement: INTELLIGENCE_ROUTING_STATEMENT,
+      costStatement: COST_LEDGER_STATEMENT,
+      budgetStatement: BUDGET_POLICY_STATEMENT,
+      escalationStatement: ESCALATION_STATEMENT,
+      latencyStatement: INTELLIGENCE_LATENCY_STATEMENT,
+      canActivatePaidProvider: false,
+      canSpend: false,
+    };
+  }
+
+  /**
+   * Counts over closed vocabularies for the UNAUTHENTICATED artifact.
+   *
+   * ENFORCEMENT-SAFE, and it has to be for the Phase 13 reason: this is the
+   * read on the path that produces `hq-snapshot.json`, so it uses the
+   * `#private` loaders and deliberately not `listIntelligenceDecisionsBounded()`
+   * or `hqIntelligencePosture()`.
+   *
+   * NO amount, currency, ceiling, provider id, model id, label, basis or note
+   * crosses — the section has no field that could carry one.
+   */
+  intelligenceSummary(): IntelligenceSnapshotView {
+    if (!this.#intelligenceStorePresent) return emptyIntelligenceSnapshot(false);
+    return summarizeIntelligence({
+      storePresent: true,
+      decisions: this.#listDecisionRecordsFromStore(),
+      costs: this.#costEntriesFromStore(),
+      observations: this.#observationsFromStore(),
+      budgets: loadBudgets(this.#db),
+    });
+  }
+
+  /**
+   * Whether this database carries the Phase 14 ledgers. False only for a
+   * read-only handle over a pre-Phase-14 file; the reads then answer
+   * empty/null and the snapshot states the absence rather than an empty store.
+   */
+  intelligenceStorePresent(): boolean {
+    return this.#intelligenceStorePresent;
+  }
+
   // ---- company memory (Phase 5 — Context + Mission Memory, #265) ----
 
   /**
@@ -6596,6 +12208,18 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ record: MemoryBrowserView; deduplicated: boolean }> {
+    // `'so'` used to sit between `related` and `sourceRefs` here and named no
+    // field this input declares, so it skipped nothing and was inert (Wave 5
+    // correction round thirteen, Low 2). It is DELETED rather than repaired to
+    // some guessed name: the six that remain are exactly the keys the explicit
+    // `assertNoCredentialShape` below scans that are also fields of `input`
+    // (`recordedSource` is the seventh key there, and is derived from
+    // `input.recorded` rather than being a field of its own — which is why
+    // `recorded` is not listed here and is scanned by the generic pass).
+    // `facade-write-scan.test.ts` now derives this list and requires every name
+    // in it to be a declared field, so the next such typo fails a test.
+    const unsafeCallerText = callerTextRefusal(input, ['body', 'project', 'related', 'sourceRefs', 'tags', 'title']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     if (!isMemoryKind(input.kind)) {
       return fail('invalid_input', `kind must be one of: ${MEMORY_KINDS.join(', ')}`);
@@ -6677,7 +12301,7 @@ export class HeadquarterOperations {
     // Everything that will be PERSISTED is scanned before anything is written
     // (the store scans again — deliberate defense in depth, not redundancy).
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         title: title.value,
         body: body.value,
         project: project.value,
@@ -6997,6 +12621,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ record: TruthRecordView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['statement']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     if (!isTruthEntityKind(input.entityKind)) {
       return fail('invalid_input', `entityKind must be one of: ${TRUTH_ENTITY_KINDS.join(', ')}`);
@@ -7059,7 +12685,7 @@ export class HeadquarterOperations {
       );
     }
     try {
-      assertNoSecretLikeContent({ statement: statement.value });
+      assertNoCredentialShape({ statement: statement.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -7242,6 +12868,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ verification: TruthVerificationView; record: TruthRecordView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['limitations']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const truthId = input.truthId?.trim() ?? '';
     if (!truthId) return fail('invalid_input', 'truthId is required');
@@ -7270,7 +12898,7 @@ export class HeadquarterOperations {
     if (refusedCapability) return refusedCapability;
     if (!this.#truthStorePresent) return fail('invalid_input', 'truth store unavailable on this database handle');
     try {
-      assertNoSecretLikeContent({ limitations: limitations.value });
+      assertNoCredentialShape({ limitations: limitations.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -7415,6 +13043,29 @@ export class HeadquarterOperations {
    *
    * Acceptance executes nothing: no task, approval row, claim or dispatch is
    * touched, and no gate reads the acceptance to decide anything.
+   *
+   * **REFUSED in safe mode** (Wave 5 correction round seven, Medium 1). It had
+   * no such guard and was in neither column of the phase document's tables:
+   * an acceptance row was written, permanently, while HQ had latched
+   * `append_only_guard_missing` — executed, with `recordTruth` beside it
+   * correctly answering `safe_mode_engaged` as the control.
+   *
+   * The paragraph above is why this is a correction rather than an emergency:
+   * acceptance is inert, so nothing was primed to run. It is fixed anyway
+   * because of what the shipped sentence SAYS. `SAFE_MODE_STATEMENT` crosses
+   * to the Founder browser on every reliability view and in every refusal, and
+   * it says HQ refuses the acts that would APPROVE a record it cannot stand
+   * behind. This is the Founder's approval-authority, digest-bound,
+   * step-up-gated, one-shot acceptance of a truth record — the act that word
+   * denotes if anything does. An act the statement calls APPROVE must either
+   * be refused or be named in the kept-available table WITH its reason, as
+   * `denyTask`, `reviewTask` and `appendSystemEvidence` are; being in neither
+   * is what made "what safe mode refuses" a partial statement presented as a
+   * complete one for the third time in this wave.
+   *
+   * Placed after the approval-authority gate and before the store probe, so
+   * an unauthorised caller is still told they lack authority rather than
+   * learning HQ's posture from a refusal they could not have earned.
    */
   acceptTruth(input: {
     truthId: string;
@@ -7422,16 +13073,20 @@ export class HeadquarterOperations {
     note?: string;
     requestedBy: string;
   }): OpsResult<{ acceptance: TruthAcceptanceView; record: TruthRecordView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     const truthId = input.truthId?.trim() ?? '';
     if (!truthId) return fail('invalid_input', 'truthId is required');
     const gate = this.#assertApprovalAuthority(input.requestedBy, 'accept a truth record');
     if (gate) return gate;
+    const safeMode = this.#safeModeRefusal('accept a truth record');
+    if (safeMode) return safeMode;
     if (!this.#truthStorePresent) return fail('invalid_input', 'truth store unavailable on this database handle');
     const note = missionText('note', input.note, MAX_ACCEPTANCE_NOTE_LENGTH, false);
     if (!note.ok) return fail('invalid_input', note.message);
     if (note.value) {
       try {
-        assertNoSecretLikeContent({ note: note.value });
+        assertNoCredentialShape({ note: note.value });
       } catch {
         return fail(
           'invalid_input',
@@ -7905,6 +13560,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ action: ActionView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['target']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const taskId = input.taskId?.trim() ?? '';
     if (!taskId) return fail('invalid_input', 'taskId is required');
@@ -7927,7 +13584,7 @@ export class HeadquarterOperations {
     // as a field — which the JSON encoding hides from the first pattern. The
     // payload is stored permanently and handed verbatim to an adapter.
     try {
-      assertNoSecretLikeContent(input.payload);
+      assertNoCredentialShape(input.payload);
       assertBrowserSafe(input.payload, 'payload');
       assertBrowserSafe({ target: target.value }, 'target');
     } catch {
@@ -8048,7 +13705,24 @@ export class HeadquarterOperations {
       },
     });
     const payloadDigest = actionPayloadDigest(input.payload);
-    const effectBase = sideEffectKeyBase({ taskId, adapterId, actionType, target: target.value!, payloadDigest });
+    // The SIDE-EFFECT identity is what the ADAPTER declares it acts on, which
+    // is not the same thing as the payload HQ stores (Wave 5 correction round
+    // fifteen, High 5). `payloadDigest` above stays a digest of the whole
+    // payload — it is the integrity check on the stored row, and
+    // `#gatewayGate` recomputes it before any execution. The identity below is
+    // the projection onto `contract.sideEffectIdentityFields`, so a field the
+    // adapter ignores cannot mint a fresh `effect:…` key: on the frozen head,
+    // the same comment on `issues/42` with `_nonce: 1|2|3` produced three
+    // distinct keys and THREE real adapter executions.
+    const effectBase = sideEffectKeyBase({
+      taskId,
+      adapterId,
+      actionType,
+      target: target.value!,
+      payloadDigest: actionPayloadDigest(
+        sideEffectIdentityPayload(input.payload, contract.sideEffectIdentityFields),
+      ),
+    });
 
     const privileged = this.#requirePrivilegedQueue();
     let dedupedTo: string | null = null;
@@ -8156,13 +13830,26 @@ export class HeadquarterOperations {
    *
    * Only the worker holding the task's LIVE fenced claim may authorize (it is
    * the identity that will execute); humans never execute and are refused.
+   *
+   * REFUSED IN SAFE MODE (Wave 5 review, Medium finding 7). It is the
+   * external-action analogue of `approveTask`, which safe mode already refuses
+   * for precisely this reason: the snapshot written here is captured from
+   * canonical truth HQ has just declared it cannot stand behind, it survives
+   * the clearing of safe mode, and `executeAction` then compares against it. An
+   * authorization bound now would sit primed to run the moment safe mode
+   * cleared, which is the sentence the doc's Refused column already used —
+   * about the approval, while its external-action twin was ungated.
    */
   authorizeAction(input: { actionId: string; workerId: string; fence: number; now?: Date }): OpsResult<{ action: ActionView }> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     const actionId = input.actionId?.trim() ?? '';
     if (!actionId) return fail('invalid_input', 'actionId is required');
     if (!input.workerId) return fail('invalid_input', 'workerId is required');
     if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
     if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+    const safeMode = this.#safeModeRefusal('authorize an external action');
+    if (safeMode) return safeMode;
     const now = input.now ?? new Date();
     const privileged = this.#requirePrivilegedQueue();
     let refusal: OpsError | null = null;
@@ -8255,11 +13942,25 @@ export class HeadquarterOperations {
     fence: number;
     now?: Date;
   }): OpsResult<{ action: ActionView; outcome: 'succeeded' | 'failed' | 'outcome_unknown' }> {
+    // The list is EMPTY, and was `['message']` — a name this input does not
+    // declare, so it skipped nothing (round thirteen, Low 2). Every field of
+    // `executeAction`'s input is scanned by the generic pass, which is what an
+    // empty already-scanned list says.
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     const actionId = input.actionId?.trim() ?? '';
     if (!actionId) return fail('invalid_input', 'actionId is required');
     if (!input.workerId) return fail('invalid_input', 'workerId is required');
     if (!Number.isInteger(input.fence)) return fail('invalid_input', 'fence must be an integer');
     if (!this.#actionStorePresent) return fail('invalid_input', 'action ledger unavailable on this database handle');
+    // Phase 13, and this is the most consequential of the safe-mode guards:
+    // an external action is the one act HQ cannot walk back. The Intent Guard
+    // below re-validates canonical truth immediately before the adapter call;
+    // safe mode is the prior question of whether that canonical truth can be
+    // relied on at all. Refused before the reservation, so nothing is reserved
+    // and no side-effect key is burned.
+    const safeMode = this.#safeModeRefusal('execute an external action');
+    if (safeMode) return safeMode;
     const now = input.now ?? new Date();
     const privileged = this.#requirePrivilegedQueue();
 
@@ -8273,6 +13974,8 @@ export class HeadquarterOperations {
       generation: number;
     } | null = null;
     let taskId: string | null = null;
+    /** The side-effect key this attempt tried to reserve, or null if it never got that far. */
+    let attemptedEffectKey: string | null = null;
     try {
       privileged.reserve(() => {
         const intent = loadActionIntent(this.#db, actionId);
@@ -8320,6 +14023,12 @@ export class HeadquarterOperations {
         }
         const generation = sideEffectGeneration(this.#db, intent.sideEffectKeyBase);
         const effectKey = sideEffectKey(intent.sideEffectKeyBase, generation);
+        // Hoisted out of the transaction so the CATCH below can ask the ledger
+        // a structural question instead of reading a trigger's message text
+        // (Wave 5 correction round fifteen, Medium 4). Set as soon as the key
+        // exists, because the throw it is needed for happens after this point
+        // and `reserved` is only assigned at the very end of the closure.
+        attemptedEffectKey = effectKey;
         const holder = sideEffectHolder(this.#db, effectKey);
         if (holder) {
           refusal = {
@@ -8368,11 +14077,31 @@ export class HeadquarterOperations {
       // A UNIQUE violation on the side-effect key is the engine refusing a
       // concurrent duplicate — surfaced either by the index itself or, since
       // the secondary-index guard, by the BEFORE INSERT trigger that fires
-      // first and names the key; anything else means the reservation could
-      // not be written, and an unrecorded guard is no guard — nothing executes.
+      // first; anything else means the reservation could not be written, and
+      // an unrecorded guard is no guard — nothing executes.
+      //
+      // **The trigger arm asks the LEDGER, not the message** (Wave 5 correction
+      // round fifteen, Medium 4). It used to read
+      // `errorMessage(error).includes('side_effect_key')`, which made a
+      // fail-closed classification depend on a substring of a trigger's
+      // `RAISE(ABORT, …)` text: renaming that trigger's message, or installing
+      // a second guard on this table whose message names the collision
+      // differently, silently downgraded a genuine concurrent duplicate from
+      // `duplicate_external_action` to `operator_rejected`. Measured: with the
+      // derived `no_unique_reentry` guard installed on `hq_action_events` the
+      // engine code is `SQLITE_CONSTRAINT_TRIGGER` either way and only the text
+      // changes, so the text was the whole discriminator.
+      //
+      // `sideEffectHolder` is that discriminator instead: the reserving
+      // transaction has rolled back, so a row standing under THIS attempt's
+      // side-effect key is by construction a row some OTHER attempt committed.
+      // It is a fact about the ledger, it cannot be renamed, and it is exactly
+      // the same read the in-transaction duplicate check above already makes.
       const code = (error as { code?: string }).code;
       const reservedByTrigger =
-        code === 'SQLITE_CONSTRAINT_TRIGGER' && errorMessage(error).includes('side_effect_key');
+        code === 'SQLITE_CONSTRAINT_TRIGGER' &&
+        attemptedEffectKey !== null &&
+        sideEffectHolder(this.#db, attemptedEffectKey) !== null;
       if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT' || reservedByTrigger) {
         return this.#refuseAction(actionId, taskId, 'execute', {
           code: 'duplicate_external_action',
@@ -8488,6 +14217,8 @@ export class HeadquarterOperations {
     note: string;
     requestedBy: string;
   }): OpsResult<{ action: ActionView }> {
+    const unsafeCallerText = callerTextRefusal(input, ['note']);
+    if (unsafeCallerText) return unsafeCallerText;
     const actionId = input.actionId?.trim() ?? '';
     if (!actionId) return fail('invalid_input', 'actionId is required');
     if (!isActionReconcileDecision(input.decision)) {
@@ -8496,7 +14227,7 @@ export class HeadquarterOperations {
     const note = missionText('note', input.note, MAX_ACTION_NOTE_LENGTH, true);
     if (!note.ok) return fail('invalid_input', note.message);
     try {
-      assertNoSecretLikeContent({ note: note.value });
+      assertNoCredentialShape({ note: note.value });
     } catch {
       return fail('invalid_input', 'The reconciliation note looks like it contains a credential; nothing was recorded.');
     }
@@ -8558,7 +14289,10 @@ export class HeadquarterOperations {
       privileged.appendEvidence({
         taskId: intent.taskId,
         actor: input.requestedBy,
-        kind: 'action_reconciled',
+        // ONE spelling, shared with the corroboration in
+        // `sideEffectGeneration` — the pair lands inside this reservation or
+        // not at all (Wave 5 correction round seventeen, Critical 1).
+        kind: ACTION_RECONCILED_EVIDENCE_KIND,
         payload: {
           actionId,
           decision: input.decision,
@@ -8567,6 +14301,7 @@ export class HeadquarterOperations {
           executable: false,
         },
       });
+      this.#commitReconciliationWitness();
     });
     if (refusal) return this.#refuseAction(actionId, taskId, 'reconcile', refusal);
     return ok({ action: this.#actionView(actionId)! });
@@ -8675,38 +14410,130 @@ export class HeadquarterOperations {
     return { ok: false, error };
   }
 
-  /** The canonical op_tasks row, read directly — never the patchable public `queue.get`. */
-  #taskRowFromStore(taskId: string): {
-    id: string;
-    capabilityId: string;
-    payload: Record<string, unknown>;
-    idempotencyKey: string | null;
-    status: ActivityStatus;
-    fence: number;
-    claimedBy: string | null;
-    claimNonce: string | null;
-    approvalId: string | null;
-    createdBy: string;
-  } | null {
-    const row = this.#db.prepare(`SELECT * FROM op_tasks WHERE id = ?`).get(taskId) as Record<string, unknown> | undefined;
-    if (!row) return null;
-    let payload: Record<string, unknown>;
+  /**
+   * The canonical `op_tasks` row, read directly — never the patchable public
+   * `queue.get` (Wave 5 correction round fifteen, Critical 1).
+   *
+   * Widened from the gateway's ten-field slice to the WHOLE `OperatorTask`,
+   * and moved onto the shared `readOperatorTaskRow` module binding, so this is
+   * the single task read every deciding path in the package can use rather
+   * than a second partial copy of the mapping. See that function for the
+   * exploit that made a partial, gateway-only reader insufficient: the step-up
+   * decision and the capability-scoped kill switch both looked a task up
+   * through `queue.get`, two lines away from an already-hardened capability
+   * read.
+   */
+  #taskRowFromStore(taskId: string): OperatorTask | null {
+    return readOperatorTaskRow(this.#db, taskId);
+  }
+
+  /**
+   * The canonical `hq_mission_proposals` row, read directly — never the
+   * patchable public `getProposal` (Wave 5 correction round sixteen, High
+   * B-3).
+   *
+   * An ECMAScript `#private` METHOD, like `#taskRowFromStore` beside it: it is
+   * not installed on the prototype and no importer can name it. `getProposal`
+   * stays exactly as it is — the deliberately patchable convenience read for
+   * callers DISPLAYING a proposal — and delegates here, so there is one
+   * mapping rather than two that can drift.
+   */
+  /**
+   * The `hq_approvals` row a task is currently bound to, read directly — never
+   * the patchable public `queue.approvalFor` (Wave 5 correction round sixteen,
+   * Medium B-6).
+   *
+   * An ECMAScript `#private` METHOD, like `#taskRowFromStore` and
+   * `#proposalFromStore` beside it. Both halves are read here — the task's
+   * `approval_id` and then the approval row — because `queue.approvalFor`
+   * resolved the first half through `this.get`, the queue's own deliberately
+   * patchable convenience read, so hardening only the second would have
+   * hardened nothing.
+   */
+  /**
+   * The provider a worker is DECLARED as, read directly from
+   * `op_worker_providers` — never the patchable public `queue.providerOf`
+   * (Wave 5 correction round sixteen, Medium B-6 / B-7).
+   */
+  #declaredProviderFromStore(workerId: string): string | null {
+    const row = this.#db
+      .prepare(`SELECT provider_id FROM op_worker_providers WHERE worker_id = ?`)
+      .get(workerId) as { provider_id: string } | undefined;
+    return row?.provider_id ?? null;
+  }
+
+  /**
+   * Why this worker could not be assigned work, or null — the handover-freeze
+   * and deactivation answer, read through the module function that owns the
+   * rule rather than the patchable public `queue.assignabilityProblem`.
+   * `OperatorQueue.claim` still calls `assertAssignable` itself inside the
+   * write path, so this remains a report and grants nothing.
+   */
+  #assignabilityProblemFromStore(workerId: string): string | null {
     try {
-      payload = JSON.parse(row.payload as string) as Record<string, unknown>;
-    } catch {
+      assertAssignable(this.#db, workerId);
       return null;
+    } catch (error) {
+      return errorMessage(error);
     }
+  }
+
+  /**
+   * The specialist record, read through the `#private` store — never the
+   * public `directory.getSpecialist`, which is an own-property closure a
+   * holder can overwrite with one assignment (Wave 5 correction round
+   * seventeen, Medium 2). See `readSpecialistRecord` for the executed
+   * before/after.
+   */
+  #specialistFromStore(workerId: string): ReturnType<HeadquarterStore['getSpecialist']> {
+    return this.#store.getSpecialist(workerId);
+  }
+
+  #approvalRecordFromStore(taskId: string): ApprovalRecordForValidation | null {
+    const task = this.#db.prepare(`SELECT approval_id FROM op_tasks WHERE id = ?`).get(taskId) as
+      | { approval_id: string | null }
+      | undefined;
+    const approvalId = task?.approval_id ?? null;
+    if (!approvalId) return null;
+    const row = this.#db
+      .prepare(`SELECT decision, action_digest, expires_at, consumed_at FROM hq_approvals WHERE id = ?`)
+      .get(approvalId) as
+      | {
+          decision: string;
+          action_digest: string | null;
+          expires_at: string | null;
+          consumed_at: string | null;
+        }
+      | undefined;
+    if (!row) return null;
+    return {
+      decision: row.decision,
+      actionDigest: row.action_digest,
+      expiresAt: row.expires_at,
+      consumedAt: row.consumed_at,
+    };
+  }
+
+  #proposalFromStore(proposalId: string): MissionProposal | null {
+    const row = this.#db
+      .prepare(`SELECT * FROM hq_mission_proposals WHERE id = ?`)
+      .get(proposalId) as Record<string, unknown> | undefined;
+    if (!row) return null;
     return {
       id: row.id as string,
+      threadId: row.thread_id as string,
+      sourceMessageId: (row.source_message_id as string | null) ?? null,
       capabilityId: row.capability_id as string,
-      payload,
+      payload: JSON.parse(row.payload as string) as Record<string, unknown>,
       idempotencyKey: (row.idempotency_key as string | null) ?? null,
-      status: row.status as ActivityStatus,
-      fence: row.fence as number,
-      claimedBy: (row.claimed_by as string | null) ?? null,
-      claimNonce: (row.claim_nonce as string | null) ?? null,
-      approvalId: (row.approval_id as string | null) ?? null,
-      createdBy: row.created_by as string,
+      digest: row.digest as string,
+      proposedBy: row.proposed_by as string,
+      proposedAt: row.proposed_at as string,
+      status: row.status as MissionProposalStatus,
+      taskId: (row.task_id as string | null) ?? null,
+      decidedBy: (row.decided_by as string | null) ?? null,
+      decidedAt: (row.decided_at as string | null) ?? null,
+      decisionNote: (row.decision_note as string | null) ?? null,
     };
   }
 
@@ -8762,11 +14589,22 @@ export class HeadquarterOperations {
    * a payload that does not parse is an empty object rather than a throw, so a
    * corrupt row cannot turn a "dispatched" answer into an exception.
    */
-  #taskEvidenceRowsFromStore(taskId: string): CanonicalEvidenceRow[] {
-    if (!taskId) return [];
-    const rows = this.#db
-      .prepare(`SELECT kind, at, payload FROM op_evidence WHERE task_id = ? ORDER BY seq`)
-      .all(taskId) as { kind: string; at: string; payload: string }[];
+  #taskEvidenceRowsFromStore(taskId?: string): CanonicalEvidenceRow[] {
+    // The WHOLE log when no task is named (Wave 5 correction round fifteen,
+    // found by the derived scan rather than by the review). The ingest lane's
+    // "which task is this GitHub issue?" answer is a search across every
+    // dispatch entry, not a per-task fold, and it was reading
+    // `ops.queue.evidence.list()` — the patchable display surface — to decide
+    // which canonical task a public issue's result gets attached to.
+    const rows = (
+      taskId === undefined
+        ? this.#db
+            .prepare(`SELECT task_id, kind, at, payload FROM op_evidence ORDER BY seq`)
+            .all()
+        : this.#db
+            .prepare(`SELECT task_id, kind, at, payload FROM op_evidence WHERE task_id = ? ORDER BY seq`)
+            .all(taskId)
+    ) as { task_id: string | null; kind: string; at: string; payload: string }[];
     return rows.map((row) => {
       let payload: Record<string, unknown> = {};
       try {
@@ -8775,7 +14613,7 @@ export class HeadquarterOperations {
       } catch {
         payload = {};
       }
-      return { kind: row.kind, at: row.at, payload };
+      return { taskId: row.task_id ?? null, kind: row.kind, at: row.at, payload };
     });
   }
 
@@ -8846,6 +14684,36 @@ export class HeadquarterOperations {
         code: 'not_permitted',
         message: `Worker ${workerId} is not allowed capability ${intent.capabilityId} (least privilege)`,
         details: { workerId, capabilityId: intent.capabilityId },
+      });
+    }
+    // THE BACKSTOP THAT DID NOT EXIST (Wave 5 correction round fifteen,
+    // High 7 — introduced by this diff).
+    //
+    // `rowToIntent` reads an unreadable `payload` column as `{}` rather than
+    // throwing, and the docblock at `totalJsonObject` justified that with:
+    // "an intent whose payload reads as `{}` no longer matches its own stored
+    // `payload_digest`, so every path that acts on a payload refuses it".
+    // Nothing recomputed the digest. `actionPayloadDigest` had exactly ONE
+    // call site in the package — `proposeAction`, where the row is written —
+    // so the sentence described a mechanism that was never built. Reproduced:
+    // a raw INSERT of an intent whose payload column holds `[object Object]`
+    // authorized and executed, and the adapter received `payload: {}` against
+    // a real `target` of `issues/7`. An external act performed with content
+    // HQ could not read is exactly the fabrication the gateway exists to
+    // prevent — the adapter is handed an empty object and does whatever an
+    // empty object means to it.
+    //
+    // Placed in `#gatewayGate` deliberately: this is the ONE gate BOTH
+    // `authorizeAction` and `executeAction` pass, so the refusal lands before
+    // an authorization is bound as well as before an adapter is called.
+    if (actionPayloadDigest(intent.payload) !== intent.payloadDigest) {
+      return refuse({
+        code: 'action_digest_mismatch',
+        message:
+          `Action ${intent.id}: the stored payload does not match its own recorded payload_digest, so HQ ` +
+          'cannot say what this action would do. An external act is never performed on content HQ cannot ' +
+          'read — an unreadable payload is refused, not executed as an empty one.',
+        details: { actionId: intent.id, recordedDigest: intent.payloadDigest },
       });
     }
     const adapter = this.#actionAdapters.get(intent.adapterId);
@@ -9057,6 +14925,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ session: CollaborationSessionView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['purpose', 'title']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const missionId = input.missionId?.trim() ?? '';
     if (!missionId) return fail('invalid_input', 'missionId is required');
@@ -9077,7 +14947,7 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'collaboration store unavailable on this database handle');
     }
     try {
-      assertNoSecretLikeContent({ title: title.value, purpose: purpose.value });
+      assertNoCredentialShape({ title: title.value, purpose: purpose.value });
     } catch (error) {
       return fail('invalid_input', errorMessage(error));
     }
@@ -9163,6 +15033,8 @@ export class HeadquarterOperations {
     role: CollaborationRole;
     requestedBy: string;
   }): OpsResult<{ participant: ParticipantView; session: CollaborationSessionView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const sessionId = input.sessionId?.trim() ?? '';
     if (!sessionId) return fail('invalid_input', 'sessionId is required');
@@ -9311,6 +15183,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ contribution: ContributionView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input, ['artifactRefs', 'content', 'reason']);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const sessionId = input.sessionId?.trim() ?? '';
     if (!sessionId) return fail('invalid_input', 'sessionId is required');
@@ -9373,7 +15247,7 @@ export class HeadquarterOperations {
       return fail('invalid_input', 'collaboration store unavailable on this database handle');
     }
     try {
-      assertNoSecretLikeContent({
+      assertNoCredentialShape({
         content: content.value,
         artifactRefs: artifactRefs.value,
         reason: handoff?.reason ?? null,
@@ -9883,6 +15757,13 @@ export class HeadquarterOperations {
     taskId?: string;
     requestedBy: string;
   }): OpsResult<CollaborationContextBundle> {
+    // `requestedBy` reaches `op_evidence` (Wave 5 correction round thirteen,
+    // Medium 1): both identity branches resolve through `#resolveRequester`,
+    // which appends `{ actorId, action, reason }` when the id resolves to
+    // neither a worker nor a principal. The append is two helpers down, so
+    // this method's own body carried no write marker.
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const sessionId = input.sessionId?.trim() ?? '';
     if (!sessionId) return fail('invalid_input', 'sessionId is required');
@@ -10949,6 +16830,8 @@ export class HeadquarterOperations {
     requestedBy: string;
     idempotencyKey?: string;
   }): OpsResult<{ brief: BriefView; deduplicated: boolean }> {
+    const unsafeCallerText = callerTextRefusal(input);
+    if (unsafeCallerText) return unsafeCallerText;
     if (!input.requestedBy) return fail('invalid_input', 'requestedBy is required');
     const refusedActor = this.#resolveFounderGateActor(
       input.requestedBy,
@@ -11417,6 +17300,20 @@ export class HeadquarterOperations {
     query: CompanySearchQuery,
     options: { includeFounderOnly?: boolean } = {},
   ): OpsResult<CompanySearchView> {
+    // Phase 14: the free-text scan the BROWSER route already performed, moved
+    // to the facade so an in-process caller — a CLI, a lane, an orchestrator —
+    // cannot reach retrieval with unscanned text. The route keeps its own scan
+    // (it has a better refusal to give); this is the one every caller passes.
+    // See `assertRetrievalTextSafe` for why the seam matters more than it did
+    // while no real adapter existed.
+    try {
+      assertRetrievalTextSafe(
+        { text: query.text, project: query.project, tag: query.tag },
+        'search',
+      );
+    } catch (error) {
+      return fail('invalid_input', (error as RetrievalSafetyError).message);
+    }
     const normalized = normalizeSearchQuery(query);
     if (!normalized.ok) return fail('invalid_input', normalized.message);
     return ok(
@@ -11461,6 +17358,14 @@ export class HeadquarterOperations {
     if (question === '') return fail('invalid_input', 'question is required');
     if (question.length > MAX_QUESTION_LENGTH) {
       return fail('invalid_input', `question exceeds ${MAX_QUESTION_LENGTH} characters`);
+    }
+    // Phase 14: same reason as `searchCompany` above. A question is the field
+    // most likely to carry a pasted credential, and it is the field a semantic
+    // adapter would transmit.
+    try {
+      assertRetrievalTextSafe({ question }, 'ask');
+    } catch (error) {
+      return fail('invalid_input', (error as RetrievalSafetyError).message);
     }
     const askedAt = nowIso();
     const corpus = this.#searchCorpus();
@@ -11547,7 +17452,23 @@ export class HeadquarterOperations {
 
   // ---- task metadata (console labels + advisory assignment) ----
 
+  /**
+   * The deliberately PATCHABLE convenience read, for callers displaying a
+   * task's console labels and its advisory assignment. Every path that
+   * DECIDES or WRITES reads `#metaFromStore` instead — see High B-1 (the
+   * claim gate) and `#upsertMeta` (which merges onto what it reads, so a read
+   * returning null there would silently erase a Founder's assignment intent).
+   */
   readMeta(taskId: string): TaskMeta | null {
+    return this.#metaFromStore(taskId);
+  }
+
+  /**
+   * The canonical `hq_op_task_meta` row, read directly. An ECMAScript
+   * `#private` METHOD, like `#taskRowFromStore`: not on the prototype, and no
+   * importer can name it (Wave 5 correction round sixteen, Critical B-1).
+   */
+  #metaFromStore(taskId: string): TaskMeta | null {
     const row = this.#db.prepare(`SELECT * FROM hq_op_task_meta WHERE task_id = ?`).get(taskId) as
       | Record<string, unknown>
       | undefined;
@@ -11582,7 +17503,12 @@ export class HeadquarterOperations {
       assignmentRationale?: string | null;
     },
   ): void {
-    const existing = this.readMeta(taskId);
+    // `#metaFromStore`, never the public `readMeta`: this is a MERGE, so a
+    // read that returned null here would carry `null` into every field the
+    // patch does not name — including the Founder's assignment intent, which
+    // `OperatorQueue.claim` now enforces on (Wave 5 correction round sixteen,
+    // Critical B-1).
+    const existing = this.#metaFromStore(taskId);
     const next = {
       project: patch.project ?? existing?.project ?? null,
       title: patch.title ?? existing?.title ?? null,
@@ -11785,6 +17711,145 @@ export function capabilityRowFor(
 }
 
 /**
+ * The canonical `op_tasks` row for a caller making an ENFORCEMENT decision —
+ * the missing counterpart to `capabilityRowFor` (Wave 5 correction round
+ * fifteen, Critical 1).
+ *
+ * A capability row is almost never looked up by a caller-named capability: it
+ * is looked up by a TASK. So hardening the capability read while leaving the
+ * task read on `queue.get` hardened nothing at all — the forged task simply
+ * named a different capability and the enforcement-safe reader returned that
+ * one, correctly and uselessly. Reproduced over the real HTTP route: with
+ * `ops.queue.get` replaced, `401 step_up_required` became
+ * `200 {"ok":true,"status":"queued"}` on a stale session with every password
+ * rejected, and `approveTask` wrote an approval while
+ * `op_kill_switch.engaged = 1` stood on the task's real capability.
+ *
+ * A FUNCTION BINDING over a `#private` closure, for the reason
+ * `capabilityRowFor` is one: an ES module binding cannot be reassigned by an
+ * importer and no prototype participates. `queue.get` stays exactly as it is —
+ * the deliberately patchable convenience read, for callers DISPLAYING a task
+ * rather than deciding on one. `test/authority-read-scan.test.ts` derives which
+ * callers are which, so a new deciding call site cannot quietly pick the wrong
+ * one.
+ */
+export function taskRowFor(ops: HeadquarterOperations, taskId: string): OperatorTask | null {
+  return readTaskRow(ops, taskId);
+}
+
+/**
+ * The canonical `hq_mission_proposals` row for a caller making an ENFORCEMENT
+ * decision — the sixth module-private binding, beside `taskRowFor` (Wave 5
+ * correction round sixteen, High B-3).
+ *
+ * A FUNCTION BINDING over a `#private` method, for the reason `taskRowFor` is
+ * one: an ES module binding cannot be reassigned by an importer and no
+ * prototype participates. `getProposal` stays exactly as it is — the
+ * deliberately patchable convenience read, for callers DISPLAYING a proposal.
+ * The reason this exists is that `promoteProposal` is the one bridge from chat
+ * to executable work and it decided on the prototype method; see
+ * `readProposalRow` for the executed before/after.
+ */
+export function proposalRowFor(
+  ops: HeadquarterOperations,
+  proposalId: string,
+): MissionProposal | null {
+  return readProposalRow(ops, proposalId);
+}
+
+/**
+ * The `hq_approvals` row a task is currently bound to, for a caller making an
+ * ENFORCEMENT decision — the seventh module-private binding, beside
+ * `taskRowFor` (Wave 5 correction round sixteen, Medium B-6).
+ *
+ * A FUNCTION BINDING for the reason every sibling is one: an ES module binding
+ * cannot be reassigned by an importer and no prototype participates.
+ * `queue.approvalFor` stays exactly as it is — the deliberately patchable
+ * convenience read for DISPLAY. See `readApprovalRecord` for the executed
+ * before/after.
+ */
+export function approvalRecordFor(
+  ops: HeadquarterOperations,
+  taskId: string,
+): ApprovalRecordForValidation | null {
+  return readApprovalRecord(ops, taskId);
+}
+
+/**
+ * The provider a worker is DECLARED as, for a caller reporting or deciding on
+ * provider identity (law 10) — a FUNCTION BINDING like `approvalRecordFor`.
+ * `queue.providerOf` stays as the patchable convenience read.
+ */
+export function declaredProviderFor(ops: HeadquarterOperations, workerId: string): string | null {
+  return readDeclaredProvider(ops, workerId);
+}
+
+/**
+ * Why a worker cannot be assigned work, or null — the handover-freeze and
+ * deactivation answer, as a FUNCTION BINDING. `queue.assignabilityProblem`
+ * stays as the patchable convenience read.
+ */
+export function assignabilityProblemFor(
+  ops: HeadquarterOperations,
+  workerId: string,
+): string | null {
+  return readAssignabilityProblem(ops, workerId);
+}
+
+/**
+ * The specialist record — registration, active flag and capability allow-list
+ * — for a caller REPORTING or deciding on worker facts, as a FUNCTION
+ * BINDING. `directory.getSpecialist` stays as the patchable convenience read
+ * for display. See `readSpecialistRecord` for the executed before/after.
+ */
+export function specialistRecordFor(
+  ops: HeadquarterOperations,
+  workerId: string,
+): ReturnType<HeadquarterStore['getSpecialist']> {
+  return readSpecialistRecord(ops, workerId);
+}
+
+/**
+ * The Founder's standing pre-approval set, for a caller whose decision turns on
+ * whether a capability is Founder-gated — the tenth module-private binding,
+ * beside `approvalRecordFor` (Wave 5 correction round eighteen, High A).
+ *
+ * A FUNCTION BINDING for the reason every sibling is one, and specifically
+ * because the previous argument for leaving this read alone was about the
+ * returned VALUE (`freezePolicyContext` hands out a frozen copy) rather than
+ * about the ACCESSOR, which is a configurable prototype getter that an
+ * instance-level own property also shadows. See `readPolicyContext` for the
+ * executed before/after. `ops.policyContext` stays exactly as it is — the
+ * deliberately patchable convenience read for DISPLAY.
+ */
+export function policyContextFor(ops: HeadquarterOperations): PolicyContext {
+  return readPolicyContext(ops);
+}
+
+/**
+ * The canonical `hq_op_task_meta` row, for a caller that PUBLISHES its
+ * contents — the eleventh module-private binding (Wave 5 correction round
+ * eighteen, Low D). `readMeta` stays as the patchable convenience read for
+ * display. See `readTaskMeta`.
+ */
+export function taskMetaFor(ops: HeadquarterOperations, taskId: string): TaskMeta | null {
+  return readTaskMeta(ops, taskId);
+}
+
+/**
+ * Why `actor` may not reconcile an unknown dispatch outcome, or null — the
+ * twelfth module-private binding (Wave 5 correction round eighteen).
+ * `reconciliationAuthorityRefusal` stays as the patchable convenience read for
+ * display. See `readReconciliationAuthorityRefusal`.
+ */
+export function reconciliationAuthorityRefusalFor(
+  ops: HeadquarterOperations,
+  actor: string,
+): string | null {
+  return readReconciliationAuthorityRefusal(ops, actor);
+}
+
+/**
  * The canonical `op_kill_switch` answer for the global scope plus an optional
  * capability scope, for callers making an ENFORCEMENT decision (Phase 8,
  * Low 7). A FUNCTION BINDING for the reason `capabilityRowFor` is one: an ES
@@ -11813,8 +17878,17 @@ export function gatewayActionHistoryFor(ops: HeadquarterOperations, taskId: stri
   return readGatewayActionHistory(ops, taskId);
 }
 
-/** One canonical `op_evidence` row as a deciding read needs it: kind, time, payload. */
+/**
+ * One canonical `op_evidence` row as a deciding read needs it: the task it is
+ * attributed to, its kind, its time and its payload.
+ *
+ * `taskId` was added when the derived scan found the ingest lane deciding
+ * WHICH task a public GitHub issue's result attaches to from
+ * `ops.queue.evidence.list()` — a search across the whole log, which the
+ * per-task reader could not answer.
+ */
 export interface CanonicalEvidenceRow {
+  taskId: string | null;
   kind: string;
   at: string;
   payload: Record<string, unknown>;
@@ -11828,7 +17902,7 @@ export interface CanonicalEvidenceRow {
  * is the deliberately patchable convenience read for DISPLAY. That handle stays
  * exactly as it is for display callers.
  */
-export function taskEvidenceRowsFor(ops: HeadquarterOperations, taskId: string): CanonicalEvidenceRow[] {
+export function taskEvidenceRowsFor(ops: HeadquarterOperations, taskId?: string): CanonicalEvidenceRow[] {
   return readTaskEvidenceRows(ops, taskId);
 }
 

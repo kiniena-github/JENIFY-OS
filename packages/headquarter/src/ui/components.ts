@@ -7,6 +7,7 @@
  */
 
 import type { ActivityStatus } from '../contracts/events.js';
+import { deepFreeze } from '../contracts/freeze.js';
 
 export function escapeHtml(value: string): string {
   return value
@@ -51,7 +52,7 @@ export function jsonForScript(value: unknown): string {
 export type Tone = 'accent' | 'info' | 'warn' | 'danger' | 'violet' | 'neutral';
 
 /** Status → (human label, tone). The vocabulary stays the canonical one. */
-export const STATUS_PRESENTATION: Record<ActivityStatus, { label: string; tone: Tone }> = {
+export const STATUS_PRESENTATION: Record<ActivityStatus, { label: string; tone: Tone }> = deepFreeze({
   queued: { label: 'Queued', tone: 'neutral' },
   assigned: { label: 'Assigned', tone: 'info' },
   running: { label: 'Running', tone: 'info' },
@@ -61,7 +62,7 @@ export const STATUS_PRESENTATION: Record<ActivityStatus, { label: string; tone: 
   outcome_unknown: { label: 'Outcome unknown', tone: 'danger' },
   needs_approval: { label: 'Needs approval', tone: 'warn' },
   completed: { label: 'Completed', tone: 'accent' },
-};
+});
 
 export function chip(label: string, tone: Tone = 'neutral', withDot = false): string {
   const dot = withDot ? '<span class="dot" aria-hidden="true"></span>' : '';

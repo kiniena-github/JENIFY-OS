@@ -28,6 +28,8 @@
  * never enter routing: presence is all routing needs.
  */
 
+import { deepFreeze } from '../contracts/freeze.js';
+
 /**
  * The marker JENIFY HQ stamps into an issue it dispatched for a canonical task
  * (issue #224).
@@ -65,7 +67,7 @@ export const HQ_DISPATCH_LABEL = HQ_DISPATCH_MARKER;
 export const HQ_DISPATCH_LABEL_DESCRIPTION =
   'Opened by JENIFY HQ for a canonical task. Not re-triggerable from GitHub.';
 
-export const PROVIDERS = [
+export const PROVIDERS = deepFreeze([
   'CLAUDE',
   'GEMINI',
   'CODEX',
@@ -79,7 +81,7 @@ export const PROVIDERS = [
   'LOCAL',
   'CUSTOM',
   'JENIFY',
-] as const;
+] as const);
 
 export type ProviderId = (typeof PROVIDERS)[number];
 
@@ -87,7 +89,7 @@ export type ProviderId = (typeof PROVIDERS)[number];
  * Roles are deliberately SEPARATE from provider identity (requirement F): the
  * Founder can move `REVIEWER` from Codex to Gemini without touching routing.
  */
-export const ROLES = ['MANAGER', 'BUILDER', 'REVIEWER', 'RESEARCHER'] as const;
+export const ROLES = deepFreeze(['MANAGER', 'BUILDER', 'REVIEWER', 'RESEARCHER'] as const);
 export type Role = (typeof ROLES)[number];
 
 /** Where a provider's execution physically happens. */
@@ -141,7 +143,7 @@ export interface ProviderDef {
   note?: string;
 }
 
-export const PROVIDER_REGISTRY: Record<ProviderId, ProviderDef> = {
+export const PROVIDER_REGISTRY: Record<ProviderId, ProviderDef> = deepFreeze({
   CLAUDE: {
     id: 'CLAUDE',
     label: 'Claude (claude.ai Routine — AI WORKERS)',
@@ -203,12 +205,12 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderDef> = {
   LOCAL: { id: 'LOCAL', label: 'Local / self-hosted model', requiredSecrets: ['LOCAL_MODEL_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-local-result', observesAllAiTasks: false },
   CUSTOM: { id: 'CUSTOM', label: 'Custom provider', requiredSecrets: ['CUSTOM_AI_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-custom-result', observesAllAiTasks: false },
   JENIFY: { id: 'JENIFY', label: 'Future JENIFY AI', requiredSecrets: ['JENIFY_AI_ENDPOINT'], requiredLocalFacts: [], executor: null, executorKind: null, resultMarker: 'jenify-jenify-result', observesAllAiTasks: false },
-};
+});
 
 /** Every result marker in the registry — nothing carrying one may re-trigger. */
-export const ALL_RESULT_MARKERS: string[] = Object.values(PROVIDER_REGISTRY)
+export const ALL_RESULT_MARKERS: string[] = deepFreeze(Object.values(PROVIDER_REGISTRY)
   .map((p) => p.resultMarker)
-  .filter((m): m is string => m != null);
+  .filter((m): m is string => m != null));
 
 export function isProviderId(value: string): value is ProviderId {
   return (PROVIDERS as readonly string[]).includes(value);

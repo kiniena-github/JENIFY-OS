@@ -23,12 +23,13 @@ import {
   type ReviewVerdict,
   type StructuredReview,
 } from './types.js';
+import { deepFreeze } from '../../contracts/freeze.js';
 
 // ---------------------------------------------------------------------------
 // Output schema handed to `codex exec --output-schema`
 // ---------------------------------------------------------------------------
 
-export const CODEX_REVIEW_SCHEMA = {
+export const CODEX_REVIEW_SCHEMA = deepFreeze({
   type: 'object',
   additionalProperties: false,
   required: ['verdict', 'summary', 'findings', 'testConcerns', 'securityConcerns', 'recommendation'],
@@ -55,7 +56,7 @@ export const CODEX_REVIEW_SCHEMA = {
     securityConcerns: { type: 'array', items: { type: 'string' } },
     recommendation: { type: 'string' },
   },
-} as const;
+} as const);
 
 // ---------------------------------------------------------------------------
 // Reviewer instructions

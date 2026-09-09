@@ -45,6 +45,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import { canonicalJson } from '../operator/approvals.js';
@@ -60,7 +61,7 @@ import type { TruthState } from './truth-command.js';
  * a worker was admitted to do in one session — never a personality and never
  * an authority. A worker may hold several in one session (one row each).
  */
-export const COLLABORATION_ROLES = ['planner', 'builder', 'researcher', 'reviewer', 'verifier', 'critic'] as const;
+export const COLLABORATION_ROLES = deepFreeze(['planner', 'builder', 'researcher', 'reviewer', 'verifier', 'critic'] as const);
 export type CollaborationRole = (typeof COLLABORATION_ROLES)[number];
 
 export function isCollaborationRole(value: unknown): value is CollaborationRole {
@@ -68,7 +69,7 @@ export function isCollaborationRole(value: unknown): value is CollaborationRole 
 }
 
 /** What a contribution IS. `handoff_request` carries a structured handoff and is advisory by construction. */
-export const CONTRIBUTION_KINDS = [
+export const CONTRIBUTION_KINDS = deepFreeze([
   'plan',
   'finding',
   'proposal',
@@ -78,7 +79,7 @@ export const CONTRIBUTION_KINDS = [
   'answer',
   'status_report',
   'handoff_request',
-] as const;
+] as const);
 export type ContributionKind = (typeof CONTRIBUTION_KINDS)[number];
 
 export function isContributionKind(value: unknown): value is ContributionKind {
@@ -90,7 +91,7 @@ export function isContributionKind(value: unknown): value is ContributionKind {
  * and immutable. Disagreement is stored EXPLICITLY — never inferred from
  * text, never resolved by recency, never a vote.
  */
-export const CONTRIBUTION_RELATION_KINDS = ['agrees_with', 'disagrees_with', 'responds_to'] as const;
+export const CONTRIBUTION_RELATION_KINDS = deepFreeze(['agrees_with', 'disagrees_with', 'responds_to'] as const);
 export type ContributionRelationKind = (typeof CONTRIBUTION_RELATION_KINDS)[number];
 
 /** A session's standing is DERIVED from its mission's canonical status; nothing stores it. */
@@ -112,7 +113,7 @@ export type SessionStanding = 'active' | 'closed';
  * material is not carried at all. `internal` is the conservative default —
  * a session opened without naming a classification is internal, never public.
  */
-export const COLLABORATION_PRIVACIES = MEMORY_PRIVACY_LEVELS;
+export const COLLABORATION_PRIVACIES = deepFreeze(MEMORY_PRIVACY_LEVELS);
 export type CollaborationPrivacy = MemoryPrivacy;
 
 export function isCollaborationPrivacy(value: unknown): value is CollaborationPrivacy {
@@ -134,7 +135,7 @@ export type ContributionStanding = 'unchallenged' | 'agreed' | 'disputed' | 'mix
  * honest statement that HQ holds no provider declaration for the worker —
  * never a guess from its vendor string.
  */
-export const BINDING_SOURCES = ['declared_provider_and_registered_model', 'declared_provider', 'undeclared'] as const;
+export const BINDING_SOURCES = deepFreeze(['declared_provider_and_registered_model', 'declared_provider', 'undeclared'] as const);
 export type BindingSource = (typeof BINDING_SOURCES)[number];
 
 // ---- capabilities: the two trios ----
@@ -145,7 +146,7 @@ export type BindingSource = (typeof BINDING_SOURCES)[number];
  * room is company direction; `sideEffect: false` because it writes a control-
  * plane record and reaches nothing outside.
  */
-export const COLLABORATION_COMMAND_CAPABILITY = {
+export const COLLABORATION_COMMAND_CAPABILITY = deepFreeze({
   id: 'hq.collaboration_command',
   description:
     'Collaboration command — opens a collaboration session on one canonical mission and admits ' +
@@ -153,7 +154,7 @@ export const COLLABORATION_COMMAND_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /**
  * The worker act: recording a contribution into a session the worker was
@@ -161,7 +162,7 @@ export const COLLABORATION_COMMAND_CAPABILITY = {
  * truth-record precedent); humans direct missions through mission command
  * and never contribute here; `system` is refused outright.
  */
-export const COLLABORATION_CONTRIBUTE_CAPABILITY = {
+export const COLLABORATION_CONTRIBUTE_CAPABILITY = deepFreeze({
   id: 'hq.collaboration_contribute',
   description:
     'Collaboration contribution — records one attributed contribution (plan, finding, review, ' +
@@ -170,7 +171,7 @@ export const COLLABORATION_CONTRIBUTE_CAPABILITY = {
   riskClass: 'reversible',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the collaboration-command capability — a CONFIGURATION action. */
 export function registerCollaborationCommandCapability(db: HqDatabase): void {
@@ -919,7 +920,7 @@ export function deriveSessionView(
 
 // ---- the bounded context-bundle policy ----
 
-export const CONTEXT_SECTIONS = ['mission', 'task', 'participants', 'contributions', 'truth', 'memory'] as const;
+export const CONTEXT_SECTIONS = deepFreeze(['mission', 'task', 'participants', 'contributions', 'truth', 'memory'] as const);
 export type ContextSection = (typeof CONTEXT_SECTIONS)[number];
 
 /**
@@ -931,14 +932,14 @@ export type ContextSection = (typeof CONTEXT_SECTIONS)[number];
  * anything, raw intent bodies, task payloads, or another session's room.
  * Changing a row here is a reviewed edit, never configuration.
  */
-export const CONTEXT_SECTIONS_BY_ROLE: Readonly<Record<CollaborationRole, readonly ContextSection[]>> = {
+export const CONTEXT_SECTIONS_BY_ROLE: Readonly<Record<CollaborationRole, readonly ContextSection[]>> = deepFreeze({
   planner: ['mission', 'participants', 'contributions', 'truth', 'memory'],
   builder: ['mission', 'task', 'participants', 'contributions', 'memory'],
   researcher: ['mission', 'participants', 'contributions', 'truth', 'memory'],
   reviewer: ['mission', 'task', 'participants', 'contributions', 'truth'],
   verifier: ['mission', 'task', 'participants', 'contributions', 'truth'],
   critic: ['mission', 'participants', 'contributions', 'truth'],
-};
+});
 
 // ---- the snapshot view ----
 

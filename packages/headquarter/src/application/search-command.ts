@@ -51,8 +51,10 @@ import {
   tokenize,
   type SearchIndex as ArchiveSearchIndex,
 } from '../archive/search.js';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { ArchiveRecord, ArchiveStatus } from '../archive/schema.js';
 import type { MemoryPrivacy } from '../memory/schema.js';
+import { assertBrowserSafe } from '../live/redaction.js';
 import { TRUTH_STATES, type TruthState } from './truth-command.js';
 
 /* ------------------------------------------------------------------ */
@@ -71,7 +73,7 @@ import { TRUTH_STATES, type TruthState } from './truth-command.js';
  * speculatively: a source appears here only when a canonical store genuinely
  * backs it today.
  */
-export const SEARCH_SOURCES = [
+export const SEARCH_SOURCES = deepFreeze([
   'mission',
   'project',
   'task',
@@ -83,7 +85,7 @@ export const SEARCH_SOURCES = [
   'external_action',
   'orchestration_run',
   'worker',
-] as const;
+] as const);
 
 export type SearchSourceId = (typeof SEARCH_SOURCES)[number];
 
@@ -117,7 +119,7 @@ export interface SearchSourceDescriptor {
   supersedable: boolean;
 }
 
-export const SEARCH_SOURCE_REGISTRY: readonly SearchSourceDescriptor[] = [
+export const SEARCH_SOURCE_REGISTRY: readonly SearchSourceDescriptor[] = deepFreeze([
   {
     id: 'mission',
     table: 'hq_missions',
@@ -207,7 +209,7 @@ export const SEARCH_SOURCE_REGISTRY: readonly SearchSourceDescriptor[] = [
     classified: false,
     supersedable: false,
   },
-];
+]);
 
 export function searchSourceDescriptor(id: SearchSourceId): SearchSourceDescriptor {
   const found = SEARCH_SOURCE_REGISTRY.find((entry) => entry.id === id);
@@ -315,7 +317,7 @@ export interface SearchCorpus {
  * honest unknown. Both are stated on every response, so a reader always knows
  * which rule produced the set in front of them.
  */
-export const TERM_MATCHES = ['all_terms', 'any_term'] as const;
+export const TERM_MATCHES = deepFreeze(['all_terms', 'any_term'] as const);
 export type TermMatch = (typeof TERM_MATCHES)[number];
 
 /**
@@ -329,7 +331,7 @@ export type TermMatch = (typeof TERM_MATCHES)[number];
  * removed word is reported back on the response as an ignored term, so the
  * reader can see exactly what HQ did to their question.
  */
-export const QUERY_STOPWORDS: ReadonlySet<string> = new Set([
+export const QUERY_STOPWORDS: ReadonlySet<string> = deepFreeze(new Set([
   'about', 'all', 'an', 'and', 'any', 'anything', 'are', 'as', 'at', 'be', 'because', 'been', 'being',
   'but', 'by', 'can', 'could', 'did', 'do', 'does', 'doing', 'done', 'find', 'for', 'from', 'get',
   'give', 'had', 'has', 'have', 'how', 'if', 'in', 'into', 'is', 'it', 'its', 'just', 'know', 'list',
@@ -337,23 +339,23 @@ export const QUERY_STOPWORDS: ReadonlySet<string> = new Set([
   'so', 'some', 'tell', 'than', 'that', 'the', 'their', 'them', 'then', 'there', 'these', 'they',
   'this', 'those', 'to', 'us', 'was', 'we', 'were', 'what', 'whats', 'when', 'where', 'which', 'who',
   'whom', 'why', 'will', 'with', 'would', 'you', 'your',
-]);
+]));
 
-export const RETRIEVAL_MODES = ['deterministic_lexical', 'semantic_embedding'] as const;
+export const RETRIEVAL_MODES = deepFreeze(['deterministic_lexical', 'semantic_embedding'] as const);
 export type RetrievalMode = (typeof RETRIEVAL_MODES)[number];
 
 /**
  * Why a requested retrieval mode did not answer. Categorical, so a fallback
  * is always explained by a stated reason rather than by silence.
  */
-export const RETRIEVAL_UNAVAILABLE_REASONS = [
+export const RETRIEVAL_UNAVAILABLE_REASONS = deepFreeze([
   /** No adapter of that mode is installed in this build. */
   'no_adapter_installed',
   /** An adapter exists but would require a paid or hosted service. */
   'requires_external_service',
   /** An adapter is installed and deliberately not activated. */
   'not_activated',
-] as const;
+] as const);
 export type RetrievalUnavailableReason = (typeof RETRIEVAL_UNAVAILABLE_REASONS)[number];
 
 /**
@@ -425,7 +427,7 @@ export function orderDocuments(
  * AND semantics (every term must appear somewhere in the document) come from
  * `archive/search.ts` unchanged. This adapter neither loosens nor scores them.
  */
-export const LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = {
+const RAW_LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = {
   id: 'hq.retrieval.lexical',
   mode: 'deterministic_lexical',
   available: true,
@@ -459,7 +461,209 @@ export const LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = {
  * until it is taken, a semantic request is answered by the deterministic
  * adapter and told so.
  */
-export const SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = [];
+const RAW_SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = [];
+
+/* ------------------------------------------------------------------ */
+/* The adapter GUARD — closing the pre-real-adapter hole               */
+/* ------------------------------------------------------------------ */
+
+/**
+ * What HQ publishes about the retrieval guard, on the wire.
+ *
+ * It said an in-process caller "cannot obtain an unguarded adapter", and at the
+ * frozen wave head that was FALSE (Wave 5 Medium 9 / C-2):
+ * `LEXICAL_RETRIEVAL_ADAPTER` and `SEMANTIC_RETRIEVAL_ADAPTERS` were the raw,
+ * unwrapped objects, exported — and this package's own `search-core.test.ts`
+ * called one of them directly.
+ *
+ * Two correction lanes answered it differently: one narrowed the SENTENCE to
+ * what was enforced and disclosed that the raw objects are exported unwrapped;
+ * the other made the CODE meet the sentence. The code fix is what survives,
+ * because a guarantee that holds structurally is worth more than a disclosure
+ * that the guarantee does not hold: the raw adapters are module-private
+ * (`RAW_LEXICAL_RETRIEVAL_ADAPTER`, `RAW_SEMANTIC_RETRIEVAL_ADAPTERS`), the
+ * exported bindings are already wrapped at DECLARATION, the semantic list is
+ * frozen, and `guardRetrievalAdapter` is idempotent so the resolver's own
+ * wrapping still costs nothing. The narrowed sentence's true half — that the
+ * FACADE scan, not the seam guard, is the layer the pipeline relies on, because
+ * tokenization has already removed the separators a credential shape needs — is
+ * carried into the wording below and pinned by its own test.
+ *
+ * This text is interpolated into `statement.note` and reaches the browser as an
+ * HQ assertion; it may not say more than HQ does.
+ */
+export const RETRIEVAL_GUARD_STATEMENT =
+  'Free text entering search or a question is scanned for credential shapes at the FACADE, before it is ' +
+  'tokenized, normalized or matched — that FACADE scan is the guarantee, and the browser route keeps its ' +
+  'own scan outside it. Every retrieval adapter the resolver hands out is additionally reached through a ' +
+  'seam guard that scans the terms it is about to be handed, and the guard is applied AT DECLARATION ' +
+  'rather than by the caller: the raw adapters are module-private and every exported binding is already ' +
+  'wrapped AND frozen, so no in-process caller can obtain an unwrapped adapter or replace the wrapper in ' +
+  'place, and one installed later cannot opt out. Because the pipeline tokenizes first, those terms no longer carry the separators a credential ' +
+  'shape needs: the seam guard is defence in depth against a caller that supplies its own untokenized ' +
+  'terms, not the layer the pipeline relies on.';
+
+/**
+ * Raised when free text reaching a retrieval adapter fails the browser-safety
+ * scan. A distinct type so a caller can turn it into its own stated refusal
+ * rather than a 500 — the same shape `BrowserSafetyError` has at the route.
+ */
+export class RetrievalSafetyError extends Error {
+  constructor(readonly reason: string) {
+    super(reason);
+    this.name = 'RetrievalSafetyError';
+  }
+}
+
+/**
+ * Scan the free text of a search or a question BEFORE anything is matched.
+ *
+ * ## The hole this closes
+ *
+ * Phase 11 scanned `text`, `project`, `tag` and `question` at the BROWSER
+ * ROUTE only. That was safe exactly while `SEMANTIC_RETRIEVAL_ADAPTERS` was
+ * empty — the one installed adapter is a local inverted index that sends
+ * nothing anywhere, so unscanned text reaching it could at worst be echoed
+ * back, and the route's own response guard caught that.
+ *
+ * It stops being safe the moment a real adapter exists. `RetrievalAdapter` is
+ * a seam a semantic retriever plugs into, and a semantic retriever is a thing
+ * that TRANSMITS the query — to a local model process, or to a service. An
+ * in-process caller of `searchCompany`/`askJenify` (a CLI, a lane, a future
+ * orchestrator) bypasses the route, so on the day an adapter is installed, a
+ * credential pasted into a question would be handed straight to it. The
+ * Founder recorded that as a Low to resolve BEFORE any real adapter ships, and
+ * Phase 14 is exactly the layer that would introduce one.
+ *
+ * ## Why it is fixed here rather than at each caller
+ *
+ * A guard every caller must remember to apply is a guard that one caller will
+ * eventually forget. This one is applied by `resolveRetrievalAdapter` itself,
+ * so the ONLY adapter any caller can obtain is a wrapped one, and the wrapper
+ * scans before it delegates. Adding an adapter to
+ * `SEMANTIC_RETRIEVAL_ADAPTERS` cannot opt out of it: the resolver wraps the
+ * candidate it selects, whatever it is.
+ *
+ * The facade scans the same four fields on the way in, and THAT is the layer
+ * the pipeline relies on. Stated precisely, because the first version of this
+ * comment had it backwards — both Wave 5 correction lanes reached this
+ * independently (one as Medium 9, one as Low 3):
+ *
+ *  - the FACADE scan sees the raw `text` / `project` / `tag` / `question`,
+ *    before `normalizeSearchQuery` and before `tokenize`, so it is the scan
+ *    that meets a credential in the shape `assertBrowserSafe` recognises;
+ *  - the SEAM guard sees `input.terms`, which on the pipeline path are always
+ *    `tokenize()` output — lowercased and split on `[^a-z0-9]+`. That strips
+ *    every separator the `SECRET_VALUE_PATTERNS` shapes depend on (`sk-`,
+ *    `ghp_`, a JWT's dots, `Bearer `, `api_key: `), so on realistic pipeline
+ *    input the seam scan does not fire on those shapes. It is NOT inert on
+ *    everything: a separator-free shape such as a Google `AIza…` key survives
+ *    tokenization intact apart from case, and since the patterns became
+ *    case-insensitive (Wave 5 Low C-2) the seam does catch it. Both halves are
+ *    pinned by their own tests in `search-adapter-guard.test.ts`, so neither
+ *    claim can quietly become the other one.
+ *
+ * The seam guard is kept, and is worth keeping, for the caller the FACADE does
+ * not cover: `resolveRetrievalAdapter` is exported, so an in-process caller can
+ * obtain an adapter and hand it terms it built itself. That caller is real and
+ * reachable, and it is what "defence in depth against a non-tokenized caller"
+ * means here. What it is NOT is the guarantee, and this comment no longer says
+ * it is.
+ */
+export function assertRetrievalTextSafe(
+  fields: Record<string, string | null | undefined>,
+  scope: string,
+): void {
+  const scanned: Record<string, string> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (typeof value === 'string' && value.trim() !== '') scanned[key] = value;
+  }
+  if (Object.keys(scanned).length === 0) return;
+  try {
+    assertBrowserSafe(scanned, scope);
+  } catch {
+    throw new RetrievalSafetyError(
+      `The ${scope} free text looks like it contains credential material, so it was refused rather than ` +
+        'matched. HQ scans it before any retrieval adapter can see it.',
+    );
+  }
+}
+
+/**
+ * Wrap an adapter so it can never be handed unscanned free text.
+ *
+ * The wrapper is transparent in every other respect — same id, same mode, same
+ * availability, same reason — so nothing downstream can tell a guarded adapter
+ * from the adapter it guards, and no code path gains a reason to reach for the
+ * unguarded one.
+ */
+/**
+ * Every adapter this module has already wrapped.
+ *
+ * A `WeakSet` rather than a flag on the object, so nothing about an adapter's
+ * public shape says whether it is guarded and nothing can claim to be guarded
+ * by declaring it. Wrapping twice would be harmless but wasteful; more to the
+ * point, it lets the EXPORTED constants be the guarded ones without the
+ * resolver double-wrapping them on every call.
+ */
+const GUARDED_ADAPTERS = new WeakSet<RetrievalAdapter>();
+
+export function guardRetrievalAdapter(adapter: RetrievalAdapter): RetrievalAdapter {
+  if (GUARDED_ADAPTERS.has(adapter)) return adapter;
+  const guarded: RetrievalAdapter = {
+    id: adapter.id,
+    mode: adapter.mode,
+    available: adapter.available,
+    unavailableReason: adapter.unavailableReason,
+    retrieve(input) {
+      // The terms are the only caller-supplied material that crosses this
+      // boundary. The corpus does not need scanning — it is canonical rows HQ
+      // already published to this reader.
+      //
+      // On the PIPELINE path these terms are `tokenize()` output, and no
+      // credential shape survives tokenization, so this scan is inert there —
+      // the facade scan is what catches that case, before tokenization. What
+      // this scan does catch is a caller that resolved an adapter and built its
+      // own terms. Stated rather than overclaimed; see the function note above.
+      const offending: Record<string, string> = {};
+      input.terms.forEach((term, index) => {
+        offending[`term${index}`] = term;
+      });
+      assertRetrievalTextSafe(offending, 'retrieval');
+      return adapter.retrieve(input);
+    },
+  };
+  GUARDED_ADAPTERS.add(guarded);
+  return guarded;
+}
+
+/**
+ * The ONE installed adapter, ALREADY GUARDED — and that is the whole point of
+ * the two names above it.
+ *
+ * The claim "an in-process caller cannot obtain an unwrapped adapter" was made
+ * on `resolveRetrievalAdapter`, and it was false of the module: the raw
+ * constants were exported, `application/index.ts` re-exported them, and
+ * `search-core.test.ts` already called `LEXICAL_RETRIEVAL_ADAPTER.retrieve(...)`
+ * unwrapped (Wave 5 review, Medium finding C-2). The day a real transmitting
+ * retriever joined the semantic list, `SEMANTIC_RETRIEVAL_ADAPTERS[0].retrieve`
+ * would have been a one-line public bypass of the seam guard.
+ *
+ * Fixed structurally rather than by deleting the claim: the RAW adapters are
+ * module-private, and what the package exports is the guarded wrapper. There is
+ * now no exported binding through which an unguarded retrieve can be reached,
+ * whatever a future caller does — including a future adapter added to the
+ * semantic list, which is guarded at declaration here rather than at the one
+ * call site that happens to resolve it.
+ */
+export const LEXICAL_RETRIEVAL_ADAPTER: RetrievalAdapter = deepFreeze(guardRetrievalAdapter(
+  RAW_LEXICAL_RETRIEVAL_ADAPTER,
+));
+
+/** The semantic list, guarded member by member at declaration. Empty today. */
+export const SEMANTIC_RETRIEVAL_ADAPTERS: readonly RetrievalAdapter[] = Object.freeze(
+  RAW_SEMANTIC_RETRIEVAL_ADAPTERS.map(guardRetrievalAdapter),
+);
 
 /** What actually answered, what was asked for, and why they differ. */
 export interface RetrievalStatement {
@@ -477,6 +681,15 @@ export interface RetrievalStatement {
  * Resolve the adapter for a requested mode. Never throws and never activates
  * anything: an unavailable mode falls back to the deterministic adapter and
  * the fallback is stated on every response that used it.
+ *
+ * Every adapter it hands out is GUARDED (`guardRetrievalAdapter`), including
+ * the deterministic one and including any semantic adapter installed later.
+ * That is the structural half of the pre-real-adapter fix: there is no code
+ * path through this resolver that yields an UNWRAPPED adapter, so an
+ * in-process caller cannot obtain one and a future adapter cannot opt out by
+ * being added to the list. What the wrapper then catches is stated exactly on
+ * `guardRetrievalAdapter` — on the pipeline path the terms are already
+ * tokenized and the FACADE scan is the layer that meets a credential.
  */
 export function resolveRetrievalAdapter(requested: RetrievalMode = 'deterministic_lexical'): {
   adapter: RetrievalAdapter;
@@ -484,7 +697,7 @@ export function resolveRetrievalAdapter(requested: RetrievalMode = 'deterministi
 } {
   if (requested === 'deterministic_lexical') {
     return {
-      adapter: LEXICAL_RETRIEVAL_ADAPTER,
+      adapter: guardRetrievalAdapter(LEXICAL_RETRIEVAL_ADAPTER),
       statement: {
         mode: 'deterministic_lexical',
         adapterId: LEXICAL_RETRIEVAL_ADAPTER.id,
@@ -499,20 +712,22 @@ export function resolveRetrievalAdapter(requested: RetrievalMode = 'deterministi
   const candidate = SEMANTIC_RETRIEVAL_ADAPTERS.find((adapter) => adapter.available) ?? null;
   if (candidate) {
     return {
-      adapter: candidate,
+      // Guarded exactly like the lexical one. A semantic retriever is a thing
+      // that TRANSMITS the query, so this is the wrapper that matters most.
+      adapter: guardRetrievalAdapter(candidate),
       statement: {
         mode: candidate.mode,
         adapterId: candidate.id,
         requested,
         fallbackReason: null,
-        note: 'Answered by an installed semantic retrieval adapter.',
+        note: `Answered by an installed semantic retrieval adapter. ${RETRIEVAL_GUARD_STATEMENT}`,
       },
     };
   }
   const reason: RetrievalUnavailableReason =
     SEMANTIC_RETRIEVAL_ADAPTERS[0]?.unavailableReason ?? 'no_adapter_installed';
   return {
-    adapter: LEXICAL_RETRIEVAL_ADAPTER,
+    adapter: guardRetrievalAdapter(LEXICAL_RETRIEVAL_ADAPTER),
     statement: {
       mode: 'deterministic_lexical',
       adapterId: LEXICAL_RETRIEVAL_ADAPTER.id,
@@ -842,24 +1057,24 @@ export function sourceStatuses(
 /* Ask Jenify                                                          */
 /* ------------------------------------------------------------------ */
 
-export const ANSWER_STATES = ['grounded', 'insufficient_evidence', 'unknown'] as const;
+export const ANSWER_STATES = deepFreeze(['grounded', 'insufficient_evidence', 'unknown'] as const);
 export type AnswerState = (typeof ANSWER_STATES)[number];
 
-export const ANSWER_UNKNOWN_REASONS = [
+export const ANSWER_UNKNOWN_REASONS = deepFreeze([
   /** The question carried no term the index could match. */
   'no_searchable_terms',
   /** Retrieval ran and matched no canonical row the reader may see. */
   'no_matching_canonical_record',
   /** This database handle carries none of the stores the question would need. */
   'no_source_store_present',
-] as const;
+] as const);
 export type AnswerUnknownReason = (typeof ANSWER_UNKNOWN_REASONS)[number];
 
 /**
  * Every limitation an answer can carry. Categorical so a reader can act on
  * them, and exhaustive so an answer never quietly omits one.
  */
-export const ANSWER_LIMITATIONS = [
+export const ANSWER_LIMITATIONS = deepFreeze([
   'lexical_retrieval_only',
   'bounded_retrieval',
   'terms_ignored',
@@ -870,7 +1085,7 @@ export const ANSWER_LIMITATIONS = [
   'founder_only_not_searched',
   'stores_absent',
   'composed_from_fields_only',
-] as const;
+] as const);
 export type AnswerLimitationCode = (typeof ANSWER_LIMITATIONS)[number];
 
 export interface AnswerLimitation {

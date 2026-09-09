@@ -48,6 +48,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { deepFreeze } from '../contracts/freeze.js';
 import type { HqDatabase } from '../store/db.js';
 import { CapabilityRegistry, type Capability } from '../operator/capabilities.js';
 import { canonicalJson } from '../operator/approvals.js';
@@ -67,7 +68,7 @@ import type { CollaborationPrivacy, CollaborationRole, SessionStanding } from '.
  * own canonical timestamp (oldest first, so nothing waits behind a newer
  * item).
  */
-export const ATTENTION_KINDS = [
+export const ATTENTION_KINDS = deepFreeze([
   'approval',
   'review',
   'contradiction',
@@ -77,7 +78,7 @@ export const ATTENTION_KINDS = [
   'incident',
   'decision',
   'stale_mission',
-] as const;
+] as const);
 export type AttentionKind = (typeof ATTENTION_KINDS)[number];
 
 /**
@@ -85,7 +86,7 @@ export type AttentionKind = (typeof ATTENTION_KINDS)[number];
  * stated in code (see `deriveFounderInbox`). Every reason is a fact about a
  * canonical row; none is a judgement.
  */
-export const ATTENTION_REASONS = [
+export const ATTENTION_REASONS = deepFreeze([
   'task_awaiting_approval',
   'approval_expired_unconsumed',
   'review_pending',
@@ -107,7 +108,7 @@ export const ATTENTION_REASONS = [
   'handoff_requested',
   'disagreement_open',
   'mission_working_nothing_in_motion',
-] as const;
+] as const);
 export type InboxAttentionReason = (typeof ATTENTION_REASONS)[number];
 
 /**
@@ -122,7 +123,7 @@ export type InboxAttentionReason = (typeof ATTENTION_REASONS)[number];
  * (either act settles one), and a claimable task is listed with its eligible
  * workers rather than with an authority the Founder would exercise.
  */
-export const REQUIRED_AUTHORITIES = [
+export const REQUIRED_AUTHORITIES = deepFreeze([
   'approval_authority',
   'approval_authority_step_up',
   'independent_review',
@@ -135,7 +136,7 @@ export const REQUIRED_AUTHORITIES = [
   'founder_decision',
   'founder_brief',
   'none_read_only',
-] as const;
+] as const);
 export type RequiredAuthority = (typeof REQUIRED_AUTHORITIES)[number];
 
 /** Whether a fact is current against its canonical subject. Never a tie-breaker. */
@@ -147,7 +148,7 @@ export type Staleness = 'current' | 'stale' | 'not_evaluated';
  * here that no derivation sources from would be a claim about where HQ looks
  * that is not true.
  */
-export const SOURCE_TABLES = [
+export const SOURCE_TABLES = deepFreeze([
   'hq_approvals',
   'op_tasks',
   'hq_missions',
@@ -159,7 +160,7 @@ export const SOURCE_TABLES = [
   'op_kill_switch',
   'hq_collab_contributions',
   'hq_collab_relations',
-] as const;
+] as const);
 export type SourceTable = (typeof SOURCE_TABLES)[number];
 
 export type EntityRefKind =
@@ -195,7 +196,7 @@ export function truthSubjectRef(entityKind: TruthEntityKind, entityId: string): 
   return { kind: entityKind, id: entityId };
 }
 
-export const RECOMMENDATION_KINDS = [
+export const RECOMMENDATION_KINDS = deepFreeze([
   'decide_pending_approval',
   'renew_expired_approval',
   'review_submitted_result',
@@ -215,11 +216,11 @@ export const RECOMMENDATION_KINDS = [
   'settle_disagreement',
   'revisit_stale_mission',
   'decide_high_risk_action',
-] as const;
+] as const);
 export type RecommendationKind = (typeof RECOMMENDATION_KINDS)[number];
 
 /** The acts HQ can perform or offer NOW that are reads or records under existing authority. */
-export const SAFE_ACT_KINDS = ['orchestration_preview', 'issue_founder_brief', 'assemble_collaboration_context'] as const;
+export const SAFE_ACT_KINDS = deepFreeze(['orchestration_preview', 'issue_founder_brief', 'assemble_collaboration_context'] as const);
 export type SafeActKind = (typeof SAFE_ACT_KINDS)[number];
 
 /**
@@ -236,7 +237,7 @@ export type SafeActKind = (typeof SAFE_ACT_KINDS)[number];
  * written simply contributes 0, which is the honest answer for a deployment
  * that has never refused anything of that shape.
  */
-export const REFUSAL_EVIDENCE_KINDS = [
+export const REFUSAL_EVIDENCE_KINDS = deepFreeze([
   'action_refused',
   'approval_authority_refused',
   'approval_refused_action_changed',
@@ -251,10 +252,10 @@ export const REFUSAL_EVIDENCE_KINDS = [
   'provider_binding_rejected',
   'truth_acceptance_refused_basis_changed',
   'worker_not_assignable',
-] as const;
+] as const);
 export type RefusalEvidenceKind = (typeof REFUSAL_EVIDENCE_KINDS)[number];
 
-export const DEPARTMENTS = [
+export const DEPARTMENTS = deepFreeze([
   'development',
   'ops',
   'cybersecurity',
@@ -264,7 +265,7 @@ export const DEPARTMENTS = [
   'business',
   'memory',
   'ai_workforce',
-] as const;
+] as const);
 export type CommandCenterDepartment = (typeof DEPARTMENTS)[number];
 
 // ---- the one capability trio ----
@@ -276,7 +277,7 @@ export type CommandCenterDepartment = (typeof DEPARTMENTS)[number];
  * reaches nothing outside. Reading the command layer takes no capability —
  * the routes sit behind the Founder gate exactly as the Mission Room does.
  */
-export const FOUNDER_BRIEF_CAPABILITY = {
+export const FOUNDER_BRIEF_CAPABILITY = deepFreeze({
   id: 'hq.founder_brief',
   description:
     'Founder brief — issues one durable brief receipt over the derived command layer: who, when, ' +
@@ -285,7 +286,7 @@ export const FOUNDER_BRIEF_CAPABILITY = {
   riskClass: 'founder_gate',
   sideEffect: false,
   idempotent: true,
-} as const;
+} as const);
 
 /** Register the founder-brief capability — a CONFIGURATION action. */
 export function registerFounderBriefCapability(db: HqDatabase): void {

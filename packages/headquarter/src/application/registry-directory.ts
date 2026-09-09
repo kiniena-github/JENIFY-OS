@@ -35,7 +35,12 @@
  */
 
 import type { AiMember, MemberAssignment } from '../registry/index.js';
-import type { WorkerAssignability, WorkerDirectoryPort } from './ports.js';
+import {
+  bindDirectoryReads,
+  type WorkerAssignability,
+  type WorkerDirectoryPort,
+  type WorkerDirectoryReads,
+} from './ports.js';
 
 /**
  * The slice of `AiMemberRegistry` this seam needs.
@@ -55,6 +60,66 @@ export interface MemberDirectorySource {
  * Deny by default throughout: a worker the Registry does not know holds no
  * capabilities and is not assignable.
  */
+/**
+ * The Registry's assignability rule, as one pure function over the member
+ * record and its assignments.
+ *
+ * Shared by `RegistryWorkerDirectory` (the exported port) and by
+ * `registryDirectoryReads` (the prototype-free closures enforcement uses), so
+ * the two answers cannot drift while only one of them is trusted.
+ */
+export function registryAssignability(
+  member: AiMember | null,
+  assignments: readonly MemberAssignment[],
+): WorkerAssignability {
+  if (member == null) return { assignable: false, reason: 'worker_unknown' };
+
+  // A replaced worker is reported as replaced, not merely inactive: the
+  // successor's id is actionable information for whoever is reassigning.
+  if (member.status === 'replaced') {
+    return {
+      assignable: false,
+      reason: 'worker_replaced',
+      details: { replacedById: member.replacedById },
+    };
+  }
+  if (member.status === 'removed' || member.status === 'disabled' || !member.enabled) {
+    return { assignable: false, reason: 'worker_inactive', details: { status: member.status } };
+  }
+
+  // Work that was interrupted must be handed over before this worker takes on
+  // anything new, otherwise the interrupted activity has no owner.
+  const pending = assignments.filter((a) => a.status === 'handover_pending');
+  if (pending.length > 0) {
+    return {
+      assignable: false,
+      reason: 'handover_pending',
+      details: { assignments: pending.map((a) => a.id) },
+    };
+  }
+
+  return { assignable: true };
+}
+
+/**
+ * The Registry's three reads as OWN-PROPERTY CLOSURES over a
+ * `MemberDirectorySource` bound once — see `WorkerDirectoryReads` in
+ * `ports.ts` for the exploit that made prototype dispatch unacceptable on this
+ * path.
+ */
+export function registryDirectoryReads(source: MemberDirectorySource): WorkerDirectoryReads {
+  const get = source.get.bind(source);
+  const listAssignments = source.listAssignments.bind(source);
+  return {
+    isRegistered: (workerId: string) => get(workerId) !== null,
+    allowedCapabilities: (workerId: string) => get(workerId)?.effectiveCapabilities ?? [],
+    assignability: (workerId: string) => {
+      const member = get(workerId);
+      return registryAssignability(member, member == null ? [] : listAssignments(workerId));
+    },
+  };
+}
+
 export class RegistryWorkerDirectory implements WorkerDirectoryPort {
   constructor(private registry: MemberDirectorySource) {}
 
@@ -77,35 +142,10 @@ export class RegistryWorkerDirectory implements WorkerDirectoryPort {
 
   assignability(workerId: string): WorkerAssignability {
     const member = this.registry.get(workerId);
-    if (member == null) return { assignable: false, reason: 'worker_unknown' };
-
-    // A replaced worker is reported as replaced, not merely inactive: the
-    // successor's id is actionable information for whoever is reassigning.
-    if (member.status === 'replaced') {
-      return {
-        assignable: false,
-        reason: 'worker_replaced',
-        details: { replacedById: member.replacedById },
-      };
-    }
-    if (member.status === 'removed' || member.status === 'disabled' || !member.enabled) {
-      return { assignable: false, reason: 'worker_inactive', details: { status: member.status } };
-    }
-
-    // Work that was interrupted must be handed over before this worker takes on
-    // anything new, otherwise the interrupted activity has no owner.
-    const pending = this.registry
-      .listAssignments(workerId)
-      .filter((a) => a.status === 'handover_pending');
-    if (pending.length > 0) {
-      return {
-        assignable: false,
-        reason: 'handover_pending',
-        details: { assignments: pending.map((a) => a.id) },
-      };
-    }
-
-    return { assignable: true };
+    return registryAssignability(
+      member,
+      member == null ? [] : this.registry.listAssignments(workerId),
+    );
   }
 }
 
@@ -162,40 +202,71 @@ export class NarrowingWorkerDirectory implements WorkerDirectoryPort {
 
   /** Identity, not eligibility — see the class comment. */
   isRegistered(workerId: string): boolean {
-    return this.base.isRegistered(workerId) || this.registry.isRegistered(workerId);
+    return this.#reads().isRegistered(workerId);
   }
 
   allowedCapabilities(workerId: string): readonly string[] {
-    // Not in the canonical execution directory => holds nothing, whatever the
-    // Registry granted. Registry grants narrow base capabilities; they never
-    // stand on their own.
-    if (!this.base.isRegistered(workerId)) return [];
-    if (!this.registry.isRegistered(workerId)) return this.base.allowedCapabilities(workerId);
-    const allowed = new Set(this.registry.allowedCapabilities(workerId));
-    return this.base.allowedCapabilities(workerId).filter((c) => allowed.has(c));
+    return this.#reads().allowedCapabilities(workerId);
   }
 
   assignability(workerId: string): WorkerAssignability {
-    if (!this.base.isRegistered(workerId)) {
-      // Unknown to the authority that decides who may execute. Reported as
-      // `worker_unknown` — which is what the base alone would have said — with
-      // the Registry sighting carried in details so the refusal is diagnosable
-      // ("it is in the Registry, but nobody registered it for execution")
-      // without inventing a new authority state.
-      return this.registry.isRegistered(workerId)
-        ? { assignable: false, reason: 'worker_unknown', details: { knownTo: 'registry_only' } }
-        : { assignable: false, reason: 'worker_unknown' };
-    }
-
-    // Any "no" wins. The Registry is consulted first only so that its richer
-    // reasons (replaced, handover_pending) are the ones reported when both
-    // directories would refuse.
-    if (this.registry.isRegistered(workerId)) {
-      const verdict = this.registry.assignability(workerId);
-      if (!verdict.assignable) return verdict;
-    }
-    return this.base.assignability(workerId);
+    return this.#reads().assignability(workerId);
   }
+
+  /** The one implementation of the rules, shared with `narrowedReads`. */
+  #reads(): WorkerDirectoryReads {
+    return narrowedReads(bindDirectoryReads(this.base), bindDirectoryReads(this.registry));
+  }
+}
+
+/**
+ * The narrowing rules of `NarrowingWorkerDirectory`, over two already-bound
+ * read triples instead of two objects — so the composition HQ builds for
+ * itself has NO prototype on the call path at any layer, inner or outer.
+ *
+ * The class above delegates here, so the composition an external caller
+ * constructs and the composition enforcement uses are the same three rules and
+ * cannot drift. The rules themselves are unchanged; read the class comment for
+ * why each is what it is.
+ */
+export function narrowedReads(
+  base: WorkerDirectoryReads,
+  registry: WorkerDirectoryReads,
+): WorkerDirectoryReads {
+  return {
+    /** Identity, not eligibility — see `NarrowingWorkerDirectory`. */
+    isRegistered: (workerId: string) => base.isRegistered(workerId) || registry.isRegistered(workerId),
+    allowedCapabilities: (workerId: string) => {
+      // Not in the canonical execution directory => holds nothing, whatever the
+      // Registry granted. Registry grants narrow base capabilities; they never
+      // stand on their own.
+      if (!base.isRegistered(workerId)) return [];
+      if (!registry.isRegistered(workerId)) return base.allowedCapabilities(workerId);
+      const allowed = new Set(registry.allowedCapabilities(workerId));
+      return base.allowedCapabilities(workerId).filter((c) => allowed.has(c));
+    },
+    assignability: (workerId: string) => {
+      if (!base.isRegistered(workerId)) {
+        // Unknown to the authority that decides who may execute. Reported as
+        // `worker_unknown` — which is what the base alone would have said —
+        // with the Registry sighting carried in details so the refusal is
+        // diagnosable ("it is in the Registry, but nobody registered it for
+        // execution") without inventing a new authority state.
+        return registry.isRegistered(workerId)
+          ? { assignable: false, reason: 'worker_unknown', details: { knownTo: 'registry_only' } }
+          : { assignable: false, reason: 'worker_unknown' };
+      }
+
+      // Any "no" wins. The Registry is consulted first only so that its richer
+      // reasons (replaced, handover_pending) are the ones reported when both
+      // directories would refuse.
+      if (registry.isRegistered(workerId)) {
+        const verdict = registry.assignability(workerId);
+        if (!verdict.assignable) return verdict;
+      }
+      return base.assignability(workerId);
+    },
+  };
 }
 
 /**
@@ -210,4 +281,20 @@ export function narrowByRegistry(
 ): WorkerDirectoryPort {
   if (registry == null) return base;
   return new NarrowingWorkerDirectory(base, new RegistryWorkerDirectory(registry));
+}
+
+/**
+ * Build the prototype-free worker-directory reads for a
+ * `HeadquarterOperations` instance — the `narrowByRegistry` of the enforcement
+ * path.
+ *
+ * With no Registry this returns `base` untouched, which is why enabling the
+ * seam is opt-in and the default behaviour is byte-for-byte what it was.
+ */
+export function composeDirectoryReads(
+  base: WorkerDirectoryReads,
+  registry: MemberDirectorySource | undefined | null,
+): WorkerDirectoryReads {
+  if (registry == null) return base;
+  return narrowedReads(base, registryDirectoryReads(registry));
 }
