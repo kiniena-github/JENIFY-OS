@@ -57,3 +57,20 @@ The Team Lead remains the one local Claude command center. GitHub is the externa
 ### Founder interruption policy
 
 Do not stop the Founder for routine technical choices that can be resolved safely by evidence, existing decisions, tests, or independent review. Escalate only when a genuine Founder-only gate, material unresolved product choice, irreversible/high-impact action, or external blocker is reached.
+
+## Jenify HQ canonical documentation
+
+Before performing any **Jenify HQ** architecture, implementation, review, test, or proof work, read these files in order:
+
+1. `docs/HEADQUARTER/JENIFY-HQ-BLUEPRINT-ARCHITECTURE.md`
+2. `docs/HEADQUARTER/JENIFY-HQ-IMPLEMENTATION-MASTER-PLAN.md`
+3. `docs/HEADQUARTER/JENIFY-HQ-CURRENT-STATUS.md`
+
+For HQ work:
+- The **Blueprint** defines what HQ is. Do not silently redefine the product while coding.
+- The **Implementation Master Plan** defines the staged build order. Do not jump to later phases without an explicit reason or recorded decision.
+- **Current Status** defines the live branch/PR/proof state and the next safe action.
+- If code, status, and blueprint conflict, stop and surface the conflict instead of guessing.
+- Important HQ claims require exact evidence. “Tests passed” or “done” is not enough without the relevant version/proof.
+- Do not auto-merge HQ changes, deploy to production, widen permissions, change credentials, or retry uncertain side effects unless the current mission explicitly authorizes it.
+- Existing JENIFY OS/Mesob protections in this repository remain in force while HQ is still hosted here.
